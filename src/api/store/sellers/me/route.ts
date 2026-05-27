@@ -1,6 +1,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
+import { extractClerkUserId } from '../../_utils/clerk-auth'
 
 function slugify(text: string) {
   return text
@@ -13,7 +14,7 @@ function slugify(text: string) {
 
 // GET /store/sellers/me — fetch current seller profile (requires Clerk auth)
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
-  const clerkUserId = (req as any).auth_context?.actor_id
+  const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Authentication required' })
   }
@@ -30,7 +31,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
 // POST /store/sellers/me — create seller profile on first onboarding
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const clerkUserId = (req as any).auth_context?.actor_id
+  const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Authentication required' })
   }
@@ -74,7 +75,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
 // PATCH /store/sellers/me — update seller profile
 export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
-  const clerkUserId = (req as any).auth_context?.actor_id
+  const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Authentication required' })
   }

@@ -3,6 +3,7 @@ import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { IProductModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
+import { extractClerkUserId } from '../../../_utils/clerk-auth'
 
 interface CreateProductBody {
   title: string
@@ -22,7 +23,7 @@ interface CreateProductBody {
 
 // POST /store/sellers/me/products — create a product for the authenticated seller
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const clerkUserId = (req as any).auth_context?.actor_id
+  const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Authentication required' })
   }

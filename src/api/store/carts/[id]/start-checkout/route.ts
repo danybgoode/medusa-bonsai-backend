@@ -29,6 +29,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     buyer_email?: string
     offer_amount_cents?: number   // accepted offer override
     offer_id?: string             // Supabase offer ID for webhook reconciliation
+    seller_id?: string            // skip expensive seller scan when caller already knows it
   }
 
   if (!body.provider) {
@@ -56,9 +57,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const item = cart.items[0] as any
   const productId = item.product_id ?? item.variant?.product_id
 
+  // For multi-item carts, build a combined title (used in payment provider display)
+  const allTitles = cart.items.map((i: any) => (i as any).title ?? 'Producto').filter(Boolean)
+  const productTitle = allTitles.length > 1
+    ? `${allTitles[0]} + ${allTitles.length - 1} más`
+    : (allTitles[0] ?? 'Producto')
+  const productImage = (item as any).thumbnail ?? null
+
   // ── Find seller for this product ──────────────────────────────────────────
   let seller: any = null
-  if (productId) {
+  if (body.seller_id) {
+    // Fast path — caller already knows the seller
+    const [found] = await sellerService.listSellers({ id: body.seller_id } as any, { take: 1 })
+    seller = found ?? null
+  } else if (productId) {
+    // Slow path — scan all sellers to find which one owns this product
     const allSellers = await sellerService.listSellers({}, { take: 500 })
     for (const s of allSellers) {
       try {
@@ -81,8 +94,6 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const currency = (cart.currency_code ?? 'mxn').toLowerCase()
   const priceCents = body.offer_amount_cents ?? Math.round(Number(cart.total ?? 0))
-  const productTitle = (item as any).title ?? 'Producto'
-  const productImage = (item as any).thumbnail ?? null
 
   const successUrl = `${SITE_URL}/payment/success?cart_id=${cartId}`
   const cancelUrl = `${SITE_URL}/l/${productId ?? cartId}?payment=cancelled`
