@@ -81,6 +81,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (q.min_price) listings = listings.filter((l: any) => l.price_cents != null && l.price_cents >= parseInt(q.min_price) * 100)
   if (q.max_price) listings = listings.filter((l: any) => l.price_cents != null && l.price_cents <= parseInt(q.max_price) * 100)
 
+  // Seller + listing type filters
+  if (q.seller_slug) {
+    const target = allSellers.find((s: any) => s.slug === q.seller_slug)
+    listings = target ? listings.filter((l: any) => l.shop_id === target.id) : []
+  }
+  if (q.listing_type) listings = listings.filter((l: any) => l.listing_type === q.listing_type)
+
   // Autos filters
   if (q.brand) listings = listings.filter((l: any) => (l.metadata?.brand as string ?? '').toLowerCase().includes(q.brand.toLowerCase()))
   if (q.year_from) listings = listings.filter((l: any) => parseInt(l.metadata?.year as string ?? '0') >= parseInt(q.year_from))
