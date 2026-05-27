@@ -4,6 +4,7 @@ import { IProductModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
+import { toListingShape } from '../../../_utils/listing'
 
 interface CreateProductBody {
   title: string
@@ -19,6 +20,59 @@ interface CreateProductBody {
   images?: Array<{ url: string; alt?: string }>
   tags?: string[]
   metadata?: Record<string, unknown>
+}
+
+// GET /store/sellers/me/products — list all products for the authenticated seller
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  const clerkUserId = extractClerkUserId(req)
+  if (!clerkUserId) {
+    return res.status(401).json({ message: 'Authentication required' })
+  }
+
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+  const [seller] = await sellerService.listSellers({ clerk_user_id: clerkUserId })
+  if (!seller) {
+    return res.status(404).json({ message: 'Seller profile not found' })
+  }
+
+  const remoteQuery = req.scope.resolve('remoteQuery')
+  const limit = Math.min(parseInt(req.query.limit as string ?? '100'), 200)
+  const offset = parseInt(req.query.offset as string ?? '0')
+
+  const { data: rows, metadata } = await remoteQuery.graph({
+    entity: 'seller',
+    fields: [
+      'id',
+      'products.id',
+      'products.title',
+      'products.description',
+      'products.status',
+      'products.metadata',
+      'products.created_at',
+      'products.variants.*',
+      'products.variants.prices.*',
+      'products.images.*',
+      'products.categories.*',
+      'products.type.*',
+      'products.tags.*',
+    ],
+    filters: { id: seller.id },
+    pagination: { take: limit, skip: offset },
+  })
+
+  const products = ((rows?.[0] as { products?: unknown[] } | undefined)?.products ?? [])
+  const listings = products
+    .map((product) => toListingShape(product, seller))
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+
+  res.json({
+    seller,
+    listings,
+    products,
+    count: metadata?.count ?? listings.length,
+    limit,
+    offset,
+  })
 }
 
 // POST /store/sellers/me/products — create a product for the authenticated seller
