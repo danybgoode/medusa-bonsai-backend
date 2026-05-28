@@ -16,11 +16,40 @@
 import Stripe from 'stripe'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
-import { ICartModuleService, IPaymentModuleService, IRegionModuleService } from '@medusajs/framework/types'
+import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
+
+type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none'
+
+type CheckoutShippingAddress = {
+  name?: string
+  phone?: string
+  line1?: string
+  line2?: string
+  city?: string
+  state?: string
+  postal_code?: string
+  country?: string
+}
+
+function medusaAddress(input?: CheckoutShippingAddress | null) {
+  if (!input) return null
+  const [firstName, ...rest] = (input.name ?? '').trim().split(/\s+/).filter(Boolean)
+  return {
+    first_name: firstName || undefined,
+    last_name: rest.join(' ') || undefined,
+    phone: input.phone || undefined,
+    address_1: input.line1 || undefined,
+    address_2: input.line2 || undefined,
+    city: input.city || undefined,
+    province: input.state || undefined,
+    postal_code: input.postal_code || undefined,
+    country_code: (input.country || 'mx').toLowerCase(),
+  }
+}
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
@@ -30,6 +59,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     offer_amount_cents?: number   // accepted offer override
     offer_id?: string             // Supabase offer ID for webhook reconciliation
     seller_id?: string            // skip expensive seller scan when caller already knows it
+    fulfillment_method?: FulfillmentMethod
+    pickup_spot_id?: string
+    shipping_address?: CheckoutShippingAddress
   }
 
   if (!body.provider) {
@@ -104,6 +136,30 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
   const sellerSettings = (sellerMeta.settings ?? {}) as Record<string, unknown>
+  const fulfillmentMethod = body.fulfillment_method ?? 'none'
+  const checkoutSelection = {
+    payment_method: body.provider,
+    fulfillment_method: fulfillmentMethod,
+    pickup_spot_id: body.pickup_spot_id ?? null,
+    has_shipping_address: !!body.shipping_address,
+  }
+
+  try {
+    await cartService.updateCarts(cartId, {
+      ...(body.shipping_address ? { shipping_address: medusaAddress(body.shipping_address) as any } : {}),
+      metadata: {
+        ...((cart as any).metadata ?? {}),
+        checkout_selection: checkoutSelection,
+        payment_method: body.provider,
+        fulfillment_method: fulfillmentMethod,
+        ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
+        ...(body.seller_id ? { seller_id: body.seller_id } : {}),
+        ...(body.offer_id ? { offer_id: body.offer_id } : {}),
+      },
+    } as any)
+  } catch (e) {
+    console.error('[start-checkout] cart selection update failed:', e)
+  }
 
   const successUrl = `${SITE_URL}/payment/success?cart_id=${cartId}`
   const cancelUrl = `${SITE_URL}/l/${productId ?? cartId}?payment=cancelled`
@@ -153,6 +209,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         cart_id: cartId,
         product_id: productId ?? '',
         seller_id: seller?.id ?? '',
+        payment_method: 'stripe',
+        fulfillment_method: fulfillmentMethod,
+        ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
       },
     })
@@ -197,6 +256,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         cart_id: cartId,
         product_id: productId ?? '',
         seller_id: seller?.id ?? '',
+        payment_method: 'mercadopago',
+        fulfillment_method: fulfillmentMethod,
+        ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
       },
     }

@@ -25,6 +25,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   let order: Record<string, unknown>
   try {
     const result = await orderService.retrieveOrder(orderId, {
+      select: [
+        'id', 'status', 'payment_status', 'fulfillment_status',
+        'total', 'subtotal', 'currency_code',
+        'email', 'metadata', 'created_at', 'updated_at',
+      ],
       relations: ['items', 'shipping_address', 'customer', 'fulfillments', 'payments'],
     })
     if (!result) return res.status(404).json({ message: 'Order not found' })

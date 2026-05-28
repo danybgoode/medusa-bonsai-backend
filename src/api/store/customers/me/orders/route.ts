@@ -50,7 +50,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         select: [
           'id', 'status', 'payment_status', 'fulfillment_status',
           'total', 'subtotal', 'currency_code',
-          'email', 'created_at', 'updated_at',
+          'email', 'metadata', 'created_at', 'updated_at',
         ],
         relations: ['items', 'shipping_address', 'fulfillments'],
       }

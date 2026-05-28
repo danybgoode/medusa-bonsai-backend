@@ -65,7 +65,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         select: [
           'id', 'status', 'payment_status', 'fulfillment_status',
           'total', 'subtotal', 'currency_code',
-          'email', 'created_at', 'updated_at',
+          'email', 'metadata', 'created_at', 'updated_at',
         ],
         relations: ['items', 'shipping_address', 'customer', 'fulfillments'],
       }
@@ -90,6 +90,9 @@ export function normalizeMedusaOrder(
   const item = (order.items as any[])?.[0]
   const sa = order.shipping_address as Record<string, string> | undefined
   const customer = order.customer as Record<string, string> | undefined
+  const metadata = (order.metadata ?? {}) as Record<string, unknown>
+  const checkoutSelection = (metadata.checkout_selection ?? {}) as Record<string, unknown>
+  const selectedFulfillment = (metadata.fulfillment_method ?? checkoutSelection.fulfillment_method ?? 'standard') as string
 
   // Map Medusa statuses → our status vocabulary
   let status = 'paid'
@@ -114,7 +117,7 @@ export function normalizeMedusaOrder(
     status,
     amount_cents: order.total ?? 0,
     currency: ((order.currency_code as string) ?? 'mxn').toUpperCase(),
-    shipping_method: 'standard',
+    shipping_method: selectedFulfillment,
     shipping_cost_cents: 0,
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
