@@ -417,13 +417,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
   } catch (e) {
     console.error('[start-checkout] Medusa payment session error:', e)
-    // Still return redirect_url even if Medusa session fails — user can pay,
-    // and we reconcile via webhook
-    return res.json({
-      redirect_url: redirectUrl,
-      cart_id: cartId,
-      payment_session_id: null,
-      _warning: 'Payment session not created in Medusa',
+    // Fail loudly: without a Medusa PaymentSession the cart can never be
+    // completed into an order, so reconciliation can't recover it either.
+    // Never hand the buyer a redirect to a payment we can't track — let them
+    // retry (the orphaned provider session simply expires).
+    return res.status(502).json({
+      message: 'No se pudo inicializar el pago de forma segura. Intenta de nuevo en un momento.',
+      code: 'PAYMENT_SESSION_FAILED',
     })
   }
 }
