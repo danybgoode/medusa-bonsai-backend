@@ -35,6 +35,16 @@ type CheckoutShippingAddress = {
   country?: string
 }
 
+type CheckoutShippingQuote = {
+  rate_id?: string
+  carrier?: string
+  service?: string
+  amount_cents?: number
+  currency?: string
+  delivery_estimate?: number | null
+  delivery_label?: string | null
+}
+
 function medusaAddress(input?: CheckoutShippingAddress | null) {
   if (!input) return null
   const [firstName, ...rest] = (input.name ?? '').trim().split(/\s+/).filter(Boolean)
@@ -51,6 +61,21 @@ function medusaAddress(input?: CheckoutShippingAddress | null) {
   }
 }
 
+function normalizeShippingQuote(input?: CheckoutShippingQuote | null) {
+  if (!input) return null
+  const amount = Math.max(0, Math.round(Number(input.amount_cents ?? 0)))
+  if (!amount || !input.rate_id || !input.carrier || !input.service) return null
+  return {
+    rate_id: String(input.rate_id).slice(0, 500),
+    carrier: String(input.carrier).slice(0, 60),
+    service: String(input.service).slice(0, 120),
+    amount_cents: amount,
+    currency: String(input.currency ?? 'MXN').toUpperCase().slice(0, 3),
+    delivery_estimate: input.delivery_estimate ?? null,
+    delivery_label: input.delivery_label ? String(input.delivery_label).slice(0, 80) : null,
+  }
+}
+
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
   const body = req.body as {
@@ -62,6 +87,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     fulfillment_method?: FulfillmentMethod
     pickup_spot_id?: string
     shipping_address?: CheckoutShippingAddress
+    shipping_quote?: CheckoutShippingQuote
   }
 
   if (!body.provider) {
@@ -126,6 +152,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const currency = (cart.currency_code ?? 'mxn').toLowerCase()
   const priceCents = body.offer_amount_cents ?? Math.round(Number(cart.total ?? 0))
+  const shippingQuote = normalizeShippingQuote(body.shipping_quote)
+  const shippingCents = shippingQuote?.amount_cents ?? 0
+  const checkoutTotalCents = priceCents + shippingCents
 
   if (!seller) {
     return res.status(422).json({
@@ -137,11 +166,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
   const sellerSettings = (sellerMeta.settings ?? {}) as Record<string, unknown>
   const fulfillmentMethod = body.fulfillment_method ?? 'none'
+  if (fulfillmentMethod === 'shipping' && !shippingQuote) {
+    return res.status(400).json({ message: 'Selecciona una tarifa de envío para continuar.' })
+  }
   const checkoutSelection = {
     payment_method: body.provider,
     fulfillment_method: fulfillmentMethod,
     pickup_spot_id: body.pickup_spot_id ?? null,
     has_shipping_address: !!body.shipping_address,
+    shipping_quote: shippingQuote,
   }
 
   try {
@@ -152,6 +185,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         checkout_selection: checkoutSelection,
         payment_method: body.provider,
         fulfillment_method: fulfillmentMethod,
+        ...(shippingQuote ? {
+          shipping_rate_id: shippingQuote.rate_id,
+          shipping_carrier: shippingQuote.carrier,
+          shipping_service: shippingQuote.service,
+          shipping_amount_cents: shippingQuote.amount_cents,
+          shipping_currency: shippingQuote.currency,
+          shipping_delivery_estimate: shippingQuote.delivery_estimate,
+          shipping_delivery_label: shippingQuote.delivery_label,
+        } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.seller_id ? { seller_id: body.seller_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
@@ -185,19 +227,33 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       })
     }
 
-    const session = await stripeClient.checkout.sessions.create({
-      mode: 'payment',
-      line_items: [{
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [{
+      quantity: 1,
+      price_data: {
+        currency,
+        unit_amount: priceCents,
+        product_data: {
+          name: productTitle,
+          ...(productImage ? { images: [productImage] } : {}),
+        },
+      },
+    }]
+    if (shippingQuote && shippingCents > 0) {
+      lineItems.push({
         quantity: 1,
         price_data: {
           currency,
-          unit_amount: priceCents,
+          unit_amount: shippingCents,
           product_data: {
-            name: productTitle,
-            ...(productImage ? { images: [productImage] } : {}),
+            name: `Envío - ${shippingQuote.carrier.toUpperCase()} ${shippingQuote.service}`,
           },
         },
-      }],
+      })
+    }
+
+    const session = await stripeClient.checkout.sessions.create({
+      mode: 'payment',
+      line_items: lineItems,
       payment_intent_data: {
         transfer_data: { destination: sellerStripeAccountId },
         application_fee_amount: 0,
@@ -211,6 +267,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         seller_id: seller?.id ?? '',
         payment_method: 'stripe',
         fulfillment_method: fulfillmentMethod,
+        ...(shippingQuote ? {
+          shipping_rate_id: shippingQuote.rate_id,
+          shipping_carrier: shippingQuote.carrier,
+          shipping_service: shippingQuote.service,
+          shipping_amount_cents: String(shippingQuote.amount_cents),
+          shipping_currency: shippingQuote.currency,
+          shipping_delivery_estimate: shippingQuote.delivery_estimate == null ? '' : String(shippingQuote.delivery_estimate),
+          shipping_delivery_label: shippingQuote.delivery_label ?? '',
+        } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
       },
@@ -237,14 +302,25 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       })
     }
 
-    const prefPayload = {
-      items: [{
+    const mpItems = [{
         id: productId ?? cartId,
         title: productTitle,
         quantity: 1,
         unit_price: priceCents / 100,
         currency_id: currency.toUpperCase(),
-      }],
+      }]
+    if (shippingQuote && shippingCents > 0) {
+      mpItems.push({
+        id: `${productId ?? cartId}-shipping`,
+        title: `Envío - ${shippingQuote.carrier.toUpperCase()} ${shippingQuote.service}`,
+        quantity: 1,
+        unit_price: shippingCents / 100,
+        currency_id: currency.toUpperCase(),
+      })
+    }
+
+    const prefPayload = {
+      items: mpItems,
       payer: body.buyer_email ? { email: body.buyer_email } : undefined,
       back_urls: {
         success: successUrl,
@@ -258,6 +334,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         seller_id: seller?.id ?? '',
         payment_method: 'mercadopago',
         fulfillment_method: fulfillmentMethod,
+        ...(shippingQuote ? {
+          shipping_rate_id: shippingQuote.rate_id,
+          shipping_carrier: shippingQuote.carrier,
+          shipping_service: shippingQuote.service,
+          shipping_amount_cents: String(shippingQuote.amount_cents),
+          shipping_currency: shippingQuote.currency,
+          shipping_delivery_estimate: shippingQuote.delivery_estimate == null ? '' : String(shippingQuote.delivery_estimate),
+          shipping_delivery_label: shippingQuote.delivery_label ?? '',
+        } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
       },
@@ -293,7 +378,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   try {
     const paymentCollection = await paymentService.createPaymentCollections({
       currency_code: currency,
-      amount: priceCents,
+      amount: checkoutTotalCents,
     })
 
     // createPaymentSession accepts a single session DTO (singular method name in v2)
@@ -302,7 +387,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       {
         provider_id: providerId,
         data: providerData,
-        amount: priceCents,
+        amount: checkoutTotalCents,
         currency_code: currency,
         context: {},
       }
