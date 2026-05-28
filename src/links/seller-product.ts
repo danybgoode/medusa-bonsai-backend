@@ -6,5 +6,8 @@ import ProductModule from '@medusajs/medusa/product'
 // Creates a pivot table: seller_id ↔ product_id
 export default defineLink(
   SellerModule.linkable.seller,
-  ProductModule.linkable.product
+  {
+    linkable: ProductModule.linkable.product,
+    isList: true,
+  }
 )

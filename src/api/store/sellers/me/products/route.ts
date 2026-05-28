@@ -39,37 +39,54 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const limit = Math.min(parseInt(req.query.limit as string ?? '100'), 200)
   const offset = parseInt(req.query.offset as string ?? '0')
 
-  const { data: rows, metadata } = await remoteQuery.graph({
+  const { data: rows } = await remoteQuery.graph({
     entity: 'seller',
-    fields: [
-      'id',
-      'products.id',
-      'products.title',
-      'products.description',
-      'products.status',
-      'products.metadata',
-      'products.created_at',
-      'products.variants.*',
-      'products.variants.prices.*',
-      'products.images.*',
-      'products.categories.*',
-      'products.type.*',
-      'products.tags.*',
-    ],
+    fields: ['id', 'products.id'],
     filters: { id: seller.id },
-    pagination: { take: limit, skip: offset },
   })
 
-  const products = ((rows?.[0] as { products?: unknown[] } | undefined)?.products ?? [])
+  const linkedIds = (((rows?.[0] as { products?: Array<{ id: string }> } | undefined)?.products ?? [])
+    .map((product) => product.id))
+  const linkedIdSet = new Set(linkedIds)
+
+  if (linkedIds.length === 0) {
+    return res.json({
+      seller,
+      listings: [],
+      products: [],
+      count: 0,
+      limit,
+      offset,
+    })
+  }
+
+  const { data: allProducts } = await remoteQuery.graph({
+    entity: 'product',
+    fields: [
+      'id', 'title', 'description', 'status', 'metadata', 'created_at',
+      'variants.*', 'variants.prices.*',
+      'images.*',
+      'categories.*',
+      'type.*',
+      'tags.*',
+    ],
+    pagination: { take: 2000, skip: 0 },
+  })
+
+  const products = (allProducts ?? [])
+    .filter((product: { id: string }) => linkedIdSet.has(product.id))
+    .sort((a: { created_at?: string | Date }, b: { created_at?: string | Date }) =>
+      new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
+    )
+    .slice(offset, offset + limit)
   const listings = products
     .map((product) => toListingShape(product, seller))
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 
   res.json({
     seller,
     listings,
     products,
-    count: metadata?.count ?? listings.length,
+    count: linkedIds.length,
     limit,
     offset,
   })

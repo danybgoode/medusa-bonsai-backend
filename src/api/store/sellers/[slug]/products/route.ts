@@ -18,19 +18,52 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const limit = Math.min(parseInt(req.query.limit as string ?? '20'), 50)
   const offset = parseInt(req.query.offset as string ?? '0')
 
-  const { data: sellerProducts, metadata } = await remoteQuery.graph({
+  const { data: sellerRows } = await remoteQuery.graph({
     entity: 'seller',
-    fields: ['id', 'products.*', 'products.variants.*', 'products.images.*'],
+    fields: ['id', 'products.id'],
     filters: { id: seller.id },
-    pagination: { take: limit, skip: offset },
   })
 
-  const products = (sellerProducts?.[0] as any)?.products ?? []
+  const linkedIds = (((sellerRows?.[0] as { products?: Array<{ id: string }> } | undefined)?.products ?? [])
+    .map((product) => product.id))
+  const linkedIdSet = new Set(linkedIds)
+
+  if (linkedIds.length === 0) {
+    return res.json({
+      seller,
+      products: [],
+      count: 0,
+      limit,
+      offset,
+    })
+  }
+
+  const { data: allProducts } = await remoteQuery.graph({
+    entity: 'product',
+    fields: [
+      'id', 'title', 'description', 'status', 'metadata', 'created_at',
+      'variants.*', 'variants.prices.*',
+      'images.*',
+      'categories.*',
+      'type.*',
+      'tags.*',
+    ],
+    filters: { status: 'published' },
+    pagination: { take: 2000, skip: 0 },
+  })
+
+  const matchedProducts = (allProducts ?? [])
+    .filter((product: { id: string }) => linkedIdSet.has(product.id))
+    .sort((a: { created_at?: string | Date }, b: { created_at?: string | Date }) =>
+      new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
+    )
+  const products = matchedProducts
+    .slice(offset, offset + limit)
 
   res.json({
-    seller: { id: seller.id, slug: seller.slug, name: seller.name },
+    seller,
     products,
-    count: metadata?.count ?? products.length,
+    count: matchedProducts.length,
     limit,
     offset,
   })
