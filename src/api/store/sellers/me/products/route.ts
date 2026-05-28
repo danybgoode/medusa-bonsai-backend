@@ -1,6 +1,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { IProductModuleService } from '@medusajs/framework/types'
+import { createProductsWorkflow } from '@medusajs/medusa/core-flows'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
@@ -134,33 +135,38 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     ...(body.state ? { state: body.state } : {}),
     ...(body.municipio ? { municipio: body.municipio } : {}),
     ...(body.location ? { location: body.location } : {}),
+    ...(body.price_cents != null ? { price_cents: body.price_cents } : {}),
+    currency: body.currency ?? 'MXN',
+    listing_type: body.listing_type ?? 'product',
     views: 0,
     ...(body.metadata ?? {}),
   }
 
   // ── Create Medusa product ────────────────────────────────────────────────
-  const product = await (productService as any).createProducts({
-    title: body.title.trim().slice(0, 100),
-    description: body.description?.trim() || null,
-    status: 'published' as const,
-    ...(categoryId ? { categories: [{ id: categoryId }] } : {}),
-    ...(ptype ? { type_id: ptype.id } : {}),
-    images: (body.images ?? []).map((img) => ({
-      url: img.url,
-      metadata: img.alt ? { alt: img.alt } : undefined,
-    })),
-    tags: (body.tags ?? []).map((v) => ({ value: v })),
-    metadata,
-    variants: [
-      {
-        title: 'Default',
-        manage_inventory: false,
-        prices: body.price_cents != null && body.price_cents > 0
-          ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
-          : [],
-      },
-    ],
+  const { result } = await createProductsWorkflow(req.scope).run({
+    input: {
+      products: [{
+        title: body.title.trim().slice(0, 100),
+        description: body.description?.trim() || null,
+        status: 'published' as const,
+        ...(categoryId ? { category_ids: [categoryId] } : {}),
+        ...(ptype ? { type_id: ptype.id } : {}),
+        images: (body.images ?? []).map((img) => ({
+          url: img.url,
+          metadata: img.alt ? { alt: img.alt } : undefined,
+        })),
+        metadata,
+        variants: [{
+          title: 'Default',
+          manage_inventory: false,
+          prices: body.price_cents != null && body.price_cents > 0
+            ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
+            : [],
+        }],
+      }],
+    },
   })
+  const product = result[0]
 
   // ── Link product to seller ───────────────────────────────────────────────
   await remoteLink.create({

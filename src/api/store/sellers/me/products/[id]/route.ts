@@ -1,6 +1,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { IProductModuleService, IPricingModuleService } from '@medusajs/framework/types'
+import { updateProductsWorkflow } from '@medusajs/medusa/core-flows'
 import { SELLER_MODULE } from '../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../modules/seller/service'
 
@@ -90,6 +91,18 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
           price_set_id: priceSetId,
           prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
         }])
+      } else {
+        await updateProductsWorkflow(req.scope).run({
+          input: {
+            selector: { id },
+            update: {
+              variants: [{
+                id: variant.id,
+                prices: [{ amount: body.price_cents, currency_code: 'mxn' }],
+              }],
+            },
+          },
+        })
       }
     }
   }

@@ -77,6 +77,7 @@ export function toListingShape(product: any, seller?: any): ListingShape {
   const variant = product.variants?.[0]
   const mxnPrice = variant?.prices?.find((p: any) => p.currency_code === 'mxn')
   const priceObj = mxnPrice ?? variant?.prices?.[0]
+  const fallbackPrice = typeof meta.price_cents === 'number' ? meta.price_cents : null
 
   return {
     id: product.id,
@@ -84,10 +85,10 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     medusa_product_id: product.id,
     title: product.title,
     description: product.description ?? null,
-    price_cents: priceObj?.amount ?? null,
-    currency: (priceObj?.currency_code ?? 'mxn').toUpperCase(),
+    price_cents: priceObj?.amount ?? fallbackPrice,
+    currency: (priceObj?.currency_code ?? (meta.currency as string | undefined) ?? 'mxn').toUpperCase(),
     condition: (meta.condition as string) ?? null,
-    listing_type: product.type?.value ?? 'product',
+    listing_type: (product.type?.value ?? (meta.listing_type as string | undefined) ?? 'product') as string,
     category: product.categories?.[0]?.handle ?? null,
     state: (meta.state as string) ?? null,
     municipio: (meta.municipio as string) ?? null,
