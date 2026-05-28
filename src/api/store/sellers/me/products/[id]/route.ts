@@ -4,9 +4,10 @@ import { IProductModuleService, IPricingModuleService } from '@medusajs/framewor
 import { updateProductsWorkflow } from '@medusajs/medusa/core-flows'
 import { SELLER_MODULE } from '../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../modules/seller/service'
+import { extractClerkUserId } from '../../../../_utils/clerk-auth'
 
 async function resolveOwnership(req: MedusaRequest, productId: string) {
-  const clerkUserId = (req as any).auth_context?.actor_id
+  const clerkUserId = extractClerkUserId(req) ?? (req as any).auth_context?.actor_id
   if (!clerkUserId) return { seller: null, error: 'Authentication required', status: 401 }
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)

@@ -155,9 +155,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           url: img.url,
           metadata: img.alt ? { alt: img.alt } : undefined,
         })),
+        options: [{
+          title: 'Default',
+          values: ['Default'],
+        }],
         metadata,
         variants: [{
           title: 'Default',
+          options: {
+            Default: 'Default',
+          },
           manage_inventory: false,
           prices: body.price_cents != null && body.price_cents > 0
             ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
