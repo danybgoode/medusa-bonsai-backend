@@ -95,6 +95,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const currency = (cart.currency_code ?? 'mxn').toLowerCase()
   const priceCents = body.offer_amount_cents ?? Math.round(Number(cart.total ?? 0))
 
+  if (!seller) {
+    return res.status(422).json({
+      message: 'Este anuncio aún no tiene vendedor registrado.',
+      code: 'SELLER_NOT_CONNECTED',
+    })
+  }
+
+  const sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
+  const sellerSettings = (sellerMeta.settings ?? {}) as Record<string, unknown>
+
   const successUrl = `${SITE_URL}/payment/success?cart_id=${cartId}`
   const cancelUrl = `${SITE_URL}/l/${productId ?? cartId}?payment=cancelled`
 
@@ -109,11 +119,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
     const stripeClient = new Stripe(stripeKey, { apiVersion: '2025-09-30.clover' as any })
 
-    const sellerMeta = (seller?.metadata ?? {}) as Record<string, unknown>
-    const stripeSettings = (sellerMeta.settings as Record<string, unknown> | undefined)?.stripe as Record<string, unknown> | undefined
+    const stripeSettings = sellerSettings.stripe as Record<string, unknown> | undefined
     const sellerStripeAccountId = stripeSettings?.account_id as string | undefined
 
-    if (!sellerStripeAccountId || !stripeSettings?.charges_enabled) {
+    if (stripeSettings?.enabled === false || !sellerStripeAccountId || !stripeSettings?.charges_enabled) {
       return res.status(422).json({
         message: 'Este vendedor aún no ha activado los pagos. Contacta al vendedor directamente.',
         code: 'SELLER_NOT_CONNECTED',
@@ -161,6 +170,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   else {
     const mpToken = process.env.MP_ACCESS_TOKEN
     if (!mpToken) return res.status(500).json({ message: 'MercadoPago not configured' })
+
+    if (sellerMeta.mp_enabled === false) {
+      return res.status(422).json({
+        message: 'Este vendedor no acepta Mercado Pago en este momento.',
+        code: 'SELLER_MP_DISABLED',
+      })
+    }
 
     const prefPayload = {
       items: [{
