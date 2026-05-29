@@ -16,6 +16,46 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { linkProductsToSalesChannelWorkflow } from '@medusajs/medusa/core-flows'
 
+function authed(req: MedusaRequest): boolean {
+  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
+  const headerSecret = req.headers['x-internal-secret'] as string | undefined
+  return !internalSecret || headerSecret === internalSecret
+}
+
+/**
+ * GET — diagnostic: report the store default channel, all channels, and which
+ * channel(s) the publishable key(s) are linked to (the channel the storefront
+ * actually queries). Lets us confirm the backfill targeted the right channel.
+ */
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  if (!authed(req)) return res.status(401).json({ message: 'Unauthorized' })
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+  const storeService: any = req.scope.resolve(Modules.STORE)
+  const [store] = await storeService.listStores({}, { select: ['id', 'default_sales_channel_id'], take: 1 })
+
+  const { data: channels } = await query.graph({
+    entity: 'sales_channel',
+    fields: ['id', 'name', 'is_disabled'],
+  })
+  const { data: keys } = await query.graph({
+    entity: 'api_key',
+    fields: ['id', 'type', 'title', 'sales_channels.id', 'sales_channels.name'],
+    filters: { type: 'publishable' } as any,
+  })
+
+  return res.json({
+    store_default_sales_channel_id: store?.default_sales_channel_id ?? null,
+    env_MEDUSA_SALES_CHANNEL_ID: process.env.MEDUSA_SALES_CHANNEL_ID ?? null,
+    sales_channels: channels,
+    publishable_keys: (keys as any[]).map(k => ({
+      id: k.id,
+      title: k.title,
+      sales_channels: (k.sales_channels ?? []).map((sc: any) => ({ id: sc.id, name: sc.name })),
+    })),
+  })
+}
+
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
   const headerSecret = req.headers['x-internal-secret'] as string | undefined
