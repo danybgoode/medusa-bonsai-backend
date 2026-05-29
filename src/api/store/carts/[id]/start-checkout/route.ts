@@ -101,9 +101,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const remoteQuery = req.scope.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
 
   // ── Load cart ─────────────────────────────────────────────────────────────
+  // Only request relations within the cart module. `region` and `items.variant`
+  // live in other modules and can't be populated here (MikroORM throws
+  // "Entity 'Cart' does not have property 'region'"). Line items already carry
+  // denormalized product_id / title / thumbnail, and the cart has currency_code.
   const [cart] = await cartService.listCarts(
     { id: cartId },
-    { relations: ['items', 'items.variant', 'region'] }
+    { relations: ['items'] }
   )
 
   if (!cart) {
@@ -152,7 +156,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const currency = (cart.currency_code ?? 'mxn').toLowerCase()
-  const priceCents = body.offer_amount_cents ?? Math.round(Number(cart.total ?? 0))
+  // A plain listCarts may not compute `total`; fall back to summing line items
+  // (same unit as cart.total — variant prices are stored as integer cents).
+  const itemsTotalCents = (cart.items ?? []).reduce(
+    (sum: number, i: any) => sum + Math.round(Number(i.unit_price ?? 0) * Number(i.quantity ?? 1)),
+    0,
+  )
+  const priceCents = body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
   const shippingQuote = normalizeShippingQuote(body.shipping_quote)
   const shippingCents = shippingQuote?.amount_cents ?? 0
   const checkoutTotalCents = priceCents + shippingCents
