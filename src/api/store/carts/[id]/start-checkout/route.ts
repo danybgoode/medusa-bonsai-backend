@@ -19,7 +19,7 @@ import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
-import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
+import { resolveSellerMpToken, sellerMpConnected, getSellerMp, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 
@@ -338,9 +338,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // 0% platform fee by default (MP marketplace_fee is an absolute amount).
     const marketplaceFee = Math.round(checkoutTotalCents * MP_MARKETPLACE_FEE_RATE) / 100
 
+    // In sandbox (test seller token), MercadoPago rejects a real (non-test-user)
+    // email as the payer → "algo salió mal" with no merchant order. Only prefill
+    // payer.email in live mode; in test, let MP collect the (test) buyer.
+    const mpIsTest = getSellerMp(seller).live_mode === false
     const prefPayload = {
       items: mpItems,
-      payer: body.buyer_email ? { email: body.buyer_email } : undefined,
+      payer: (body.buyer_email && !mpIsTest) ? { email: body.buyer_email } : undefined,
       ...(marketplaceFee > 0 ? { marketplace_fee: marketplaceFee } : {}),
       notification_url: `${SITE_URL}/api/webhooks/mercadopago?seller_id=${encodeURIComponent(seller.id)}`,
       back_urls: {
