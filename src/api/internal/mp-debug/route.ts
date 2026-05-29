@@ -37,6 +37,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     seller_mp: {
       user_id: mp.user_id,
       connected: mp.connected,
+      enabled: mp.enabled,
       live_mode: mp.live_mode,
       expires_at: mp.expires_at,
       has_access_token: !!mp.access_token,
@@ -45,6 +46,25 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const headers = { Authorization: `Bearer ${token}` }
+
+  // Account status of the connected seller — reveals if MP considers the account
+  // able to COLLECT (site_status, restrictions, identification, etc.).
+  try {
+    const me = await fetch('https://api.mercadopago.com/users/me', { headers })
+    const meData = await me.json().catch(() => null) as any
+    out.account = meData ? {
+      http: me.status,
+      id: meData.id,
+      nickname: meData.nickname,
+      site_id: meData.site_id,
+      user_type: meData.user_type,
+      site_status: meData.site_status,
+      status: meData.status,
+      tags: meData.tags,
+      seller_experience: meData.seller_experience,
+      registration_identifiers: meData.registration_identifiers,
+    } : { http: me.status }
+  } catch (e) { out.account_error = String(e) }
 
   // Recent payment attempts on this seller's account — shows MP's status_detail
   // (the real reason a checkout failed), no preference_id needed.

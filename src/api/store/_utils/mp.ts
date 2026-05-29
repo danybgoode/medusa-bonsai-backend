@@ -31,7 +31,9 @@ export function getSellerMp(seller: any): SellerMpSettings {
 
 export function sellerMpConnected(seller: any): boolean {
   const mp = getSellerMp(seller)
-  return !!(mp.connected && mp.access_token && mp.enabled !== false)
+  // Gate on connected + token only. No pause-MP UI exists; the legacy `enabled`
+  // flag (set false by Desconectar) only caused reconnects to be wrongly blocked.
+  return !!(mp.connected && mp.access_token)
 }
 
 /**
