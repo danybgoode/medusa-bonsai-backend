@@ -2,6 +2,44 @@ import { loadEnv, defineConfig } from '@medusajs/framework/utils'
 
 loadEnv(process.env.NODE_ENV || 'development', process.cwd())
 
+const REDIS_URL = process.env.REDIS_URL
+
+// Redis-backed infrastructure modules. Gated on REDIS_URL so local dev without a
+// Redis still works (Medusa falls back to its in-memory simulated cache / event
+// bus / workflow engine). In production (GCP) REDIS_URL points at Memorystore —
+// required for durable, retryable workflows, a shared cache, distributed locking
+// (so scheduled jobs don't double-fire across instances), and for eventually
+// splitting the worker into its own service.
+const redisModules = REDIS_URL
+  ? [
+      {
+        resolve: '@medusajs/medusa/cache-redis',
+        options: { redisUrl: REDIS_URL },
+      },
+      {
+        resolve: '@medusajs/medusa/event-bus-redis',
+        options: { redisUrl: REDIS_URL },
+      },
+      {
+        resolve: '@medusajs/medusa/workflow-engine-redis',
+        options: { redis: { url: REDIS_URL } },
+      },
+      {
+        resolve: '@medusajs/medusa/locking',
+        options: {
+          providers: [
+            {
+              resolve: '@medusajs/medusa/locking-redis',
+              id: 'locking-redis',
+              is_default: true,
+              options: { redisUrl: REDIS_URL },
+            },
+          ],
+        },
+      },
+    ]
+  : []
+
 module.exports = defineConfig({
   admin: {
     disable: process.env.NODE_ENV === 'production',
@@ -9,6 +47,14 @@ module.exports = defineConfig({
   },
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
+    redisUrl: REDIS_URL,
+    // 'shared' (default) runs API + jobs in one process. On GCP set to 'server'
+    // on the Cloud Run web service and 'worker' on a separate worker service.
+    workerMode: process.env.MEDUSA_WORKER_MODE as
+      | 'shared'
+      | 'worker'
+      | 'server'
+      | undefined,
     http: {
       storeCors: process.env.STORE_CORS!,
       adminCors: process.env.ADMIN_CORS!,
@@ -19,6 +65,10 @@ module.exports = defineConfig({
   },
 
   modules: [
+    // ── Redis-backed infra (cache, event bus, workflow engine, locking) ─────────
+    // Empty in local dev (no REDIS_URL) → Medusa uses in-memory defaults.
+    ...redisModules,
+
     // ── Payment providers ──────────────────────────────────────────────────────
     {
       resolve: '@medusajs/medusa/payment',

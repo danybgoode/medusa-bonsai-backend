@@ -1,0 +1,49 @@
+# CI/CD: build the Medusa image and deploy to Cloud Run on every push to main.
+# Wired via a Cloud Build trigger on the medusa-bonsai-backend repo (see
+# infra/gcp/cicd-setup.sh). Build context is this repo root (= apps/backend).
+#
+# The deploy step only swaps the image — env vars, secrets, VPC connector, SA,
+# scaling and CORS were set once by infra/gcp/deploy.sh and Cloud Run preserves
+# them across image-only deploys.
+
+substitutions:
+  _REGION: us-east4
+  _AR_REPO: medusa
+  _SERVICE: medusa-web
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8        # admin bundle build is memory/CPU-hungry
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:$SHORT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:latest'
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:$SHORT_SHA'
+      - -t
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:latest'
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend'
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - '${_SERVICE}'
+      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:$SHORT_SHA'
+      - '--region=${_REGION}'
+      - --quiet
