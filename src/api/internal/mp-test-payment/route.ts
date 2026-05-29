@@ -37,8 +37,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
   let seller: any
-  if (body.seller_id) ;[seller] = await sellerService.listSellers({ id: body.seller_id } as any, { take: 1 })
-  else if (body.seller_slug) ;[seller] = await sellerService.listSellers({ slug: body.seller_slug } as any, { take: 1 })
+  if (body.seller_id) {
+    const r = await sellerService.listSellers({ id: body.seller_id } as any, { take: 1 })
+    seller = r[0]
+  } else if (body.seller_slug) {
+    const r = await sellerService.listSellers({ slug: body.seller_slug } as any, { take: 1 })
+    seller = r[0]
+  }
   if (!seller) return res.status(404).json({ message: 'seller not found (pass seller_slug or seller_id)' })
 
   const token = await resolveSellerMpToken(sellerService, seller)
