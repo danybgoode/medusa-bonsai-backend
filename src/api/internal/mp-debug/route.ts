@@ -1,0 +1,83 @@
+/**
+ * GET /internal/mp-debug?seller_slug=...|seller_id=...&preference_id=...
+ *
+ * Diagnostic (x-internal-secret): inspects a MercadoPago preference + its
+ * merchant orders / payments using the SELLER's token, to surface why a
+ * checkout failed at MP (status_detail, stored preference config). Read-only.
+ */
+
+import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { SELLER_MODULE } from '../../../modules/seller'
+import SellerModuleService from '../../../modules/seller/service'
+import { resolveSellerMpToken } from '../../store/_utils/mp'
+
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
+  if (internalSecret && (req.headers['x-internal-secret'] as string | undefined) !== internalSecret) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
+  const q = req.query as Record<string, string | undefined>
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+
+  let seller: any
+  if (q.seller_id) {
+    ;[seller] = await sellerService.listSellers({ id: q.seller_id } as any, { take: 1 })
+  } else if (q.seller_slug) {
+    ;[seller] = await sellerService.listSellers({ slug: q.seller_slug } as any, { take: 1 })
+  }
+  if (!seller) return res.status(404).json({ message: 'seller not found (pass seller_slug or seller_id)' })
+
+  const token = await resolveSellerMpToken(sellerService, seller)
+  if (!token) return res.status(422).json({ message: 'seller has no MP token' })
+
+  const mp = ((seller.metadata?.settings as any)?.mercadopago ?? {}) as Record<string, any>
+  const out: Record<string, unknown> = {
+    seller: { id: seller.id, slug: seller.slug },
+    seller_mp: {
+      user_id: mp.user_id,
+      connected: mp.connected,
+      live_mode: mp.live_mode,
+      expires_at: mp.expires_at,
+      has_access_token: !!mp.access_token,
+      public_key_prefix: String(mp.public_key ?? '').slice(0, 14),
+    },
+  }
+
+  const headers = { Authorization: `Bearer ${token}` }
+
+  if (q.preference_id) {
+    try {
+      const pr = await fetch(`https://api.mercadopago.com/checkout/preferences/${q.preference_id}`, { headers })
+      const pref = await pr.json().catch(() => null) as any
+      out.preference = pref ? {
+        status: pr.status,
+        collector_id: pref.collector_id,
+        marketplace: pref.marketplace,
+        marketplace_fee: pref.marketplace_fee,
+        notification_url: pref.notification_url,
+        auto_return: pref.auto_return,
+        back_urls: pref.back_urls,
+        items: pref.items,
+        payer: pref.payer,
+      } : { status: pr.status, error: 'no body' }
+    } catch (e) { out.preference_error = String(e) }
+
+    try {
+      const mo = await fetch(`https://api.mercadopago.com/merchant_orders/search?preference_id=${encodeURIComponent(q.preference_id)}`, { headers })
+      const data = await mo.json().catch(() => null) as any
+      out.merchant_orders = (data?.elements ?? []).map((el: any) => ({
+        id: el.id,
+        status: el.status,
+        order_status: el.order_status,
+        total_amount: el.total_amount,
+        paid_amount: el.paid_amount,
+        payments: (el.payments ?? []).map((p: any) => ({
+          id: p.id, status: p.status, status_detail: p.status_detail, amount: p.transaction_amount,
+        })),
+      }))
+    } catch (e) { out.merchant_orders_error = String(e) }
+  }
+
+  return res.json(out)
+}
