@@ -142,6 +142,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     ...(body.metadata ?? {}),
   }
 
+  // ── Resolve the sales channel ────────────────────────────────────────────
+  // The product MUST be in the store's sales channel, otherwise the standard
+  // (channel-scoped) /store/products endpoint 404s and checkout fails with
+  // "Product not found" even though the custom /store/listings endpoint shows it.
+  let salesChannelId: string | undefined = process.env.MEDUSA_SALES_CHANNEL_ID || undefined
+  if (!salesChannelId) {
+    try {
+      const storeService: any = req.scope.resolve(Modules.STORE)
+      const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
+      salesChannelId = store?.default_sales_channel_id ?? undefined
+    } catch (e) {
+      console.error('[sellers/me/products] sales channel resolve failed:', e)
+    }
+  }
+
   // ── Create Medusa product ────────────────────────────────────────────────
   const { result } = await createProductsWorkflow(req.scope).run({
     input: {
@@ -149,6 +164,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         title: body.title.trim().slice(0, 100),
         description: body.description?.trim() || null,
         status: 'published' as const,
+        ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
         ...(categoryId ? { category_ids: [categoryId] } : {}),
         ...(ptype ? { type_id: ptype.id } : {}),
         images: (body.images ?? []).map((img) => ({
