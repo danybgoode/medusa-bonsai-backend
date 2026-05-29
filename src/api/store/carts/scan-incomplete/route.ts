@@ -23,6 +23,9 @@ import Stripe from 'stripe'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
+import { SELLER_MODULE } from '../../../../modules/seller'
+import SellerModuleService from '../../../../modules/seller/service'
+import { resolveSellerMpToken } from '../../_utils/mp'
 
 const STRIPE_PROVIDER_ID = 'pp_stripe-connect_stripe-connect'
 const MP_PROVIDER_ID = 'pp_mercadopago_mercadopago'
@@ -81,10 +84,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
   const paymentService: IPaymentModuleService = req.scope.resolve(Modules.PAYMENT)
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
   const stripeKey = process.env.STRIPE_SECRET_KEY
   const stripeClient = stripeKey ? new Stripe(stripeKey, { apiVersion: '2025-09-30.clover' as any }) : null
-  const mpToken = process.env.MP_ACCESS_TOKEN
 
   // ── Candidate carts: not completed, recent ────────────────────────────────
   const carts = await cartService.listCarts(
@@ -153,8 +156,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         ready.push({ ...base, provider: 'stripe', stripe_session_id: stripeSessionId, mp_payment_id: null })
       }
 
-      // ── MercadoPago ──────────────────────────────────────────────────────────
-      else if (provider === 'mercadopago' && mpToken) {
+      // ── MercadoPago (per-seller marketplace token) ───────────────────────────
+      else if (provider === 'mercadopago') {
+        const sellerId = (meta.seller_id as string | undefined) ?? base.seller_id
+        if (!sellerId) continue
+        const [seller] = await sellerService.listSellers({ id: sellerId } as any, { take: 1 })
+        const mpToken = seller ? await resolveSellerMpToken(sellerService, seller) : null
+        if (!mpToken) continue
+
         const session = sessions.find((s: any) => s.provider_id === MP_PROVIDER_ID)
         const data = (session?.data ?? {}) as Record<string, any>
         if (!session) continue

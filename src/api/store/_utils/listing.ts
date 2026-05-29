@@ -52,6 +52,21 @@ export interface SellerShape {
   custom_domain_vercel_ok: false
 }
 
+/**
+ * Strip seller secrets before metadata is exposed via the public Store API.
+ * MercadoPago marketplace OAuth stores the seller's access/refresh tokens in
+ * settings.mercadopago — these must never reach the storefront. Safe status
+ * fields (connected/enabled/live_mode/user_id/public_key) are retained so the
+ * frontend can gate the MP button.
+ */
+function sanitizeSellerMetadata(metadata: any): any {
+  if (!metadata || typeof metadata !== 'object') return metadata ?? null
+  const settings = (metadata as any).settings
+  if (!settings || typeof settings !== 'object' || !settings.mercadopago) return metadata
+  const { access_token, refresh_token, ...safeMp } = settings.mercadopago
+  return { ...metadata, settings: { ...settings, mercadopago: safeMp } }
+}
+
 export function toSellerShape(seller: any): SellerShape {
   return {
     id: seller.id,
@@ -64,7 +79,7 @@ export function toSellerShape(seller: any): SellerShape {
     verified: seller.verified ?? false,
     source: seller.source ?? null,
     source_url: seller.source_url ?? null,
-    metadata: seller.metadata ?? null,
+    metadata: sanitizeSellerMetadata(seller.metadata),
     created_at: seller.created_at,
     custom_domain: null,
     custom_domain_verified: false,

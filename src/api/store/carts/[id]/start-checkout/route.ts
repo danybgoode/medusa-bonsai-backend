@@ -19,6 +19,7 @@ import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
+import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 
@@ -292,13 +293,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   // ── MercadoPago ───────────────────────────────────────────────────────────
   else {
-    const mpToken = process.env.MP_ACCESS_TOKEN
-    if (!mpToken) return res.status(500).json({ message: 'MercadoPago not configured' })
-
-    if (sellerMeta.mp_enabled === false) {
+    if (!sellerMpConnected(seller)) {
       return res.status(422).json({
-        message: 'Este vendedor no acepta Mercado Pago en este momento.',
-        code: 'SELLER_MP_DISABLED',
+        message: 'Este vendedor aún no ha conectado Mercado Pago.',
+        code: 'SELLER_MP_NOT_CONNECTED',
+      })
+    }
+
+    const sellerMpToken = await resolveSellerMpToken(sellerService, seller)
+    if (!sellerMpToken) {
+      return res.status(422).json({
+        message: 'La conexión de Mercado Pago del vendedor expiró. Pídele que la reconecte.',
+        code: 'MP_TOKEN_EXPIRED',
       })
     }
 
@@ -319,9 +325,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       })
     }
 
+    // 0% platform fee by default (MP marketplace_fee is an absolute amount).
+    const marketplaceFee = Math.round(checkoutTotalCents * MP_MARKETPLACE_FEE_RATE) / 100
+
     const prefPayload = {
       items: mpItems,
       payer: body.buyer_email ? { email: body.buyer_email } : undefined,
+      ...(marketplaceFee > 0 ? { marketplace_fee: marketplaceFee } : {}),
+      notification_url: `${SITE_URL}/api/webhooks/mercadopago?seller_id=${encodeURIComponent(seller.id)}`,
       back_urls: {
         success: successUrl,
         failure: cancelUrl,
@@ -351,7 +362,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const mpRes = await fetch('https://api.mercadopago.com/checkout/preferences', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${mpToken}`,
+        Authorization: `Bearer ${sellerMpToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(prefPayload),
