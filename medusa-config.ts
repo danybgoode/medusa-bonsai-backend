@@ -42,8 +42,16 @@ const redisModules = REDIS_URL
 
 module.exports = defineConfig({
   admin: {
-    disable: process.env.NODE_ENV === 'production',
-    backendUrl: process.env.MEDUSA_BACKEND_URL ?? 'http://localhost:9000',
+    // Enabled in production. Was previously disabled for Render's 512MB limit;
+    // Cloud Run has headroom. Set DISABLE_MEDUSA_ADMIN=true to turn it back off.
+    disable: process.env.DISABLE_MEDUSA_ADMIN === 'true',
+    // No hard-coded fallback: the admin is served by this same backend at /app,
+    // so when backendUrl is undefined the static bundle defaults to same-origin
+    // ("/"). Forcing 'http://localhost:9000' here would bake localhost into the
+    // production bundle at build time (the Docker build has no runtime env),
+    // breaking every admin API call. Only set MEDUSA_BACKEND_URL when the admin
+    // is hosted on a domain separate from the backend.
+    backendUrl: process.env.MEDUSA_BACKEND_URL,
   },
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
