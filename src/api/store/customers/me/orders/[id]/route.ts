@@ -1,0 +1,82 @@
+/**
+ * GET /store/customers/me/orders/:id
+ *
+ * Full detail for ONE Medusa order belonging to the authenticated buyer
+ * (identified by Clerk JWT → Medusa customer.external_id). Powers the buyer
+ * order-detail page /account/orders/[id] for Medusa-backed orders.
+ *
+ * Auth: Clerk JWT in the Authorization header.
+ * Response: { order: NormalizedOrder } — same shape as the list endpoint, so
+ * the existing OrderTrackingClient renders it unchanged.
+ */
+
+import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { normalizeMedusaOrder } from '../../../../sellers/me/orders/route'
+import { extractClerkUserId } from '../../../../_utils/clerk-auth'
+
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  const clerkUserId = extractClerkUserId(req)
+  if (!clerkUserId) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
+  const { id: orderId } = req.params
+  const customerService = req.scope.resolve(Modules.CUSTOMER) as any
+  const orderService = req.scope.resolve(Modules.ORDER) as any
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+
+  // ── Resolve the Medusa customer for this Clerk user ───────────────────────
+  let customer: any = null
+  try {
+    const customers = await customerService.listCustomers(
+      { external_id: clerkUserId },
+      { select: ['id'] },
+    )
+    customer = customers[0] ?? null
+  } catch (e) {
+    console.error('[customers/me/orders/:id] listCustomers error:', e)
+  }
+  if (!customer) return res.status(404).json({ message: 'Order not found' })
+
+  // ── Fetch the order ───────────────────────────────────────────────────────
+  let order: Record<string, unknown>
+  try {
+    const result = await orderService.retrieveOrder(orderId, {
+      select: [
+        'id', 'status', 'payment_status', 'fulfillment_status',
+        'total', 'subtotal', 'currency_code',
+        'email', 'customer_id', 'metadata', 'created_at', 'updated_at',
+      ],
+      relations: ['items', 'shipping_address', 'fulfillments'],
+    })
+    if (!result) return res.status(404).json({ message: 'Order not found' })
+    order = result as Record<string, unknown>
+  } catch {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+
+  // ── Ownership check — buyer can only see their own order ──────────────────
+  if (order.customer_id !== customer.id) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+
+  // ── Enrich the seller name from the first item's product → seller link ────
+  let sellerId = ''
+  let sellerName = ''
+  const firstProductId = ((order.items as any[]) ?? [])[0]?.product_id as string | undefined
+  if (firstProductId) {
+    try {
+      const { data } = await query.graph({
+        entity: 'product',
+        fields: ['id', 'seller.id', 'seller.name'],
+        filters: { id: firstProductId },
+      })
+      const seller = (data?.[0] as any)?.seller
+      sellerId = seller?.id ?? ''
+      sellerName = seller?.name ?? ''
+    } catch { /* seller enrichment is best-effort */ }
+  }
+
+  return res.json({ order: normalizeMedusaOrder(order, sellerId, sellerName) })
+}
