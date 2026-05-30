@@ -77,6 +77,20 @@ module.exports = defineConfig({
     // Empty in local dev (no REDIS_URL) → Medusa uses in-memory defaults.
     ...redisModules,
 
+    // ── Fulfillment providers ──────────────────────────────────────────────────
+    {
+      resolve: '@medusajs/medusa/fulfillment',
+      options: {
+        providers: [
+          {
+            resolve: '@medusajs/fulfillment-manual',
+            id: 'manual',
+            options: {},
+          },
+        ],
+      },
+    },
+
     // ── Payment providers ──────────────────────────────────────────────────────
     {
       resolve: '@medusajs/medusa/payment',

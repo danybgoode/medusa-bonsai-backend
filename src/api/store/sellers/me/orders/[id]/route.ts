@@ -3,15 +3,26 @@
  * PATCH /store/sellers/me/orders/:id — update order (fulfill / ship / mark delivered)
  *
  * Body for PATCH: { status: 'processing' | 'shipped' | 'delivered' }
- *   - 'processing' → no-op in Medusa (just acknowledged)
- *   - 'shipped'    → creates a Fulfillment record with optional tracking data
- *   - 'delivered'  → marks fulfillment as delivered (if supported)
+ *   - 'processing' → acknowledged in metadata
+ *   - 'shipped'    → createOrderFulfillmentWorkflow + createOrderShipmentWorkflow (E-full)
+ *                    + metadata.shipment (E-lite fallback, always written for normalizeMedusaOrder)
+ *   - 'delivered'  → markOrderFulfillmentAsDeliveredWorkflow + metadata.delivered_at
+ *   - 'completed'  → metadata only (completeOrderWorkflow deferred — returns still pend)
+ *
+ * E-full: workflows run when shipping options are seeded (POST /internal/setup-fulfillment).
+ * If the option IDs aren't found the route falls back gracefully to metadata-only (E-lite).
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import {
+  createOrderFulfillmentWorkflow,
+  createOrderShipmentWorkflow,
+  markOrderFulfillmentAsDeliveredWorkflow,
+} from '@medusajs/medusa/core-flows'
 import { normalizeMedusaOrder } from '../route'
 import { resolveSeller } from '../../../../_utils/clerk-auth'
+import { resolveShippingOptionIds, resolveStockLocationId } from '../../../../_utils/fulfillment'
 
 // ── GET ──────────────────────────────────────────────────────────────────────
 
@@ -62,15 +73,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 }
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
-//
-// Advances the order lifecycle. We persist the shipment + lifecycle state on the
-// Medusa order itself (the system of record) via order.metadata, rather than the
-// Fulfillment module: our checkout prices/handles shipping through Envia (stored
-// in metadata) and never attaches a Medusa shipping method, so the Fulfillment
-// workflows — which derive provider/profile/location from the order's shipping
-// option — can't run. Keeping shipment state on the order means the buyer detail
-// page, seller views, and autoconfirm all read one source. normalizeMedusaOrder
-// surfaces metadata.shipment + metadata.fulfillment_state.
 
 const LIFECYCLE_STATES = new Set(['processing', 'shipped', 'in_transit', 'delivered', 'completed'])
 
@@ -99,7 +101,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   try {
     order = await orderService.retrieveOrder(orderId, {
       select: ['id', 'metadata'],
-      relations: ['items'],
+      relations: ['items', 'fulfillments'],
     })
   } catch {
     return res.status(404).json({ message: 'Order not found' })
@@ -142,6 +144,17 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     shipment = { ...prevShipment, status: 'delivered', delivered_at: now }
   }
 
+  // ── E-full: native Medusa fulfillment workflows ──────────────────────────
+  // Run alongside the metadata update (which drives normalizeMedusaOrder).
+  // Falls back gracefully if shipping options aren't seeded yet.
+
+  if (newStatus === 'shipped' || newStatus === 'in_transit') {
+    await runFulfillWorkflow({ req, order, orderId, body, newStatus, now })
+  } else if (newStatus === 'delivered') {
+    await runDeliveredWorkflow({ req, order, orderId })
+  }
+
+  // ── Always: persist lifecycle state on order.metadata ────────────────────
   try {
     await orderService.updateOrders(orderId, {
       metadata: {
@@ -158,4 +171,136 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   }
 
   return res.json({ status: newStatus })
+}
+
+// ── E-full helpers ────────────────────────────────────────────────────────────
+
+async function runFulfillWorkflow({
+  req,
+  order,
+  orderId,
+  body,
+  newStatus,
+  now,
+}: {
+  req: MedusaRequest
+  order: Record<string, unknown>
+  orderId: string
+  body: { carrier?: string; tracking_number?: string }
+  newStatus: string
+  now: string
+}) {
+  const fulfillments = (order.fulfillments as any[]) ?? []
+  const existingFulfillment = fulfillments[0]
+
+  // If already has a native fulfillment, just add the shipment label
+  if (existingFulfillment?.id) {
+    await runShipmentWorkflow({ req, orderId, fulfillmentId: existingFulfillment.id, order, body })
+    return
+  }
+
+  // Resolve shipping option for this order's fulfillment method
+  const meta = (order.metadata ?? {}) as Record<string, any>
+  const fulfillmentMethod = (meta.fulfillment_method ?? 'shipping') as string
+  const optionKey = fulfillmentMethod === 'local_pickup' ? 'pickup'
+    : fulfillmentMethod === 'digital' || fulfillmentMethod === 'service' ? 'digital'
+    : 'shipping'
+
+  const [optionIds, locationId] = await Promise.all([
+    resolveShippingOptionIds(req.scope),
+    resolveStockLocationId(req.scope),
+  ])
+
+  const shippingOptionId = optionIds[optionKey]
+  if (!shippingOptionId) {
+    // Shipping options not seeded yet — E-lite metadata path continues
+    console.warn('[seller orders] E-full skipped: shipping option not found, option_key=%s', optionKey)
+    return
+  }
+
+  const items = ((order.items as any[]) ?? []).map((i: any) => ({ id: i.id, quantity: i.quantity ?? 1 }))
+  if (!items.length) return
+
+  try {
+    const { result: fulfillment } = await createOrderFulfillmentWorkflow(req.scope).run({
+      input: {
+        order_id: orderId,
+        items,
+        shipping_option_id: shippingOptionId,
+        ...(locationId ? { location_id: locationId } : {}),
+        no_notification: true,
+        metadata: { source: 'seller_patch', created_at: now },
+      } as any,
+    })
+
+    if ((fulfillment as any)?.id && body.tracking_number) {
+      await runShipmentWorkflow({ req, orderId, fulfillmentId: (fulfillment as any).id, order, body })
+    }
+  } catch (e) {
+    // E-full failures are non-fatal — metadata update still runs
+    console.error('[seller orders] createOrderFulfillmentWorkflow error (non-fatal):', e)
+  }
+}
+
+async function runShipmentWorkflow({
+  req,
+  orderId,
+  fulfillmentId,
+  order,
+  body,
+}: {
+  req: MedusaRequest
+  orderId: string
+  fulfillmentId: string
+  order: Record<string, unknown>
+  body: { carrier?: string; tracking_number?: string }
+}) {
+  if (!body.tracking_number) return
+
+  const items = ((order.items as any[]) ?? []).map((i: any) => ({ id: i.id, quantity: i.quantity ?? 1 }))
+  if (!items.length) return
+
+  try {
+    await createOrderShipmentWorkflow(req.scope).run({
+      input: {
+        order_id: orderId,
+        fulfillment_id: fulfillmentId,
+        items,
+        no_notification: true,
+        labels: [{
+          tracking_number: body.tracking_number,
+          tracking_url: '',
+          label_url: '',
+        }],
+      } as any,
+    })
+  } catch (e) {
+    console.error('[seller orders] createOrderShipmentWorkflow error (non-fatal):', e)
+  }
+}
+
+async function runDeliveredWorkflow({
+  req,
+  order,
+  orderId,
+}: {
+  req: MedusaRequest
+  order: Record<string, unknown>
+  orderId: string
+}) {
+  const fulfillments = (order.fulfillments as any[]) ?? []
+  const fulfillmentId = fulfillments[0]?.id
+  if (!fulfillmentId) return
+
+  try {
+    await markOrderFulfillmentAsDeliveredWorkflow(req.scope).run({
+      input: {
+        orderId,
+        fulfillmentId,
+        no_notification: true,
+      } as any,
+    })
+  } catch (e) {
+    console.error('[seller orders] markOrderFulfillmentAsDeliveredWorkflow error (non-fatal):', e)
+  }
 }
