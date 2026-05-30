@@ -30,6 +30,7 @@
     "@medusajs/draft-order": "^2.15.3",
     "@medusajs/event-bus-redis": "^2.15.3",
     "@medusajs/framework": "^2.15.3",
+    "@medusajs/fulfillment-manual": "^2.15.3",
     "@medusajs/locking-redis": "^2.15.3",
     "@medusajs/medusa": "^2.15.3",
     "@medusajs/payment-stripe": "^2.15.3",
