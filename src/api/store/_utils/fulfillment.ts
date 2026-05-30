@@ -173,7 +173,7 @@ export async function setupFulfillmentInfrastructure(
       name: def.name,
       service_zone_id: serviceZoneId,
       shipping_profile_id: profileId,
-      provider_id: 'manual',
+      provider_id: 'manual_manual',
       price_type: 'calculated',
       type: { label: def.label, description: def.label, code: def.code },
     }])
