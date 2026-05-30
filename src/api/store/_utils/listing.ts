@@ -23,6 +23,12 @@ export interface ListingShape {
   state: string | null
   municipio: string | null
   location: string | null
+  /** Category/type-specific structured attributes (brand, size, color, year, km…). */
+  attrs: Record<string, unknown>
+  /** Native Medusa weight in grams (physical products). */
+  weight_grams: number | null
+  /** Auto-generated SKU from the default variant. */
+  sku: string | null
   metadata: Record<string, unknown>
   images: Array<{ url: string; alt: string | null }>
   tags: string[]
@@ -131,6 +137,9 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     state: (meta.state as string) ?? null,
     municipio: (meta.municipio as string) ?? null,
     location: (meta.location as string) ?? null,
+    attrs: (meta.attrs as Record<string, unknown>) ?? {},
+    weight_grams: typeof product.weight === 'number' ? product.weight : null,
+    sku: (variant?.sku as string) ?? null,
     metadata: meta,
     images: (product.images ?? []).map((img: any) => ({
       url: img.url,

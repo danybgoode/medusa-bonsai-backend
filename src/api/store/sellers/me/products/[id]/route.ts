@@ -48,7 +48,9 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     description?: string | null
     price_cents?: number | null
     quantity?: number | null
+    weight_grams?: number | null
     status?: 'published' | 'draft'
+    attrs?: Record<string, unknown>
     metadata?: Record<string, unknown>
   }
 
@@ -57,15 +59,26 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   if (body.title !== undefined) baseUpdate.title = body.title.trim().slice(0, 100)
   if (body.description !== undefined) baseUpdate.description = body.description?.trim() || null
   if (body.status !== undefined) baseUpdate.status = body.status
+  if (body.weight_grams != null && body.weight_grams > 0) {
+    baseUpdate.weight = Math.round(body.weight_grams)
+  }
 
-  if (body.metadata !== undefined) {
+  const needsMetadataMerge = body.metadata !== undefined || body.attrs !== undefined
+  if (needsMetadataMerge) {
     const { data: rows } = await remoteQuery.graph({
       entity: 'product',
       fields: ['metadata'],
       filters: { id },
     })
     const current = ((rows?.[0] as any)?.metadata ?? {}) as Record<string, unknown>
-    baseUpdate.metadata = { ...current, ...body.metadata }
+    baseUpdate.metadata = {
+      ...current,
+      ...(body.metadata ?? {}),
+      // attrs deep-merge: overwrite only keys provided
+      ...(body.attrs !== undefined
+        ? { attrs: { ...((current.attrs as Record<string, unknown> | undefined) ?? {}), ...body.attrs } }
+        : {}),
+    }
   }
 
   if (Object.keys(baseUpdate).length > 1) {

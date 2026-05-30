@@ -12,6 +12,13 @@ import {
   provisionVariantInventory,
 } from '../../../_utils/inventory'
 
+/** Auto-generate a unique SKU for P2P marketplace items. */
+function generateSku(): string {
+  const ts = Date.now().toString(36).toUpperCase()
+  const rand = Math.random().toString(36).slice(2, 5).toUpperCase()
+  return `MIYAGI-${ts}-${rand}`
+}
+
 interface CreateProductBody {
   title: string
   description?: string | null
@@ -24,8 +31,10 @@ interface CreateProductBody {
   municipio?: string | null
   location?: string | null
   quantity?: number | null
+  weight_grams?: number | null
   images?: Array<{ url: string; alt?: string }>
   tags?: string[]
+  attrs?: Record<string, unknown>  // type/category-specific attributes (brand, size, color…)
   metadata?: Record<string, unknown>
 }
 
@@ -70,8 +79,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const { data: allProducts } = await remoteQuery.graph({
     entity: 'product',
     fields: [
-      'id', 'title', 'description', 'status', 'metadata', 'created_at',
-      'variants.*', 'variants.prices.*',
+      'id', 'title', 'description', 'status', 'metadata', 'weight', 'created_at',
+      'variants.*', 'variants.sku', 'variants.prices.*',
       'variants.inventory_items.inventory.location_levels.stocked_quantity',
       'variants.inventory_items.inventory.location_levels.reserved_quantity',
       'images.*',
@@ -147,6 +156,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     currency: body.currency ?? 'MXN',
     listing_type: body.listing_type ?? 'product',
     views: 0,
+    // Category/type-specific structured attributes (brand, size, color, year, km…)
+    ...(body.attrs && Object.keys(body.attrs).length > 0 ? { attrs: body.attrs } : {}),
     ...(body.metadata ?? {}),
   }
 
@@ -171,6 +182,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // not stockable. Default quantity 1 (unique P2P item).
   const manageInventory = isStockableListingType(body.listing_type)
   const quantity = Math.max(0, Math.floor(body.quantity ?? 1))
+  const sku = generateSku()
+  const weightGrams = body.weight_grams != null && body.weight_grams > 0
+    ? Math.round(body.weight_grams)
+    : undefined
 
   // ── Create Medusa product ────────────────────────────────────────────────
   const { result } = await createProductsWorkflow(req.scope).run({
@@ -179,6 +194,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         title: body.title.trim().slice(0, 100),
         description: body.description?.trim() || null,
         status: 'published' as const,
+        ...(weightGrams !== undefined ? { weight: weightGrams } : {}),
         ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
         ...(categoryId ? { category_ids: [categoryId] } : {}),
         ...(ptype ? { type_id: ptype.id } : {}),
@@ -192,7 +208,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         }],
         metadata,
         variants: [{
-          title: 'Default',
+          // Use the product title as the variant title so Admin shows meaningful names
+          // instead of "Default". P2P items are unique, so there's always one variant.
+          title: body.title.trim().slice(0, 100),
+          sku,
           options: {
             Default: 'Default',
           },
