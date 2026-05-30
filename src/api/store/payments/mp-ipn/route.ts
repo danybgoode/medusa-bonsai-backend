@@ -15,8 +15,8 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules } from '@medusajs/framework/utils'
-import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
+import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { IPaymentModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { resolveSellerMpToken, getMpPaymentWithToken } from '../../_utils/mp'
@@ -36,8 +36,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
-  const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
   const paymentService: IPaymentModuleService = req.scope.resolve(Modules.PAYMENT)
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
   const [seller] = await sellerService.listSellers({ id: body.seller_id } as any, { take: 1 })
   if (!seller) return res.status(404).json({ message: 'Seller not found' })
@@ -58,11 +58,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const buyerEmail = payment.payer?.email ?? null
   const buyerName = [payment.payer?.first_name, payment.payer?.last_name].filter(Boolean).join(' ').trim() || null
 
-  // Patch the cart's MP session so /complete can authorize it.
+  // Patch the cart's MP session so /complete can authorize it. The cart ↔
+  // payment_collection link is a module link, so the collection id must be read
+  // via the query graph (`payment_collection.id`) — it is NOT a column returned
+  // by cartService.listCarts.
   if (cartId) {
     try {
-      const [cart] = await cartService.listCarts({ id: cartId }, {})
-      const collectionId = (cart as any)?.payment_collection_id as string | undefined
+      const { data: [cartGraph] } = await query.graph({
+        entity: 'cart',
+        fields: ['id', 'payment_collection.id'],
+        filters: { id: cartId },
+      })
+      const collectionId = (cartGraph as any)?.payment_collection?.id as string | undefined
       if (collectionId) {
         const sessions = await paymentService.listPaymentSessions({ payment_collection_id: collectionId } as any)
         const mpSession = sessions.find((s: any) => s.provider_id === MP_PROVIDER_ID)

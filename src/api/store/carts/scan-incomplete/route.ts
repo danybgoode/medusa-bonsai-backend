@@ -21,7 +21,7 @@
 
 import Stripe from 'stripe'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules } from '@medusajs/framework/utils'
+import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
@@ -85,6 +85,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
   const paymentService: IPaymentModuleService = req.scope.resolve(Modules.PAYMENT)
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
   const stripeKey = process.env.STRIPE_SECRET_KEY
   const stripeClient = stripeKey ? new Stripe(stripeKey, { apiVersion: '2025-09-30.clover' as any }) : null
@@ -108,8 +109,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
     const meta = (cart.metadata ?? {}) as Record<string, any>
     const provider = meta.payment_method as 'stripe' | 'mercadopago' | undefined
-    const collectionId = cart.payment_collection_id as string | undefined
-    if (!provider || !collectionId) continue
+    if (!provider) continue
+    // cart ↔ payment_collection is a module link, so the id must be read via the
+    // query graph — it is NOT a column on the cart returned by listCarts.
+    let collectionId: string | undefined
+    try {
+      const { data: [cg] } = await query.graph({
+        entity: 'cart',
+        fields: ['id', 'payment_collection.id'],
+        filters: { id: cart.id },
+      })
+      collectionId = (cg as any)?.payment_collection?.id as string | undefined
+    } catch { /* fall through — treated as no collection */ }
+    if (!collectionId) continue
 
     scanned++
 

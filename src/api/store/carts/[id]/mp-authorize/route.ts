@@ -9,8 +9,8 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules } from '@medusajs/framework/utils'
-import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
+import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { IPaymentModuleService } from '@medusajs/framework/types'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
@@ -20,16 +20,22 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(400).json({ message: 'mp_payment_id is required' })
   }
 
-  const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
   const paymentService: IPaymentModuleService = req.scope.resolve(Modules.PAYMENT)
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
-  // Load cart (need payment_collection_id)
-  const [cart] = await cartService.listCarts({ id: cartId }, {})
+  // Load the cart's payment collection. cart ↔ payment_collection is a module
+  // link, so the id must be read via the query graph (`payment_collection.id`) —
+  // it is NOT a column returned by cartService.listCarts.
+  const { data: [cart] } = await query.graph({
+    entity: 'cart',
+    fields: ['id', 'payment_collection.id'],
+    filters: { id: cartId },
+  })
   if (!cart) {
     return res.status(404).json({ message: 'Cart not found' })
   }
 
-  const collectionId = (cart as unknown as Record<string, unknown>).payment_collection_id as string | undefined
+  const collectionId = (cart as any)?.payment_collection?.id as string | undefined
   if (!collectionId) {
     return res.status(422).json({ message: 'Cart has no payment collection' })
   }

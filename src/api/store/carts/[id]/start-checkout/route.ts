@@ -433,8 +433,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       } catch { /* non-fatal */ }
     }
 
-    // Link the payment collection to the cart (method availability varies by Medusa version)
-    await (cartService as any).setPaymentCollection?.(cartId, paymentCollection.id).catch(() => {})
+    // Link the payment collection to the cart. cart ↔ payment_collection is a
+    // *module link* (it lives in the Link module, not as a column on either
+    // entity), so it MUST be created via the Link service — exactly as Medusa's
+    // own createPaymentCollectionForCartWorkflow does. The previous
+    // `cartService.setPaymentCollection?.()` was a no-op (no such method on the
+    // v2 Cart service), so the collection was created but never attached. Without
+    // this link, POST /complete fails with "Payment collection has not been
+    // initiated for cart" — payment succeeds at the provider but no Medusa order
+    // is ever created. A failure here throws into the catch below (502) rather
+    // than handing the buyer a payment we can never turn into an order.
+    const remoteLink = req.scope.resolve(ContainerRegistrationKeys.LINK)
+    await remoteLink.create({
+      [Modules.CART]: { cart_id: cartId },
+      [Modules.PAYMENT]: { payment_collection_id: paymentCollection.id },
+    })
 
     return res.json({
       redirect_url: redirectUrl,
