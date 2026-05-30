@@ -23,7 +23,11 @@ import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 
+// Escrow: 3-day auto-confirm window (buyer must confirm delivery; else auto-captured)
+const ESCROW_AUTO_CAPTURE_DAYS = 3
+
 type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none'
+type EscrowMode = 'off' | 'optional' | 'required'
 
 type CheckoutShippingAddress = {
   name?: string
@@ -80,7 +84,7 @@ function normalizeShippingQuote(input?: CheckoutShippingQuote | null) {
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
   const body = req.body as {
-    provider: 'stripe' | 'mercadopago'
+    provider: 'stripe' | 'mercadopago' | 'spei' | 'cash'
     buyer_email?: string
     offer_amount_cents?: number   // accepted offer override
     offer_id?: string             // Supabase offer ID for webhook reconciliation
@@ -89,10 +93,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     pickup_spot_id?: string
     shipping_address?: CheckoutShippingAddress
     shipping_quote?: CheckoutShippingQuote
+    escrow?: boolean              // buyer explicitly opts in to escrow when mode='optional'
   }
 
-  if (!body.provider) {
-    return res.status(400).json({ message: 'provider is required: "stripe" or "mercadopago"' })
+  if (!body.provider || !['stripe', 'mercadopago', 'spei', 'cash'].includes(body.provider)) {
+    return res.status(400).json({ message: 'provider is required: "stripe", "mercadopago", "spei", or "cash"' })
   }
 
   const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
@@ -180,12 +185,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (fulfillmentMethod === 'shipping' && !shippingQuote) {
     return res.status(400).json({ message: 'Selecciona una tarifa de envío para continuar.' })
   }
+
+  // Escrow mode is resolved early so it can be written to cart metadata before the payment branch
+  const checkoutSettings = (sellerSettings.checkout ?? {}) as Record<string, unknown>
+  const escrowModeSetting = (checkoutSettings.escrow_mode ?? 'off') as EscrowMode
+  const useEscrow = escrowModeSetting === 'required' || (escrowModeSetting === 'optional' && body.escrow === true)
+
   const checkoutSelection = {
     payment_method: body.provider,
     fulfillment_method: fulfillmentMethod,
     pickup_spot_id: body.pickup_spot_id ?? null,
     has_shipping_address: !!body.shipping_address,
     shipping_quote: shippingQuote,
+    escrow_mode: useEscrow ? escrowModeSetting : null,
   }
 
   try {
@@ -196,6 +208,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         checkout_selection: checkoutSelection,
         payment_method: body.provider,
         fulfillment_method: fulfillmentMethod,
+        ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
         ...(shippingQuote ? {
           shipping_rate_id: shippingQuote.rate_id,
           shipping_carrier: shippingQuote.carrier,
@@ -217,12 +230,35 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const successUrl = `${SITE_URL}/payment/success?cart_id=${cartId}`
   const cancelUrl = `${SITE_URL}/l/${productId ?? cartId}?payment=cancelled`
 
-  let providerData: Record<string, unknown>
-  let redirectUrl: string
-  let providerId: string
+  let providerData: Record<string, unknown> = {}
+  let redirectUrl: string | null = null
+  let providerId = 'pp_system_default'
+
+  // ── SPEI / cash (manual payment — system provider) ────────────────────────
+  if (body.provider === 'spei' || body.provider === 'cash') {
+    const bankTransfer = (sellerSettings.bank_transfer ?? {}) as Record<string, unknown>
+    const clabe = body.provider === 'spei' ? (bankTransfer.clabe as string | undefined) : null
+
+    if (body.provider === 'spei' && (!clabe || clabe.length !== 18)) {
+      return res.status(422).json({
+        message: 'Este vendedor no tiene una CLABE configurada. Contacta al vendedor directamente.',
+        code: 'SELLER_CLABE_MISSING',
+      })
+    }
+
+    providerData = {
+      payment_method: body.provider,
+      clabe: clabe ?? null,
+      bank_name: (bankTransfer.bank_name as string | undefined) ?? null,
+      account_holder: (bankTransfer.account_holder as string | undefined) ?? null,
+      payment_received: false,
+    }
+    redirectUrl = null
+    providerId = 'pp_system_default'
+  }
 
   // ── Stripe Connect ────────────────────────────────────────────────────────
-  if (body.provider === 'stripe') {
+  else if (body.provider === 'stripe') {
     const stripeKey = process.env.STRIPE_SECRET_KEY
     if (!stripeKey) return res.status(500).json({ message: 'Stripe not configured' })
 
@@ -268,6 +304,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       payment_intent_data: {
         transfer_data: { destination: sellerStripeAccountId },
         application_fee_amount: 0,
+        // Escrow: hold funds until buyer confirms delivery or auto-confirm window elapses
+        ...(useEscrow ? { capture_method: 'manual' } : {}),
       },
       customer_email: body.buyer_email,
       success_url: successUrl,
@@ -278,6 +316,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         seller_id: seller?.id ?? '',
         payment_method: 'stripe',
         fulfillment_method: fulfillmentMethod,
+        ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
         ...(shippingQuote ? {
           shipping_rate_id: shippingQuote.rate_id,
           shipping_carrier: shippingQuote.carrier,
@@ -296,13 +335,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       stripe_session_id: session.id,
       stripe_seller_account: sellerStripeAccountId,
       redirect_url: session.url!,
+      ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
     }
     redirectUrl = session.url!
     providerId = 'pp_stripe-connect_stripe-connect'
   }
 
   // ── MercadoPago ───────────────────────────────────────────────────────────
-  else {
+  else if (body.provider === 'mercadopago') {
     if (!sellerMpConnected(seller)) {
       return res.status(422).json({
         message: 'Este vendedor aún no ha conectado Mercado Pago.',
@@ -449,11 +489,22 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       [Modules.PAYMENT]: { payment_collection_id: paymentCollection.id },
     })
 
-    return res.json({
+    const responseBody: Record<string, unknown> = {
       redirect_url: redirectUrl,
       cart_id: cartId,
       payment_session_id: paymentSession.id,
-    })
+    }
+    // For SPEI/cash: include bank transfer details so frontend can show instructions
+    if (body.provider === 'spei' || body.provider === 'cash') {
+      responseBody.clabe = (providerData.clabe as string | null) ?? null
+      responseBody.bank_name = (providerData.bank_name as string | null) ?? null
+      responseBody.account_holder = (providerData.account_holder as string | null) ?? null
+    }
+    // For escrow: include the mode so frontend can show escrow badge
+    if (useEscrow) {
+      responseBody.escrow_mode = escrowModeSetting
+    }
+    return res.json(responseBody)
   } catch (e) {
     console.error('[start-checkout] Medusa payment session error:', e)
     // Fail loudly: without a Medusa PaymentSession the cart can never be

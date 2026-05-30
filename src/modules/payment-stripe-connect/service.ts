@@ -99,16 +99,34 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
   }
 
   // ── capturePayment ────────────────────────────────────────────────────────
-  // Stripe Checkout auto-captures — nothing to do.
+  // For escrow orders: explicitly capture the PaymentIntent (which was created with
+  // capture_method: 'manual'). Non-escrow orders are auto-captured by Stripe at checkout.
   async capturePayment(input: CapturePaymentInput): Promise<CapturePaymentOutput> {
-    return { data: input.data ?? {} }
+    const data = (input.data ?? {}) as Record<string, unknown>
+    const pi = data.stripe_payment_intent as string | undefined
+    if (data.escrow_mode && pi) {
+      try {
+        await this.stripe_.paymentIntents.capture(pi)
+      } catch (e) {
+        throw new Error(`Stripe escrow capture failed: ${(e as Error).message}`)
+      }
+    }
+    return { data: { ...data, escrow_captured: true } }
   }
 
   // ── cancelPayment ─────────────────────────────────────────────────────────
+  // For escrow orders where funds were authorized but not yet captured: cancel the
+  // PaymentIntent to void the hold (no money moved). For non-escrow or already-expired
+  // sessions: expire the Checkout Session.
   async cancelPayment(input: CancelPaymentInput): Promise<CancelPaymentOutput> {
     const data = (input.data ?? {}) as Record<string, unknown>
-    const sessionId = data.stripe_session_id as string
-    if (sessionId) {
+    const pi = data.stripe_payment_intent as string | undefined
+    const sessionId = data.stripe_session_id as string | undefined
+    if (data.escrow_mode && pi && !data.escrow_captured) {
+      try {
+        await this.stripe_.paymentIntents.cancel(pi)
+      } catch { /* already canceled or captured — ok */ }
+    } else if (sessionId) {
       try {
         await this.stripe_.checkout.sessions.expire(sessionId)
       } catch { /* already expired or completed — ok */ }

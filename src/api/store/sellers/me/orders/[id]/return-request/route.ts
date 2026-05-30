@@ -15,6 +15,7 @@
  * Auth: Clerk JWT — must be the seller of the product in the order.
  */
 
+import Stripe from 'stripe'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { refundPaymentWorkflow } from '@medusajs/medusa/core-flows'
@@ -107,7 +108,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     return res.json({ return_request: { ...returnRequest, status: 'declined', seller_action: 'declined', seller_action_at: now } })
   }
 
-  // ── Accept + refund ───────────────────────────────────────────────────────
+  // ── Accept + refund/void ──────────────────────────────────────────────────
   const refundAmountCents = body.refund_amount_cents != null
     ? Math.round(body.refund_amount_cents)
     : Math.round(Number(returnRequest.order_total_cents ?? order.total ?? 0))
@@ -116,7 +117,10 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     return res.status(422).json({ message: 'refund_amount_cents must be greater than 0' })
   }
 
-  // Mark accepted immediately (before refund, so seller sees immediate feedback)
+  // Escrow + not yet captured → void the authorization (no money moved; nothing to refund)
+  const isEscrowVoid = !!(meta.escrow_mode && !meta.escrow_captured)
+
+  // Mark accepted immediately
   await orderService.updateOrders(orderId, {
     metadata: {
       ...meta,
@@ -125,16 +129,73 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
         status: 'accepted',
         seller_action: 'accepted',
         seller_action_at: now,
-        refund_status: 'pending',
+        refund_status: isEscrowVoid ? 'voiding' : 'pending',
         refund_amount_cents: refundAmountCents,
       },
     },
   })
 
-  // Execute provider refund via Medusa's refundPaymentWorkflow
   const paymentId = await getOrderPaymentId(req, orderId)
+
+  if (isEscrowVoid) {
+    // Void the PaymentIntent — the authorization hold is released, no money moves
+    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+    let paymentIntentId: string | null = null
+    try {
+      const { data: payData } = await (query as any).graph({
+        entity: 'order',
+        fields: ['id', 'payment_collections.payments.id', 'payment_collections.payments.data'],
+        filters: { id: orderId },
+      })
+      const paymentData = (payData?.[0] as any)?.payment_collections?.[0]?.payments?.[0]?.data as Record<string, unknown> | undefined
+      paymentIntentId = (paymentData?.stripe_payment_intent as string | undefined) ?? null
+    } catch { /* non-fatal */ }
+
+    if (paymentIntentId) {
+      try {
+        const stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-09-30.clover' as any })
+        await stripeClient.paymentIntents.cancel(paymentIntentId)
+      } catch (e) {
+        const errMsg = (e as Error).message ?? 'Void failed'
+        await orderService.updateOrders(orderId, {
+          metadata: {
+            ...meta,
+            return_request: {
+              ...returnRequest,
+              status: 'accepted',
+              seller_action: 'accepted',
+              seller_action_at: now,
+              refund_status: 'failed',
+              refund_error: errMsg,
+            },
+          },
+        })
+        return res.status(502).json({ message: `No se pudo anular el cargo: ${errMsg}` })
+      }
+    }
+
+    await orderService.updateOrders(orderId, {
+      payment_status: 'canceled',
+      metadata: {
+        ...meta,
+        return_request: {
+          ...returnRequest,
+          status: 'refunded',
+          seller_action: 'accepted',
+          seller_action_at: now,
+          refund_status: 'voided',
+          refund_amount_cents: refundAmountCents,
+          refunded_at: now,
+        },
+        escrow_captured: false,
+      },
+    })
+    return res.json({ refunded: true, refund_status: 'voided', refund_amount_cents: refundAmountCents, note: 'Escrow authorization voided — no money was charged' })
+  }
+
+  // Non-escrow or already-captured: standard refund flow
   if (!paymentId) {
-    // No payment linked (e.g. manual/test order) — mark as refunded without provider call
+    // No payment linked (e.g. SPEI/cash order) — mark as manual refund required
     await orderService.updateOrders(orderId, {
       metadata: {
         ...meta,
@@ -157,7 +218,6 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
       input: { payment_id: paymentId, amount: refundAmountCents },
     })
   } catch (e) {
-    // Persist the error state so seller + UI can see it; throw to surface 500
     const errMsg = (e as Error).message ?? 'Refund failed'
     await orderService.updateOrders(orderId, {
       metadata: {
@@ -176,7 +236,6 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     return res.status(502).json({ message: `Refund failed: ${errMsg}` })
   }
 
-  // Refund succeeded — update order metadata + payment_status
   await orderService.updateOrders(orderId, {
     payment_status: 'refunded',
     metadata: {
