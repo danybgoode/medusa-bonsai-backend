@@ -94,15 +94,21 @@ export function normalizeMedusaOrder(
   const checkoutSelection = (metadata.checkout_selection ?? {}) as Record<string, unknown>
   const selectedFulfillment = (metadata.fulfillment_method ?? checkoutSelection.fulfillment_method ?? 'standard') as string
 
-  // Map Medusa statuses → our status vocabulary
+  // Map to our status vocabulary. Refund/cancel always wins; otherwise prefer the
+  // explicit lifecycle state we persist on the order (set by the seller PATCH
+  // route), falling back to Medusa's native fulfillment_status for legacy orders.
   let status = 'paid'
-  if (order.status === 'canceled') {
+  if (
+    order.status === 'canceled' ||
+    (order.payment_status as string) === 'refunded' ||
+    (order.fulfillment_status as string) === 'returned'
+  ) {
     status = 'refunded'
-  } else if ((order.payment_status as string) === 'refunded') {
-    status = 'refunded'
-  } else if ((order.fulfillment_status as string) === 'returned') {
-    status = 'refunded'
-  } else if ((order.fulfillment_status as string) === 'fulfilled') {
+  } else if (typeof metadata.fulfillment_state === 'string') {
+    status = metadata.fulfillment_state as string
+  } else if ((order.fulfillment_status as string) === 'delivered') {
+    status = 'delivered'
+  } else if (['shipped', 'fulfilled'].includes(order.fulfillment_status as string)) {
     status = 'shipped'
   } else if ((order.fulfillment_status as string) === 'partially_fulfilled') {
     status = 'processing'
@@ -148,20 +154,37 @@ export function normalizeMedusaOrder(
       clerk_user_id: null,
       metadata: null,
     },
-    marketplace_shipments:
-      ((order.fulfillments as any[]) ?? []).length > 0
+    marketplace_shipments: (() => {
+      // Prefer the shipment we persist on the order (set by the seller PATCH route).
+      const sh = (metadata.shipment ?? null) as Record<string, any> | null
+      if (sh && (sh.tracking_number || sh.carrier || sh.status)) {
+        return [{
+          id: `${order.id}_ship`,
+          carrier: sh.carrier ?? 'manual',
+          tracking_number: sh.tracking_number ?? null,
+          label_url: sh.label_url ?? null,
+          status: sh.status ?? 'label_created',
+          estimated_delivery_date: sh.estimated_delivery_date ?? null,
+          weight_grams: null,
+          envia_shipment_id: null,
+          created_at: sh.created_at ?? order.created_at,
+        }]
+      }
+      // Fallback: native Medusa fulfillments (legacy / future full-fulfillment).
+      return ((order.fulfillments as any[]) ?? []).length > 0
         ? ((order.fulfillments as any[]).map((f: any) => ({
             id: f.id,
             carrier: f.data?.carrier ?? 'manual',
-            tracking_number: f.tracking_numbers?.[0]?.tracking_number ?? null,
-            label_url: f.data?.label_url ?? null,
-            status: 'label_created',
+            tracking_number: f.labels?.[0]?.tracking_number ?? f.tracking_numbers?.[0]?.tracking_number ?? null,
+            label_url: f.labels?.[0]?.label_url ?? f.data?.label_url ?? null,
+            status: f.delivered_at ? 'delivered' : f.shipped_at ? 'shipped' : 'label_created',
             estimated_delivery_date: null,
             weight_grams: null,
             envia_shipment_id: null,
             created_at: f.created_at,
           })))
-        : null,
+        : null
+    })(),
     // Mark as Medusa-backed for routing decisions in the frontend
     _source: 'medusa',
     _medusa_order_id: order.id,

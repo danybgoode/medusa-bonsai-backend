@@ -62,6 +62,17 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 }
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
+//
+// Advances the order lifecycle. We persist the shipment + lifecycle state on the
+// Medusa order itself (the system of record) via order.metadata, rather than the
+// Fulfillment module: our checkout prices/handles shipping through Envia (stored
+// in metadata) and never attaches a Medusa shipping method, so the Fulfillment
+// workflows — which derive provider/profile/location from the order's shipping
+// option — can't run. Keeping shipment state on the order means the buyer detail
+// page, seller views, and autoconfirm all read one source. normalizeMedusaOrder
+// surfaces metadata.shipment + metadata.fulfillment_state.
+
+const LIFECYCLE_STATES = new Set(['processing', 'shipped', 'in_transit', 'delivered', 'completed'])
 
 export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const seller = await resolveSeller(req)
@@ -71,65 +82,80 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const body = req.body as {
     status?: string
     carrier?: string
+    carrier_label?: string
     tracking_number?: string
   }
 
-  if (!body.status) {
-    return res.status(400).json({ message: 'status is required' })
+  const newStatus = body.status
+  if (!newStatus) return res.status(400).json({ message: 'status is required' })
+  if (!LIFECYCLE_STATES.has(newStatus)) {
+    return res.status(422).json({ message: `Unsupported status transition: ${newStatus}` })
   }
 
   const orderService = req.scope.resolve(Modules.ORDER) as any
-  const fulfillmentService = req.scope.resolve(Modules.FULFILLMENT) as any | null
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
   let order: Record<string, unknown>
   try {
     order = await orderService.retrieveOrder(orderId, {
-      relations: ['items', 'fulfillments'],
+      select: ['id', 'metadata'],
+      relations: ['items'],
     })
   } catch {
     return res.status(404).json({ message: 'Order not found' })
   }
 
-  const newStatus = body.status
-
-  // 'processing' → acknowledge, no Medusa operation needed
-  if (newStatus === 'processing') {
-    return res.json({ status: 'processing' })
-  }
-
-  // 'shipped' → create a fulfillment record in Medusa
-  if (newStatus === 'shipped' || newStatus === 'in_transit') {
-    try {
-      const items = ((order.items as any[]) ?? []).map((item: any) => ({
-        id: item.id,
-        quantity: item.quantity,
-      }))
-
-      // Create fulfillment via order service or fulfillment service
-      if (fulfillmentService) {
-        await fulfillmentService.createFulfillment?.({
-          order_id: orderId,
-          items,
-          data: {
-            carrier: body.carrier ?? 'manual',
-            tracking_number: body.tracking_number ?? null,
-          },
-        }).catch((e: unknown) => console.error('[seller orders] fulfillment create error:', e))
+  // Ownership: the order must contain one of this seller's products.
+  try {
+    const { data: sellerRows } = await query.graph({
+      entity: 'seller',
+      fields: ['id', 'products.id'],
+      filters: { id: seller.sellerId },
+    })
+    const productIds: string[] = ((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id)
+    if (productIds.length > 0) {
+      const orderProductIds = ((order.items as any[]) ?? []).map((i: any) => i.product_id)
+      if (!orderProductIds.some((id: string) => productIds.includes(id))) {
+        return res.status(403).json({ message: 'Forbidden' })
       }
-    } catch (e) {
-      console.error('[seller orders] ship error:', e)
-      // Non-fatal — return shipped status anyway
     }
-    return res.json({ status: 'shipped' })
+  } catch { /* if the link query fails, skip the check rather than block shipping */ }
+
+  const meta = ((order.metadata ?? {}) as Record<string, any>)
+  const prevShipment = (meta.shipment ?? {}) as Record<string, any>
+  const now = new Date().toISOString()
+
+  let fulfillmentState = newStatus
+  let shipment = prevShipment
+
+  if (newStatus === 'shipped' || newStatus === 'in_transit') {
+    shipment = {
+      ...prevShipment,
+      carrier: body.carrier ?? prevShipment.carrier ?? 'manual',
+      carrier_label: body.carrier_label ?? prevShipment.carrier_label ?? null,
+      tracking_number: body.tracking_number ?? prevShipment.tracking_number ?? null,
+      status: newStatus === 'in_transit' ? 'in_transit' : 'shipped',
+      shipped_at: prevShipment.shipped_at ?? now,
+      created_at: prevShipment.created_at ?? now,
+    }
+  } else if (newStatus === 'delivered') {
+    shipment = { ...prevShipment, status: 'delivered', delivered_at: now }
   }
 
-  // 'delivered' → complete the order in Medusa
-  if (newStatus === 'delivered' || newStatus === 'completed') {
-    try {
-      await orderService.completeOrder?.(orderId).catch((e: unknown) => console.error('[seller orders] complete error:', e))
-    } catch { /* non-fatal */ }
-    return res.json({ status: 'delivered' })
+  try {
+    await orderService.updateOrders(orderId, {
+      metadata: {
+        ...meta,
+        fulfillment_state: fulfillmentState,
+        ...(Object.keys(shipment).length ? { shipment } : {}),
+        ...(newStatus === 'delivered' ? { delivered_at: now } : {}),
+        ...(newStatus === 'completed' ? { completed_at: now } : {}),
+      },
+    })
+  } catch (e) {
+    console.error('[seller orders] status update error:', e)
+    return res.status(500).json({ message: 'Failed to update order' })
   }
 
-  return res.status(422).json({ message: `Unsupported status transition: ${newStatus}` })
+  return res.json({ status: newStatus })
 }
