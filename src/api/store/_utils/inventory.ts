@@ -144,6 +144,40 @@ export async function ensureInventoryLevel(
 }
 
 /**
+ * Set a managed variant's *available* quantity at the location (seller-facing
+ * "cantidad disponible"). available = stocked − reserved, so to make exactly
+ * `availableQuantity` units buyable we set stocked = availableQuantity + reserved.
+ * This never clobbers in-flight reservations (pending/placed orders). Ensures the
+ * inventory item + level exist first. Returns the resulting stocked/reserved.
+ */
+export async function setVariantAvailableQuantity(
+  scope: Scope,
+  variant: { id: string; sku?: string | null; title?: string | null },
+  locationId: string,
+  availableQuantity: number
+): Promise<{ stocked: number; reserved: number }> {
+  const desired = Math.max(0, Math.floor(availableQuantity))
+  const inventoryItemId = await ensureVariantInventoryItem(scope, variant)
+  const inventoryService = scope.resolve(Modules.INVENTORY)
+
+  const [level] = await inventoryService.listInventoryLevels({
+    inventory_item_id: inventoryItemId,
+    location_id: locationId,
+  })
+  const reserved = Number(level?.reserved_quantity ?? 0)
+  const stocked = desired + reserved
+
+  if (level) {
+    await inventoryService.updateInventoryLevels([
+      { inventory_item_id: inventoryItemId, location_id: locationId, stocked_quantity: stocked },
+    ])
+  } else {
+    await ensureInventoryLevel(scope, inventoryItemId, locationId, stocked)
+  }
+  return { stocked, reserved }
+}
+
+/**
  * Full provisioning for a freshly-created managed variant: link the sales channel to
  * the location and create the stock level. Best-effort — logs and swallows so a
  * provisioning hiccup never blocks product creation (the product still exists; the

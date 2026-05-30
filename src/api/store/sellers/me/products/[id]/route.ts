@@ -5,6 +5,11 @@ import { updateProductsWorkflow } from '@medusajs/medusa/core-flows'
 import { SELLER_MODULE } from '../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../../_utils/clerk-auth'
+import {
+  isStockableListingType,
+  resolveStockLocationId,
+  setVariantAvailableQuantity,
+} from '../../../../_utils/inventory'
 
 async function resolveOwnership(req: MedusaRequest, productId: string) {
   const clerkUserId = extractClerkUserId(req) ?? (req as any).auth_context?.actor_id
@@ -42,6 +47,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     title?: string
     description?: string | null
     price_cents?: number | null
+    quantity?: number | null
     status?: 'published' | 'draft'
     metadata?: Record<string, unknown>
   }
@@ -104,6 +110,39 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
             },
           },
         })
+      }
+    }
+  }
+
+  // ── Stock / restock (managed physical products) ────────────────────────────
+  if (body.quantity !== undefined && body.quantity !== null) {
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: [
+        'metadata', 'type.value',
+        'variants.id', 'variants.sku', 'variants.title', 'variants.manage_inventory',
+      ],
+      filters: { id },
+    })
+    const product = rows?.[0] as any
+    const listingType = product?.type?.value ?? (product?.metadata?.listing_type as string | undefined) ?? 'product'
+    const variant = product?.variants?.[0] as
+      | { id: string; sku?: string | null; title?: string | null; manage_inventory?: boolean }
+      | undefined
+
+    if (!isStockableListingType(listingType)) {
+      return res.status(422).json({ message: 'Only physical products can have a stock quantity' })
+    }
+    if (variant) {
+      const locationId = await resolveStockLocationId(req.scope)
+      if (locationId) {
+        // Ensure the variant is managed (older products may predate inventory wiring).
+        if (!variant.manage_inventory) {
+          await (productService as any).updateProductVariants(variant.id, { manage_inventory: true })
+        }
+        await setVariantAvailableQuantity(req.scope, variant, locationId, body.quantity)
+      } else {
+        console.error('[sellers/me/products PATCH] no stock location for quantity update', { id })
       }
     }
   }
