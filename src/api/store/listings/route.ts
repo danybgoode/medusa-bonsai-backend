@@ -20,6 +20,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     fields: [
       'id', 'title', 'description', 'status', 'metadata', 'created_at',
       'variants.*', 'variants.prices.*',
+      'variants.inventory_items.inventory.location_levels.stocked_quantity',
+      'variants.inventory_items.inventory.location_levels.reserved_quantity',
       'images.*',
       'categories.*',
       'type.*',

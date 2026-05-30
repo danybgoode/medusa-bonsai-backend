@@ -1,0 +1,176 @@
+/**
+ * Inventory helpers — Medusa Inventory module wiring for seller products.
+ *
+ * Marketplace items are unique P2P goods (default quantity 1). We rely on the
+ * Inventory module so Medusa's built-in completeCartWorkflow → reserveInventoryStep
+ * reserves stock on order placement and blocks double-selling. This file centralises
+ * the three things a managed variant needs beyond `manage_inventory: true`:
+ *   1. an inventory *level* (stock) at a stock location, and
+ *   2. that location being linked to the product's sales channel (otherwise
+ *      reserveInventoryStep throws "sales channel not associated with any stock location"), and
+ *   3. resolving which stock location to use (one is seeded).
+ *
+ * `createProductVariantsWorkflow` already auto-creates the inventory *item* for a
+ * managed variant, so we only create the level here.
+ */
+import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
+import {
+  createInventoryItemsWorkflow,
+  createInventoryLevelsWorkflow,
+  linkSalesChannelsToStockLocationWorkflow,
+} from '@medusajs/medusa/core-flows'
+
+type Scope = { resolve: (key: string) => any }
+
+/** Listing types that represent a stockable physical good. */
+export function isStockableListingType(listingType: string | null | undefined): boolean {
+  // Only physical `product` listings are unique-stock items (covers autos/inmuebles,
+  // which are products with category metadata). service/rental/digital/subscription
+  // have no finite stock.
+  return (listingType ?? 'product') === 'product'
+}
+
+/**
+ * Resolve the stock location to use for marketplace inventory. Prefers an explicit
+ * env override, else the first stock location (one is seeded).
+ */
+export async function resolveStockLocationId(scope: Scope): Promise<string | undefined> {
+  if (process.env.MEDUSA_STOCK_LOCATION_ID) return process.env.MEDUSA_STOCK_LOCATION_ID
+  const stockLocationService = scope.resolve(Modules.STOCK_LOCATION)
+  const [location] = await stockLocationService.listStockLocations(
+    {},
+    { select: ['id'], take: 1, order: { created_at: 'ASC' } }
+  )
+  return location?.id
+}
+
+/** Find the inventory item id auto-created for a managed variant. */
+export async function getVariantInventoryItemId(
+  scope: Scope,
+  variantId: string
+): Promise<string | undefined> {
+  const query = scope.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: 'variant',
+    fields: ['id', 'inventory_items.inventory_item_id'],
+    filters: { id: variantId },
+  })
+  return (data?.[0]?.inventory_items?.[0] as { inventory_item_id?: string } | undefined)?.inventory_item_id
+}
+
+/**
+ * Ensure a variant has a linked inventory item, creating one if missing. Unlike
+ * variant *creation*, flipping `manage_inventory` false→true on an existing variant
+ * does NOT auto-create an inventory item, so backfill must do it here. Returns the
+ * inventory item id. Idempotent.
+ */
+export async function ensureVariantInventoryItem(
+  scope: Scope,
+  variant: { id: string; sku?: string | null; title?: string | null }
+): Promise<string> {
+  const existing = await getVariantInventoryItemId(scope, variant.id)
+  if (existing) return existing
+
+  const { result } = await createInventoryItemsWorkflow(scope as any).run({
+    input: {
+      items: [
+        {
+          sku: variant.sku ?? undefined,
+          title: variant.title ?? undefined,
+          requires_shipping: true,
+        },
+      ],
+    },
+  })
+  const inventoryItemId = (result?.[0] as { id: string }).id
+
+  const remoteLink = scope.resolve(ContainerRegistrationKeys.LINK)
+  await remoteLink.create({
+    [Modules.PRODUCT]: { variant_id: variant.id },
+    [Modules.INVENTORY]: { inventory_item_id: inventoryItemId },
+    data: { required_quantity: 1 },
+  })
+  return inventoryItemId
+}
+
+/** Ensure the sales channel is linked to the stock location (idempotent). */
+export async function ensureSalesChannelLocationLink(
+  scope: Scope,
+  salesChannelId: string,
+  locationId: string
+): Promise<void> {
+  const query = scope.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: 'sales_channel',
+    fields: ['id', 'stock_locations.id'],
+    filters: { id: salesChannelId },
+  })
+  const linked = ((data?.[0]?.stock_locations ?? []) as Array<{ id: string }>).some(
+    (l) => l.id === locationId
+  )
+  if (linked) return
+  await linkSalesChannelsToStockLocationWorkflow(scope as any).run({
+    input: { id: locationId, add: [salesChannelId] },
+  })
+}
+
+/**
+ * Create an inventory level (stock) for an inventory item at a location, unless one
+ * already exists. Idempotent — safe for backfill and retries.
+ */
+export async function ensureInventoryLevel(
+  scope: Scope,
+  inventoryItemId: string,
+  locationId: string,
+  stockedQuantity: number
+): Promise<void> {
+  const inventoryService = scope.resolve(Modules.INVENTORY)
+  const existing = await inventoryService.listInventoryLevels({
+    inventory_item_id: inventoryItemId,
+    location_id: locationId,
+  })
+  if (existing.length > 0) return
+  await createInventoryLevelsWorkflow(scope as any).run({
+    input: {
+      inventory_levels: [
+        {
+          inventory_item_id: inventoryItemId,
+          location_id: locationId,
+          stocked_quantity: stockedQuantity,
+        },
+      ],
+    },
+  })
+}
+
+/**
+ * Full provisioning for a freshly-created managed variant: link the sales channel to
+ * the location and create the stock level. Best-effort — logs and swallows so a
+ * provisioning hiccup never blocks product creation (the product still exists; the
+ * backfill endpoint can repair it).
+ */
+export async function provisionVariantInventory(
+  scope: Scope,
+  opts: {
+    variantId: string
+    salesChannelId?: string
+    locationId: string
+    quantity: number
+  }
+): Promise<{ ok: boolean; inventoryItemId?: string; error?: string }> {
+  try {
+    const inventoryItemId = await getVariantInventoryItemId(scope, opts.variantId)
+    if (!inventoryItemId) {
+      return { ok: false, error: 'no inventory item found for variant' }
+    }
+    if (opts.salesChannelId) {
+      await ensureSalesChannelLocationLink(scope, opts.salesChannelId, opts.locationId)
+    }
+    await ensureInventoryLevel(scope, inventoryItemId, opts.locationId, opts.quantity)
+    return { ok: true, inventoryItemId }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    console.error('[inventory] provisionVariantInventory failed:', error)
+    return { ok: false, error }
+  }
+}

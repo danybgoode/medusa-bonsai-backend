@@ -30,6 +30,12 @@ export interface ListingShape {
   source_platform: string | null
   source_url: string | null
   views: number
+  /** Whether the listing's variant tracks finite stock (physical products). */
+  manage_inventory: boolean
+  /** Available units (stocked − reserved) for managed items; null = unlimited. */
+  available_quantity: number | null
+  /** False only when a managed item has run out (reserved/sold). */
+  in_stock: boolean
   created_at: string
   shop: SellerShape | null
 }
@@ -94,6 +100,23 @@ export function toListingShape(product: any, seller?: any): ListingShape {
   const priceObj = mxnPrice ?? variant?.prices?.[0]
   const fallbackPrice = typeof meta.price_cents === 'number' ? meta.price_cents : null
 
+  // ── Stock (Medusa Inventory) ──────────────────────────────────────────────
+  // Managed (physical) variants carry inventory items with location levels;
+  // available = Σ(stocked − reserved). Unmanaged legacy items (services, autos
+  // pre-backfill, etc.) have no inventory item → treated as unlimited / in stock.
+  const manageInventory = !!variant?.manage_inventory
+  let availableQuantity: number | null = null
+  if (manageInventory) {
+    const levels: any[] = (variant?.inventory_items ?? [])
+      .flatMap((ii: any) => ii?.inventory?.location_levels ?? [])
+    availableQuantity = levels.reduce(
+      (sum: number, lvl: any) =>
+        sum + (Number(lvl?.stocked_quantity ?? 0) - Number(lvl?.reserved_quantity ?? 0)),
+      0,
+    )
+  }
+  const inStock = !manageInventory || (availableQuantity ?? 0) > 0
+
   return {
     id: product.id,
     shop_id: seller?.id ?? '',
@@ -118,6 +141,9 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     source_platform: (meta.source_platform as string) ?? null,
     source_url: (meta.source_url as string) ?? null,
     views: (meta.views as number) ?? 0,
+    manage_inventory: manageInventory,
+    available_quantity: availableQuantity,
+    in_stock: inStock,
     created_at: product.created_at as string,
     shop: seller ? toSellerShape(seller) : null,
   }

@@ -6,6 +6,11 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
 import { toListingShape } from '../../../_utils/listing'
+import {
+  isStockableListingType,
+  resolveStockLocationId,
+  provisionVariantInventory,
+} from '../../../_utils/inventory'
 
 interface CreateProductBody {
   title: string
@@ -18,6 +23,7 @@ interface CreateProductBody {
   state?: string | null
   municipio?: string | null
   location?: string | null
+  quantity?: number | null
   images?: Array<{ url: string; alt?: string }>
   tags?: string[]
   metadata?: Record<string, unknown>
@@ -66,6 +72,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     fields: [
       'id', 'title', 'description', 'status', 'metadata', 'created_at',
       'variants.*', 'variants.prices.*',
+      'variants.inventory_items.inventory.location_levels.stocked_quantity',
+      'variants.inventory_items.inventory.location_levels.reserved_quantity',
       'images.*',
       'categories.*',
       'type.*',
@@ -157,6 +165,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     }
   }
 
+  // ── Inventory: physical `product` listings are unique-stock items ─────────
+  // Managed variants let Medusa's completeCartWorkflow reserve stock on order
+  // placement and block double-selling. service/rental/digital/subscription are
+  // not stockable. Default quantity 1 (unique P2P item).
+  const manageInventory = isStockableListingType(body.listing_type)
+  const quantity = Math.max(0, Math.floor(body.quantity ?? 1))
+
   // ── Create Medusa product ────────────────────────────────────────────────
   const { result } = await createProductsWorkflow(req.scope).run({
     input: {
@@ -181,7 +196,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           options: {
             Default: 'Default',
           },
-          manage_inventory: false,
+          manage_inventory: manageInventory,
           prices: body.price_cents != null && body.price_cents > 0
             ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
             : [],
@@ -196,6 +211,25 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     [SELLER_MODULE]: { seller_id: seller.id },
     [Modules.PRODUCT]: { product_id: product.id },
   })
+
+  // ── Provision inventory level for managed (physical) products ─────────────
+  // The managed variant's inventory item is auto-created by the product workflow;
+  // here we create the stock level at the seeded location and ensure that location
+  // is linked to the sales channel so reservations succeed on order placement.
+  if (manageInventory) {
+    const variantId = (product.variants?.[0] as { id?: string } | undefined)?.id
+    const locationId = await resolveStockLocationId(req.scope)
+    if (variantId && locationId) {
+      await provisionVariantInventory(req.scope, {
+        variantId,
+        salesChannelId,
+        locationId,
+        quantity,
+      })
+    } else {
+      console.error('[sellers/me/products] inventory not provisioned:', { variantId, locationId })
+    }
+  }
 
   res.status(201).json({
     product_id: product.id,
