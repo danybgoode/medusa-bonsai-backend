@@ -89,6 +89,35 @@ export class EnviaFulfillmentService extends AbstractFulfillmentProviderService 
     _order: Partial<FulfillmentOrderDTO> | undefined,
     fulfillment: Partial<Omit<FulfillmentDTO, 'provider_id' | 'data' | 'items'>>,
   ): Promise<CreateFulfillmentResult> {
+    // ── Fast path: shipment already created by the /ship endpoint ────────────
+    // The backend ship route calls createShipment() first, then passes the result
+    // in fulfillment.metadata.envia_pre_built_shipment so we don't call Envia twice.
+    const meta = (fulfillment as any).metadata as Record<string, any> | undefined
+    const preBuilt = meta?.envia_pre_built_shipment as Record<string, any> | undefined
+
+    if (preBuilt?.enviaShipmentId || preBuilt?.trackingNumber) {
+      return {
+        data: {
+          enviaShipmentId: preBuilt.enviaShipmentId ?? '',
+          carrier: preBuilt.carrier ?? '',
+          trackingNumber: preBuilt.trackingNumber ?? null,
+          labelUrl: preBuilt.labelUrl ?? null,
+          estimatedDeliveryDate: preBuilt.estimatedDeliveryDate ?? null,
+          rateId: preBuilt.rateId ?? null,
+          status: 'label_created',
+          source: 'envia_ship_endpoint',
+        },
+        labels: preBuilt.trackingNumber
+          ? [{
+              tracking_number: preBuilt.trackingNumber as string,
+              tracking_url: '',
+              label_url: (preBuilt.labelUrl ?? '') as string,
+            }]
+          : [],
+      }
+    }
+
+    // ── Standard path: create shipment directly (future cart-native flow) ─────
     const d = data as FulfillmentData
     const origin = d.origin as EnviaAddress | undefined
     const destination = d.destination as EnviaAddress | undefined
@@ -96,7 +125,7 @@ export class EnviaFulfillmentService extends AbstractFulfillmentProviderService 
 
     if (!d.rateId || !origin || !destination || !packages?.length) {
       console.warn(
-        '[envia-fulfillment] createFulfillment called without full quote context; skipping label generation'
+        '[envia-fulfillment] createFulfillment: no pre-built shipment and no quote context — label_pending'
       )
       return {
         data: { ...data, status: 'label_pending' },
@@ -121,6 +150,7 @@ export class EnviaFulfillmentService extends AbstractFulfillmentProviderService 
         labelUrl: shipment.labelUrl ?? undefined,
         estimatedDeliveryDate: shipment.estimatedDeliveryDate ?? undefined,
         status: 'label_created',
+        source: 'envia_provider_direct',
       },
       labels: shipment.trackingNumber
         ? [{
