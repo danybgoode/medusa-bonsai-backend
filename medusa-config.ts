@@ -87,6 +87,12 @@ module.exports = defineConfig({
             id: 'manual',
             options: {},
           },
+          // Envia.com multi-carrier shipping for Mexico (provider_id: envia_envia)
+          {
+            resolve: './src/modules/fulfillment-envia',
+            id: 'envia',
+            options: {},
+          },
         ],
       },
     },

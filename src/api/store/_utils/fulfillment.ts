@@ -141,21 +141,26 @@ export async function setupFulfillmentInfrastructure(
   const existingOptions = allOptions.filter((o: any) => targetNames.has(o.name))
   const existingNames = new Set(existingOptions.map((o: any) => o.name))
 
+  // shipping: uses the Envia provider (envia_envia) so Phase B label generation
+  // flows through the correct provider. pickup + digital keep manual_manual.
   const optionDefs = [
     {
       name: SHIPPING_OPTION_NAMES.shipping,
       label: 'Envío México (Envia.com)',
       code: 'standard',
+      provider_id: 'envia_envia',
     },
     {
       name: SHIPPING_OPTION_NAMES.pickup,
       label: 'Recogida en tienda',
       code: 'pickup',
+      provider_id: 'manual_manual',
     },
     {
       name: SHIPPING_OPTION_NAMES.digital,
       label: 'Entrega digital / servicio',
       code: 'digital',
+      provider_id: 'manual_manual',
     },
   ]
 
@@ -166,14 +171,14 @@ export async function setupFulfillmentInfrastructure(
       skipped.push(`shipping_option(${def.name})`)
       continue
     }
-    // price_type: calculated — we never add these options to a cart so
-    // price calculation is never invoked; options are used only to attach
-    // a provider + profile to createOrderFulfillmentWorkflow.
+    // price_type: calculated — rates are quoted at payment time via
+    // /store/envia/rates; this option is used to attach the provider to
+    // createOrderFulfillmentWorkflow in Phase B.
     const [opt] = await fulfillmentService.createShippingOptions([{
       name: def.name,
       service_zone_id: serviceZoneId,
       shipping_profile_id: profileId,
-      provider_id: 'manual_manual',
+      provider_id: def.provider_id,
       price_type: 'calculated',
       type: { label: def.label, description: def.label, code: def.code },
     }])
