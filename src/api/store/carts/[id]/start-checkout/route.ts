@@ -29,6 +29,30 @@ const ESCROW_AUTO_CAPTURE_DAYS = 3
 type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none'
 type EscrowMode = 'off' | 'optional' | 'required'
 
+// ── Bundle discount helpers ───────────────────────────────────────────────────
+
+interface BundleTier {
+  min_items: number
+  percent_off: number
+}
+
+interface BundleSettings {
+  enabled?: boolean
+  tiers?: BundleTier[]
+}
+
+/**
+ * Returns the best qualifying tier for `itemCount`, or null if no discount applies.
+ * Highest min_items ≤ itemCount wins (Vinted-style tiered %).
+ */
+function resolveBundleTier(settings: BundleSettings | null | undefined, itemCount: number): BundleTier | null {
+  if (!settings?.enabled || !settings.tiers?.length || itemCount < 2) return null
+  const qualifying = settings.tiers
+    .filter(t => t.min_items >= 2 && t.min_items <= itemCount && t.percent_off > 0 && t.percent_off <= 100)
+    .sort((a, b) => b.min_items - a.min_items)
+  return qualifying[0] ?? null
+}
+
 type CheckoutShippingAddress = {
   name?: string
   phone?: string
@@ -167,10 +191,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     (sum: number, i: any) => sum + Math.round(Number(i.unit_price ?? 0) * Number(i.quantity ?? 1)),
     0,
   )
-  const priceCents = body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
+  const rawItemsCents = body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
   const shippingQuote = normalizeShippingQuote(body.shipping_quote)
   const shippingCents = shippingQuote?.amount_cents ?? 0
-  const checkoutTotalCents = priceCents + shippingCents
+  // priceCents and checkoutTotalCents are finalized after bundle discount is resolved below
 
   if (!seller) {
     return res.status(422).json({
@@ -186,7 +210,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(400).json({ message: 'Selecciona una tarifa de envío para continuar.' })
   }
 
-  // Escrow mode is resolved early so it can be written to cart metadata before the payment branch
+  // ── Bundle discount (tiered %) ────────────────────────────────────────────
+  // Applied to item subtotal only (not shipping). Ignored when buyer has an accepted
+  // offer override (offer_amount_cents already reflects an agreed price).
+  const bundleSettings = (sellerSettings.bundles ?? null) as BundleSettings | null
+  const itemCount = (cart.items ?? []).length
+  const bundleTier = body.offer_amount_cents ? null : resolveBundleTier(bundleSettings, itemCount)
+  const bundleDiscountCents = bundleTier
+    ? Math.round(itemsTotalCents * bundleTier.percent_off / 100)
+    : 0
+  // priceCents = item charge after discount (providers bill this); checkoutTotalCents adds shipping
+  const priceCents = Math.max(0, rawItemsCents - bundleDiscountCents)
+  const checkoutTotalCents = priceCents + shippingCents
+
+  // ── Escrow mode is resolved early so it can be written to cart metadata before the payment branch
   const checkoutSettings = (sellerSettings.checkout ?? {}) as Record<string, unknown>
   const escrowModeSetting = (checkoutSettings.escrow_mode ?? 'off') as EscrowMode
   const useEscrow = escrowModeSetting === 'required' || (escrowModeSetting === 'optional' && body.escrow === true)
@@ -198,6 +235,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     has_shipping_address: !!body.shipping_address,
     shipping_quote: shippingQuote,
     escrow_mode: useEscrow ? escrowModeSetting : null,
+    ...(bundleTier ? {
+      bundle_discount: {
+        percent_off: bundleTier.percent_off,
+        discount_cents: bundleDiscountCents,
+        item_count: itemCount,
+        tier_min_items: bundleTier.min_items,
+      },
+    } : {}),
   }
 
   try {
@@ -209,6 +254,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         payment_method: body.provider,
         fulfillment_method: fulfillmentMethod,
         ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
+        ...(bundleTier ? {
+          bundle_discount_pct: bundleTier.percent_off,
+          bundle_discount_cents: bundleDiscountCents,
+        } : {}),
         ...(shippingQuote ? {
           shipping_rate_id: shippingQuote.rate_id,
           shipping_carrier: shippingQuote.carrier,
@@ -503,6 +552,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // For escrow: include the mode so frontend can show escrow badge
     if (useEscrow) {
       responseBody.escrow_mode = escrowModeSetting
+    }
+    // Bundle discount applied
+    if (bundleTier) {
+      responseBody.bundle_discount = {
+        percent_off: bundleTier.percent_off,
+        discount_cents: bundleDiscountCents,
+        item_count: itemCount,
+      }
     }
     return res.json(responseBody)
   } catch (e) {
