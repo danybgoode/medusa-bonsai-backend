@@ -27,8 +27,15 @@ const DEFAULT_CARRIERS = ['dhl', 'fedex', 'estafeta', 'ups', 'redpack', 'paquete
 type IncomingAddress = {
   name?: string
   phone?: string
+  /** Street name only */
   line1?: string
+  /** Exterior number */
+  ext_number?: string
+  /** Interior number */
+  int_number?: string
+  /** Colonia */
   line2?: string
+  /** Alcaldía / municipio */
   city?: string
   state?: string
   state_code?: string
@@ -61,7 +68,8 @@ type ShippingSettings = {
 function addressReady(a: IncomingAddress) {
   return Boolean(
     a.name?.trim() &&
-    a.line1?.trim() &&
+    a.line1?.trim() &&          // street name
+    a.ext_number?.trim() &&     // exterior number (required for label)
     a.city?.trim() &&
     (a.state_code?.trim() || a.state?.trim()) &&
     a.postal_code?.trim()
@@ -176,8 +184,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     name: body.address.name ?? 'Comprador',
     phone: body.address.phone,
     street: body.address.line1 ?? '',
-    district: body.address.line2,
-    city: body.address.city ?? '',
+    number: body.address.ext_number ?? undefined,
+    district: body.address.line2,   // colonia
+    city: body.address.city ?? '',  // alcaldía / municipio (region_2)
     state: destStateCode,
     country: 'MX',
     postalCode: body.address.postal_code ?? '',

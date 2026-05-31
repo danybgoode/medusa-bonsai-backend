@@ -56,10 +56,19 @@ function resolveBundleTier(settings: BundleSettings | null | undefined, itemCoun
 type CheckoutShippingAddress = {
   name?: string
   phone?: string
+  /** Street name only */
   line1?: string
+  /** Exterior number */
+  ext_number?: string
+  /** Interior number (optional) */
+  int_number?: string
+  /** Colonia */
   line2?: string
+  /** Alcaldía / municipio (from CP lookup region_2) */
   city?: string
   state?: string
+  /** Envia 2-digit state code */
+  state_code?: string
   postal_code?: string
   country?: string
 }
@@ -77,14 +86,23 @@ type CheckoutShippingQuote = {
 function medusaAddress(input?: CheckoutShippingAddress | null) {
   if (!input) return null
   const [firstName, ...rest] = (input.name ?? '').trim().split(/\s+/).filter(Boolean)
+  // Combine street + exterior number into address_1 for Medusa's single field
+  const streetParts = [input.line1, input.ext_number].filter(Boolean)
+  const address1 = streetParts.join(' ') || undefined
+  // Interior number prepended to colonia in address_2
+  const address2Parts = [
+    input.int_number ? `Int ${input.int_number}` : '',
+    input.line2 ?? '',
+  ].filter(Boolean)
+  const address2 = address2Parts.join(', ') || undefined
   return {
     first_name: firstName || undefined,
     last_name: rest.join(' ') || undefined,
     phone: input.phone || undefined,
-    address_1: input.line1 || undefined,
-    address_2: input.line2 || undefined,
+    address_1: address1,
+    address_2: address2,
     city: input.city || undefined,
-    province: input.state || undefined,
+    province: input.state_code || input.state || undefined,
     postal_code: input.postal_code || undefined,
     country_code: (input.country || 'mx').toLowerCase(),
   }
