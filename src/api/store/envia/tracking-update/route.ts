@@ -9,8 +9,8 @@
  * Legacy Supabase orders are handled directly in the Next.js webhook.
  *
  * Security: only called server-to-server from Next.js (behind the Envia
- * HMAC verification step). Additionally protected by MEDUSA_INTERNAL_TOKEN
- * if set.
+ * HMAC verification step). Additionally protected by MEDUSA_INTERNAL_SECRET
+ * (x-internal-secret header) — same pattern used by all internal endpoints.
  *
  * Body: {
  *   orderId:        string   — Medusa order ID (starts with "order_")
@@ -41,11 +41,11 @@ const STATE_RANK: Record<string, number> = {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  // Optional internal token guard
-  const internalToken = process.env.MEDUSA_INTERNAL_TOKEN
-  if (internalToken) {
-    const auth = req.headers['authorization'] as string | undefined
-    if (auth !== `Bearer ${internalToken}`) {
+  // Internal secret guard — matches the pattern used by all /internal/* routes
+  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
+  if (internalSecret) {
+    const provided = req.headers['x-internal-secret'] as string | undefined
+    if (provided !== internalSecret) {
       return res.status(401).json({ message: 'Unauthorized' })
     }
   }
