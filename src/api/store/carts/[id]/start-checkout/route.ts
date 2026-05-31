@@ -26,7 +26,7 @@ const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 // Escrow: 3-day auto-confirm window (buyer must confirm delivery; else auto-captured)
 const ESCROW_AUTO_CAPTURE_DAYS = 3
 
-type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none'
+type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none' | 'coord' | 'none'
 type EscrowMode = 'off' | 'optional' | 'required'
 
 // ── Bundle discount helpers ───────────────────────────────────────────────────
@@ -140,6 +140,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   if (!body.provider || !['stripe', 'mercadopago', 'spei', 'cash'].includes(body.provider)) {
     return res.status(400).json({ message: 'provider is required: "stripe", "mercadopago", "spei", or "cash"' })
+  }
+
+  // Rule: coordinated delivery (none/coord) requires manual payment coordination.
+  // Card payments create buyer anxiety when there is no structured delivery path.
+  const fulfillmentMethodEarly = body.fulfillment_method ?? 'none'
+  if (
+    (fulfillmentMethodEarly === 'none' || fulfillmentMethodEarly === 'coord') &&
+    (body.provider === 'stripe' || body.provider === 'mercadopago')
+  ) {
+    return res.status(422).json({
+      message: 'Este vendedor coordina la entrega personalmente. El pago debe acordarse junto con la entrega — usa SPEI, efectivo o WhatsApp.',
+    })
   }
 
   const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
