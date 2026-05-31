@@ -204,6 +204,7 @@ async function runFulfillWorkflow({
   const fulfillmentMethod = (meta.fulfillment_method ?? 'shipping') as string
   const optionKey = fulfillmentMethod === 'local_pickup' ? 'pickup'
     : fulfillmentMethod === 'digital' || fulfillmentMethod === 'service' ? 'digital'
+    : fulfillmentMethod === 'none' || fulfillmentMethod === 'coord' || fulfillmentMethod === 'rental' ? 'coord'
     : 'shipping'
 
   const [optionIds, locationId] = await Promise.all([

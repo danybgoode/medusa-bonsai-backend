@@ -15,6 +15,7 @@ export const SHIPPING_OPTION_NAMES = {
   shipping: 'miyagi-envio-mexico',
   pickup:   'miyagi-recogida-tienda',
   digital:  'miyagi-entrega-digital',
+  coord:    'miyagi-entrega-acordada',  // seller-coordinated / manual delivery
 } as const
 
 // ---------------------------------------------------------------------------
@@ -152,7 +153,7 @@ export async function setupFulfillmentInfrastructure(
     },
     {
       name: SHIPPING_OPTION_NAMES.pickup,
-      label: 'Recogida en tienda',
+      label: 'Recolección en tienda / en mano',
       code: 'pickup',
       provider_id: 'manual_manual',
     },
@@ -160,6 +161,12 @@ export async function setupFulfillmentInfrastructure(
       name: SHIPPING_OPTION_NAMES.digital,
       label: 'Entrega digital / servicio',
       code: 'digital',
+      provider_id: 'manual_manual',
+    },
+    {
+      name: SHIPPING_OPTION_NAMES.coord,
+      label: 'Entrega acordada con vendedor',
+      code: 'coord',
       provider_id: 'manual_manual',
     },
   ]
