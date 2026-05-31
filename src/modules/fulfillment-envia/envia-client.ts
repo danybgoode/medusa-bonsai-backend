@@ -232,6 +232,8 @@ export async function createShipment(params: CreateShipmentParams): Promise<Crea
 
 export function mapEnviaError(msg: string): string {
   const m = msg.toLowerCase()
+  if (m.includes('missing envia_api_key') || (m.includes('envia_api_key') && m.includes('missing')))
+    return 'Configuración de envío incompleta en el servidor (ENVIA_API_KEY). Contacta al administrador.'
   if (m.includes('401') || m.includes('403') || m.includes('unauthorized'))
     return 'Error de autenticación con Envia. Verifica ENVIA_API_KEY.'
   if (m.includes('postal') || m.includes('zip'))
