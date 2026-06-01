@@ -65,8 +65,15 @@ async function resolveRegionProviderIds(req: MedusaRequest): Promise<string[] | 
       { relations: ['payment_providers'] },
     )
     const region = regions?.[0]
-    const ids = (region?.payment_providers ?? []).map((p: any) => p.id).filter(Boolean)
-    return ids.length ? ids : undefined
+    const ids: string[] = (region?.payment_providers ?? []).map((p: any) => p.id).filter(Boolean)
+    // Only treat the region list as an authoritative gate once it has been
+    // migrated to include the real providers (setup-mexico). A region that still
+    // only carries pp_system_default is stale — intersecting against it would
+    // wrongly hide every method, so we skip the intersection (seller config +
+    // module registration remain the binding constraints).
+    const REAL = ['pp_stripe-connect_stripe-connect', 'pp_mercadopago_mercadopago', 'pp_spei_spei', 'pp_cash_cash']
+    const hasRealProvider = ids.some(id => REAL.includes(id))
+    return hasRealProvider ? ids : undefined
   } catch {
     return undefined
   }
