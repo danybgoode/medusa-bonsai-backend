@@ -78,20 +78,55 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const { order, code } = await resolveOrderForSeller(req, orderId)
   if (!order) return res.status(code).json({ message: code === 401 ? 'Unauthorized' : code === 403 ? 'Forbidden' : 'Order not found' })
 
-  const body = (req.body ?? {}) as { action?: string; refund_amount_cents?: number }
-  if (!['accept', 'decline'].includes(body.action ?? '')) {
-    return res.status(422).json({ message: 'action must be "accept" or "decline"' })
+  const body = (req.body ?? {}) as { action?: string; refund_amount_cents?: number; note?: string }
+  if (!['accept', 'decline', 'seller_refund'].includes(body.action ?? '')) {
+    return res.status(422).json({ message: 'action must be "accept", "decline", or "seller_refund"' })
   }
 
   const meta = (order.metadata ?? {}) as Record<string, unknown>
-  const returnRequest = (meta.return_request ?? null) as Record<string, unknown> | null
-
-  if (!returnRequest) return res.status(404).json({ message: 'No return request found for this order' })
-  if (returnRequest.status === 'refunded') return res.status(409).json({ message: 'Return already refunded' })
-  if (returnRequest.status === 'declined') return res.status(409).json({ message: 'Return already declined' })
-
   const orderService: any = req.scope.resolve(Modules.ORDER)
   const now = new Date().toISOString()
+
+  // ── Resolve the return request to act on ──────────────────────────────────
+  // For buyer-driven accept/decline there must already be a request. For a
+  // seller-initiated refund there usually isn't one — synthesize a pre-approved,
+  // seller-initiated record and then run the same refund engine below.
+  let returnRequest = (meta.return_request ?? null) as Record<string, unknown> | null
+
+  if (body.action === 'seller_refund') {
+    // Guard: don't double-refund / fight an active buyer request.
+    if (returnRequest && returnRequest.status !== 'declined') {
+      if (returnRequest.status === 'refunded') {
+        return res.status(409).json({ message: 'Order already refunded' })
+      }
+      return res.status(409).json({
+        message: 'This order has an active return request — resolve it with accept/decline instead.',
+      })
+    }
+    if (order.status === 'canceled' || order.payment_status === 'refunded' || order.payment_status === 'canceled') {
+      return res.status(409).json({ message: 'Order is not refundable in its current state' })
+    }
+    returnRequest = {
+      status: 'requested',
+      reason: 'seller_initiated',
+      description: typeof body.note === 'string' && body.note.trim() ? body.note.trim() : null,
+      buyer_email: order.email ?? null,
+      order_total_cents: order.total ?? 0,
+      currency: order.currency_code ?? 'mxn',
+      requested_at: now,
+      initiated_by: 'seller',
+      seller_action: null,
+      seller_action_at: null,
+      refund_status: null,
+      refund_amount_cents: null,
+      refunded_at: null,
+    }
+  } else {
+    // Buyer-driven accept / decline
+    if (!returnRequest) return res.status(404).json({ message: 'No return request found for this order' })
+    if (returnRequest.status === 'refunded') return res.status(409).json({ message: 'Return already refunded' })
+    if (returnRequest.status === 'declined') return res.status(409).json({ message: 'Return already declined' })
+  }
 
   if (body.action === 'decline') {
     await orderService.updateOrders(orderId, {
@@ -108,13 +143,17 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     return res.json({ return_request: { ...returnRequest, status: 'declined', seller_action: 'declined', seller_action_at: now } })
   }
 
-  // ── Accept + refund/void ──────────────────────────────────────────────────
+  // ── Accept (buyer) or seller_refund — refund/void ─────────────────────────
+  const orderTotalCents = Math.round(Number(returnRequest.order_total_cents ?? order.total ?? 0))
   const refundAmountCents = body.refund_amount_cents != null
     ? Math.round(body.refund_amount_cents)
-    : Math.round(Number(returnRequest.order_total_cents ?? order.total ?? 0))
+    : orderTotalCents
 
   if (refundAmountCents <= 0) {
     return res.status(422).json({ message: 'refund_amount_cents must be greater than 0' })
+  }
+  if (orderTotalCents > 0 && refundAmountCents > orderTotalCents) {
+    return res.status(422).json({ message: 'refund_amount_cents cannot exceed the order total' })
   }
 
   // Escrow + not yet captured → void the authorization (no money moved; nothing to refund)
