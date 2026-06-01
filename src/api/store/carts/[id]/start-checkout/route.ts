@@ -20,6 +20,27 @@ import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/t
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
+import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
+
+// Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
+// Medusa's completeCart validation requires a shipping method on the cart when
+// items require shipping — even for pickup/coordinated/manual delivery.
+const OPTION_KEY_BY_METHOD: Record<string, 'shipping' | 'pickup' | 'digital' | 'coord'> = {
+  shipping: 'shipping',
+  local_pickup: 'pickup',
+  digital: 'digital',
+  service: 'coord',
+  rental: 'coord',
+  coord: 'coord',
+  none: 'coord',
+}
+
+const SHIPPING_METHOD_LABEL: Record<string, string> = {
+  shipping: 'Envío a domicilio',
+  pickup: 'Recolección en mano',
+  digital: 'Entrega digital',
+  coord: 'Entrega acordada',
+}
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 
@@ -304,6 +325,31 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     } as any)
   } catch (e) {
     console.error('[start-checkout] cart selection update failed:', e)
+  }
+
+  // ── Attach a Medusa shipping method ───────────────────────────────────────
+  // completeCart rejects carts whose items require shipping but have no shipping
+  // method — this hit every pickup/SPEI/coordinated checkout. We add the seeded
+  // option that matches the chosen fulfillment method, with an explicit amount
+  // (the quoted rate for shipping, $0 for pickup/coordinated/digital) so we don't
+  // depend on the calculated-price provider call.
+  try {
+    const optionIds = await resolveShippingOptionIds(req.scope)
+    const optionKey = OPTION_KEY_BY_METHOD[fulfillmentMethod] ?? 'coord'
+    const shippingOptionId = optionIds[optionKey] ?? optionIds.coord
+    if (shippingOptionId) {
+      const methodAmount = fulfillmentMethod === 'shipping' ? shippingCents : 0
+      await (cartService as any).addShippingMethods(cartId, [{
+        name: SHIPPING_METHOD_LABEL[optionKey] ?? 'Entrega',
+        amount: methodAmount,
+        shipping_option_id: shippingOptionId,
+        data: {},
+      }])
+    } else {
+      console.warn('[start-checkout] no seeded shipping option found — run /internal/setup-fulfillment')
+    }
+  } catch (e) {
+    console.error('[start-checkout] addShippingMethods failed:', e)
   }
 
   const successUrl = `${SITE_URL}/payment/success?cart_id=${cartId}`
