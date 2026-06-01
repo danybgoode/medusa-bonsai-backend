@@ -120,6 +120,16 @@ module.exports = defineConfig({
               accessToken: process.env.MP_ACCESS_TOKEN,
             },
           },
+          // SPEI — Mexican interbank transfer (authorize now, seller confirms receipt)
+          {
+            resolve: './src/modules/payment-spei',
+            id: 'spei',
+          },
+          // Cash on pickup (authorize now, seller confirms receipt in person)
+          {
+            resolve: './src/modules/payment-cash',
+            id: 'cash',
+          },
         ],
       },
     },

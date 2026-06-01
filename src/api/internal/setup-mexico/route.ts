@@ -15,8 +15,19 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import {
   createRegionsWorkflow,
+  updateRegionsWorkflow,
   createTaxRegionsWorkflow,
 } from '@medusajs/medusa/core-flows'
+
+// All payment providers that should be enabled on the Mexico region. Keeping
+// pp_system_default for backward-compat with any legacy sessions.
+const MX_PAYMENT_PROVIDERS = [
+  'pp_system_default',
+  'pp_stripe-connect_stripe-connect',
+  'pp_mercadopago_mercadopago',
+  'pp_spei_spei',
+  'pp_cash_cash',
+]
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const secret = req.headers['x-internal-secret']
@@ -72,13 +83,22 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           name: 'Mexico',
           currency_code: 'mxn',
           countries: ['mx'],
-          payment_providers: ['pp_system_default'],
+          payment_providers: MX_PAYMENT_PROVIDERS,
         }],
       },
     })
-    report.push('✓ Created Mexico region (MXN, country: mx)')
+    report.push(`✓ Created Mexico region (MXN, country: mx) with providers: ${MX_PAYMENT_PROVIDERS.join(', ')}`)
   } else {
-    report.push(`○ Mexico region already exists (${mexicoRegion.id}) — skipped`)
+    // Idempotently ensure ALL providers are enabled on the existing region —
+    // prod was created with only pp_system_default, so this is the migration
+    // path that turns Stripe/MP/SPEI/Cash into first-class region providers.
+    await updateRegionsWorkflow(req.scope).run({
+      input: {
+        selector: { id: mexicoRegion.id },
+        update: { payment_providers: MX_PAYMENT_PROVIDERS },
+      },
+    })
+    report.push(`✓ Mexico region (${mexicoRegion.id}) providers ensured: ${MX_PAYMENT_PROVIDERS.join(', ')}`)
   }
 
   // ── 3. Tax region: mx ────────────────────────────────────────────────────

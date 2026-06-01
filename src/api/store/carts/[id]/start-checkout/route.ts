@@ -315,8 +315,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   // ── SPEI / cash (manual payment — system provider) ────────────────────────
   if (body.provider === 'spei' || body.provider === 'cash') {
-    const bankTransfer = (sellerSettings.bank_transfer ?? {}) as Record<string, unknown>
-    const clabe = body.provider === 'spei' ? (bankTransfer.clabe as string | undefined) : null
+    // CLABE lives under settings.checkout.bank_transfer (where ShopSettings saves
+    // it) — NOT settings.bank_transfer. Reading the wrong path made every SPEI
+    // checkout fail with "no CLABE configured" even on shops that had one.
+    const bankTransfer = (checkoutSettings.bank_transfer ?? {}) as Record<string, unknown>
+    // Normalize: sellers may save the CLABE with spaces/dashes.
+    const rawClabe = body.provider === 'spei' ? (bankTransfer.clabe as string | undefined) : null
+    const clabe = rawClabe ? rawClabe.replace(/\D/g, '') : null
 
     if (body.provider === 'spei' && (!clabe || clabe.length !== 18)) {
       return res.status(422).json({
@@ -333,7 +338,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       payment_received: false,
     }
     redirectUrl = null
-    providerId = 'pp_system_default'
+    // First-class manual providers (registered in medusa-config + enabled on the
+    // region) so SPEI/cash appear in the Payment registry instead of riding on
+    // the generic system provider.
+    providerId = body.provider === 'spei' ? 'pp_spei_spei' : 'pp_cash_cash'
   }
 
   // ── Stripe Connect ────────────────────────────────────────────────────────

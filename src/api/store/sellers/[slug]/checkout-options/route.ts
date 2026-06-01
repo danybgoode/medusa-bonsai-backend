@@ -1,0 +1,185 @@
+/**
+ * GET /store/sellers/:slug/checkout-options
+ *
+ * THE single source of truth for the checkout catalog. Returns, for a seller
+ * (+ the listing context passed as query params), which payment methods and
+ * delivery methods are available — consolidating logic that used to be
+ * duplicated across the PDP page, the checkout page, and the UCP route.
+ *
+ *   payment_methods  — Medusa region payment providers ∩ the seller's enabled
+ *                      set (see resolveSellerPaymentMethods). Each is a real,
+ *                      registered Medusa provider.
+ *   delivery_methods — derived from the seller's shipping settings: structured
+ *                      pickup spots (with hours/scheduling), live shipping
+ *                      (Envia), digital, service/rental, or coordinated.
+ *
+ * Cross-rules folded in here (previously scattered):
+ *   - Coordinated-only delivery hides instant card payments (you can't pay a
+ *     card for a "we'll arrange it" sale) — only SPEI/cash remain.
+ *   - Digital listings hide MercadoPago (digital-goods restriction, preserved).
+ *
+ * `:slug` may be a seller slug OR a seller id — resolved either way.
+ * Query: listing_type=product|digital|service|rental, is_digital=true|false
+ */
+
+import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { Modules } from '@medusajs/framework/utils'
+import { SELLER_MODULE } from '../../../../../modules/seller'
+import SellerModuleService from '../../../../../modules/seller/service'
+import { resolveSellerPaymentMethods } from '../../../_utils/payment-methods'
+
+type PickupSpot = {
+  id?: string
+  name?: string
+  address?: string
+  hours?: string
+  scheduling_url?: string
+  notes?: string
+  instructions?: string
+}
+
+type DeliveryMethod = {
+  id: 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'coord'
+  label: string
+  note: string
+  requires_address?: boolean
+  requires_pickup_spot?: boolean
+  pickup_spots?: PickupSpot[]
+}
+
+function processingLabel(value: unknown): string | null {
+  const labels: Record<string, string> = {
+    '1d': '1 día hábil',
+    '1-3d': '1 a 3 días hábiles',
+    '3-5d': '3 a 5 días hábiles',
+    '1-2w': '1 a 2 semanas',
+  }
+  return typeof value === 'string' ? (labels[value] ?? value) : null
+}
+
+async function resolveRegionProviderIds(req: MedusaRequest): Promise<string[] | undefined> {
+  try {
+    const regionService: any = req.scope.resolve(Modules.REGION)
+    const regions = await regionService.listRegions(
+      { currency_code: 'mxn' },
+      { relations: ['payment_providers'] },
+    )
+    const region = regions?.[0]
+    const ids = (region?.payment_providers ?? []).map((p: any) => p.id).filter(Boolean)
+    return ids.length ? ids : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+  const { slug } = req.params
+
+  // Resolve by slug, then fall back to id (the frontend may pass either).
+  let [seller] = await sellerService.listSellers({ slug } as any, { take: 1 })
+  if (!seller) {
+    const [byId] = await sellerService.listSellers({ id: slug } as any, { take: 1 })
+    seller = byId
+  }
+  if (!seller) {
+    return res.status(404).json({ message: `Seller '${slug}' not found` })
+  }
+
+  const listingType = (req.query.listing_type as string) || 'product'
+  const isDigital = req.query.is_digital === 'true' || listingType === 'digital'
+
+  const settings = ((seller.metadata ?? {}) as any).settings ?? {}
+  const shipping = (settings.shipping ?? {}) as Record<string, any>
+  const orders = (settings.orders ?? {}) as Record<string, any>
+
+  const localPickup = shipping.local_pickup === true
+  const pickupSpots: PickupSpot[] = localPickup ? (shipping.pickup_spots ?? []) : []
+  const origin = (shipping.origin_address ?? {}) as Record<string, string | null>
+  const hasShippingOrigin = !!(origin.street && origin.city && origin.state && origin.postal_code)
+  const hasLiveShipping = shipping.envia_enabled !== false && hasShippingOrigin
+  const preparation = processingLabel(orders.processing_time)
+
+  // ── Delivery methods ────────────────────────────────────────────────────
+  const delivery_methods: DeliveryMethod[] = []
+
+  if (localPickup) {
+    delivery_methods.push({
+      id: 'local_pickup',
+      label: 'Recolección en mano',
+      note: pickupSpots.length
+        ? 'Elige dónde recoger tu pedido.'
+        : 'Coordina el punto de entrega con la tienda.',
+      requires_pickup_spot: pickupSpots.length > 0,
+      pickup_spots: pickupSpots.map((s, i) => ({
+        id: s.id ?? s.name ?? `spot-${i}`,
+        name: s.name,
+        address: s.address,
+        hours: s.hours,
+        scheduling_url: s.scheduling_url,
+        notes: s.notes ?? s.instructions,
+      })),
+    })
+  }
+
+  if (!isDigital && listingType === 'product' && hasLiveShipping) {
+    delivery_methods.push({
+      id: 'shipping',
+      label: 'Envío a domicilio',
+      note: 'Cotiza y elige paquetería antes de pagar.',
+      requires_address: true,
+    })
+  }
+
+  if (isDigital) {
+    delivery_methods.push({ id: 'digital', label: 'Entrega digital', note: 'Recibirás acceso o archivo después del pago.' })
+  }
+
+  if (listingType === 'service') {
+    delivery_methods.push({ id: 'service', label: 'Servicio', note: 'Coordina el horario con el vendedor.' })
+  }
+
+  if (listingType === 'rental') {
+    delivery_methods.push({ id: 'rental', label: 'Renta', note: 'Coordina las fechas con el vendedor.' })
+  }
+
+  // Coordinated fallback only when a physical product has no pickup and no live shipping.
+  if (!localPickup && !isDigital && listingType === 'product' && !hasLiveShipping) {
+    delivery_methods.push({
+      id: 'coord',
+      label: 'Entrega acordada',
+      note: 'El vendedor te contactará para acordar cómo y cuándo recibirás tu pedido.',
+    })
+  }
+
+  const onlyCoordinated = delivery_methods.length === 1 && delivery_methods[0].id === 'coord'
+
+  // ── Payment methods ─────────────────────────────────────────────────────
+  const regionProviderIds = await resolveRegionProviderIds(req)
+  let { methods: payment_methods, default: payment_default } = resolveSellerPaymentMethods(seller, regionProviderIds)
+
+  // Digital goods: MercadoPago restriction (preserved from prior behavior).
+  if (isDigital) {
+    payment_methods = payment_methods.filter(m => m.id !== 'mercadopago')
+  }
+
+  // Coordinated-only delivery: no instant card payment — pay is arranged with
+  // delivery (SPEI/cash/contact). Mirrors the start-checkout 422 guard.
+  if (onlyCoordinated) {
+    payment_methods = payment_methods.filter(m => !m.instant)
+  }
+
+  // Re-resolve the default to the first still-available method (MP→Stripe→SPEI→Cash).
+  const order: Array<typeof payment_methods[number]['id']> = ['mercadopago', 'stripe', 'spei', 'cash']
+  const ids = new Set(payment_methods.map(m => m.id))
+  payment_default = order.find(id => ids.has(id)) ?? null
+
+  return res.json({
+    payment_methods,
+    payment_default,
+    delivery_methods,
+    delivery_default: delivery_methods[0]?.id ?? null,
+    only_coordinated: onlyCoordinated,
+    preparation,
+  })
+}
