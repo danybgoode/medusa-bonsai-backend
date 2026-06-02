@@ -58,18 +58,21 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       return res.json({ orders: [], seller_id: sellerId })
     }
 
-    // Step 2: fetch full order objects
-    orders = await orderService.listOrders(
-      { id: orderIds },
-      {
-        select: [
-          'id', 'status', 'payment_status', 'fulfillment_status',
-          'total', 'subtotal', 'currency_code',
-          'email', 'metadata', 'created_at', 'updated_at',
-        ],
-        relations: ['items', 'shipping_address', 'customer', 'fulfillments'],
-      }
-    ).catch(() => [] as any[])
+    // Step 2: fetch full order objects via the Remote Query (query.graph). Using
+    // orderService.listOrders here throws "Shipping method version is required to
+    // load adjustments" once an order has a shipping method — which silently
+    // returned [] (the .catch) and made every seller's orders page look empty.
+    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await (query as any).graph({
+      entity: 'order',
+      fields: [
+        'id', 'status', 'payment_status', 'fulfillment_status',
+        'total', 'subtotal', 'currency_code', 'email', 'metadata', 'created_at', 'updated_at',
+        'items.*', 'shipping_address.*', 'customer.*', 'fulfillments.*',
+      ],
+      filters: { id: orderIds },
+    })
+    orders = data ?? []
   } catch (e) {
     console.error('[seller/me/orders] order query error:', e)
   }

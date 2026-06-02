@@ -11,7 +11,7 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules } from '@medusajs/framework/utils'
+import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { normalizeMedusaOrder } from '../../../sellers/me/orders/route'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
 
@@ -42,21 +42,24 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── Fetch orders for this customer ────────────────────────────────────────
+  // Via query.graph — orderService.listOrders throws "Shipping method version is
+  // required to load adjustments" once an order has a shipping method, which the
+  // .catch silently turned into an empty list (buyer saw no orders).
   let orders: unknown[] = []
   try {
-    orders = await orderService.listOrders(
-      { customer_id: customer.id },
-      {
-        select: [
-          'id', 'status', 'payment_status', 'fulfillment_status',
-          'total', 'subtotal', 'currency_code',
-          'email', 'metadata', 'created_at', 'updated_at',
-        ],
-        relations: ['items', 'shipping_address', 'fulfillments'],
-      }
-    ).catch(() => [] as any[])
+    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await (query as any).graph({
+      entity: 'order',
+      fields: [
+        'id', 'status', 'payment_status', 'fulfillment_status',
+        'total', 'subtotal', 'currency_code', 'email', 'metadata', 'created_at', 'updated_at',
+        'items.*', 'shipping_address.*', 'fulfillments.*',
+      ],
+      filters: { customer_id: customer.id },
+    })
+    orders = data ?? []
   } catch (e) {
-    console.error('[customers/me/orders] listOrders error:', e)
+    console.error('[customers/me/orders] order query error:', e)
   }
 
   // ── Normalize ─────────────────────────────────────────────────────────────

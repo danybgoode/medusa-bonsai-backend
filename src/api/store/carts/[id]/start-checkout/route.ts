@@ -21,6 +21,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
+import { extractClerkUserId } from '../../../_utils/clerk-auth'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -208,6 +209,34 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (!cart) {
     return res.status(404).json({ message: 'Cart not found' })
   }
+
+  // ── Link the buyer's Medusa customer to the cart ──────────────────────────
+  // completeCart copies cart.customer_id → order.customer_id, which the buyer
+  // order pages (/store/customers/me/orders) use for ownership. Store cart
+  // creation does NOT set it from the Clerk JWT, so orders ended up with a null
+  // customer_id → invisible to the buyer ("ver mi pedido" 404, empty list).
+  // Resolve the customer by Clerk external_id and set it here.
+  if (!(cart as any).customer_id) {
+    const clerkUserId = extractClerkUserId(req)
+    if (clerkUserId) {
+      try {
+        const customerService: any = req.scope.resolve(Modules.CUSTOMER)
+        const [customer] = await customerService.listCustomers(
+          { external_id: clerkUserId },
+          { select: ['id', 'email'], take: 1 },
+        )
+        if (customer?.id) {
+          await cartService.updateCarts(cartId, {
+            customer_id: customer.id,
+            ...(customer.email ? { email: customer.email } : {}),
+          } as any)
+        }
+      } catch (e) {
+        console.error('[start-checkout] customer link failed:', e)
+      }
+    }
+  }
+
   if (!cart.items?.length) {
     return res.status(400).json({ message: 'Cart is empty' })
   }

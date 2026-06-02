@@ -40,16 +40,21 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (!customer) return res.status(404).json({ message: 'Order not found' })
 
   // ── Fetch the order ───────────────────────────────────────────────────────
+  // Via query.graph — retrieveOrder can throw "Shipping method version is required
+  // to load adjustments" once the order has a shipping method.
   let order: Record<string, unknown>
   try {
-    const result = await orderService.retrieveOrder(orderId, {
-      select: [
+    const { data } = await (query as any).graph({
+      entity: 'order',
+      fields: [
         'id', 'status', 'payment_status', 'fulfillment_status',
         'total', 'subtotal', 'currency_code',
         'email', 'customer_id', 'metadata', 'created_at', 'updated_at',
+        'items.*', 'shipping_address.*', 'fulfillments.*',
       ],
-      relations: ['items', 'shipping_address', 'fulfillments'],
+      filters: { id: orderId },
     })
+    const result = (data ?? [])[0]
     if (!result) return res.status(404).json({ message: 'Order not found' })
     order = result as Record<string, unknown>
   } catch {
