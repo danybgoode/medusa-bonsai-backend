@@ -49,9 +49,9 @@ export function extractClerkEmail(req: MedusaRequest): string | null {
  */
 export async function resolveBuyerCustomerIds(
   req: MedusaRequest,
-): Promise<{ clerkUserId: string | null; customerIds: string[] }> {
+): Promise<{ clerkUserId: string | null; customerIds: string[]; emails: string[] }> {
   const clerkUserId = extractClerkUserId(req)
-  if (!clerkUserId) return { clerkUserId: null, customerIds: [] }
+  if (!clerkUserId) return { clerkUserId: null, customerIds: [], emails: [] }
 
   const customerService = req.scope.resolve(Modules.CUSTOMER) as any
   const ids = new Set<string>()
@@ -71,7 +71,7 @@ export async function resolveBuyerCustomerIds(
     } catch { /* ignore */ }
   }
 
-  return { clerkUserId, customerIds: [...ids] }
+  return { clerkUserId, customerIds: [...ids], emails: [...emails] }
 }
 
 /** Finds the Seller record for the authenticated Clerk user. Returns null if not found. */

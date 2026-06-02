@@ -16,44 +16,60 @@ import { normalizeMedusaOrder } from '../../../sellers/me/orders/route'
 import { resolveBuyerCustomerIds } from '../../../_utils/clerk-auth'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
-  // Resolve ALL customer ids for this buyer (external_id + shared email) so an
-  // order linked to the auth-flow customer OR the synced customer both show up.
-  const { clerkUserId, customerIds } = await resolveBuyerCustomerIds(req)
+  // Resolve ALL customer ids + emails for this buyer.
+  const { clerkUserId, customerIds, emails } = await resolveBuyerCustomerIds(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
-  if (!customerIds.length) {
+  if (!customerIds.length && !emails.length) {
     return res.json({ orders: [] })
   }
 
-  // ── Fetch orders for this buyer's customers ───────────────────────────────
-  // Via query.graph — orderService.listOrders throws "Shipping method version is
-  // required to load adjustments" once an order has a shipping method, which the
-  // .catch silently turned into an empty list (buyer saw no orders).
-  let orders: unknown[] = []
-  try {
-    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-    const { data } = await (query as any).graph({
-      entity: 'order',
-      fields: [
-        'id', 'status', 'payment_status', 'fulfillment_status',
-        'total', 'subtotal', 'currency_code', 'email', 'metadata', 'created_at', 'updated_at',
-        'items.*', 'shipping_address.*', 'fulfillments.*',
-      ],
-      filters: { customer_id: customerIds },
-    })
-    orders = data ?? []
-  } catch (e) {
-    console.error('[customers/me/orders] order query error:', e)
+  // ── Fetch orders by customer_id AND by email ──────────────────────────────
+  // Manual orders aren't mirrored and can end up with a null/mismatched
+  // customer_id; the order email (set from the cart) is the reliable fallback so
+  // the buyer still sees + can open their order. (query.graph, not listOrders —
+  // listOrders throws "Shipping method version is required" once a method exists.)
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+  const fields = [
+    'id', 'status', 'payment_status', 'fulfillment_status',
+    'total', 'subtotal', 'currency_code', 'email', 'customer_id', 'metadata', 'created_at', 'updated_at',
+    'items.*', 'shipping_address.*', 'fulfillments.*',
+  ]
+  const byId = new Map<string, any>()
+  async function fetchBy(filters: Record<string, unknown>) {
+    try {
+      const { data } = await (query as any).graph({ entity: 'order', fields, filters })
+      for (const o of (data ?? []) as any[]) byId.set(o.id, o)
+    } catch (e) {
+      console.error('[customers/me/orders] order query error:', e)
+    }
+  }
+  if (customerIds.length) await fetchBy({ customer_id: customerIds })
+  if (emails.length) await fetchBy({ email: emails })
+  let orders: any[] = [...byId.values()]
+
+  // ── Exclude print-ad placements — they live in /account/print-ads ─────────
+  const productIds = [...new Set(
+    orders.flatMap((o) => ((o.items ?? []) as any[]).map((i) => i.product_id).filter(Boolean)),
+  )]
+  if (productIds.length) {
+    const printProductIds = new Set<string>()
+    try {
+      const { data: prods } = await (query as any).graph({
+        entity: 'product', fields: ['id', 'metadata'], filters: { id: productIds },
+      })
+      for (const p of (prods ?? []) as any[]) if (p.metadata?.is_print_placement) printProductIds.add(p.id)
+    } catch { /* best-effort */ }
+    if (printProductIds.size) {
+      orders = orders.filter((o) => {
+        const items = (o.items ?? []) as any[]
+        return items.length === 0 || !items.every((i) => printProductIds.has(i.product_id))
+      })
+    }
   }
 
-  // ── Normalize ─────────────────────────────────────────────────────────────
-  // For buyer-facing orders we don't have a single seller — each order may have
-  // items from different sellers. Use empty strings for seller fields; the
-  // frontend enriches from Supabase marketplace_orders when needed.
-  const normalized = (orders as any[]).map(o =>
-    normalizeMedusaOrder(o, '', '')
-  )
-
+  // ── Normalize (multi-seller; frontend enriches seller from Supabase) ──────
+  const normalized = orders.map((o) => normalizeMedusaOrder(o, '', ''))
   return res.json({ orders: normalized, customer_ids: customerIds })
 }

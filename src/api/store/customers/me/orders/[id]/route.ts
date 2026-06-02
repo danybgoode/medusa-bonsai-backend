@@ -18,11 +18,11 @@ import { resolveBuyerCustomerIds } from '../../../../_utils/clerk-auth'
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // Resolve ALL of the buyer's customer ids (external_id + shared email) so an
   // order linked to either the auth-flow or synced customer passes the check.
-  const { clerkUserId, customerIds } = await resolveBuyerCustomerIds(req)
+  const { clerkUserId, customerIds, emails } = await resolveBuyerCustomerIds(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
-  if (!customerIds.length) return res.status(404).json({ message: 'Order not found' })
+  if (!customerIds.length && !emails.length) return res.status(404).json({ message: 'Order not found' })
 
   const { id: orderId } = req.params
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
@@ -50,7 +50,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── Ownership check — buyer can only see their own order ──────────────────
-  if (!order.customer_id || !customerIds.includes(order.customer_id as string)) {
+  // Ownership: customer_id match, OR (fallback for manual orders with a null/
+  // mismatched customer_id) the order email matches one of the buyer's emails.
+  const ownsByCustomer = !!order.customer_id && customerIds.includes(order.customer_id as string)
+  const ownsByEmail = !!order.email && emails.includes(String(order.email).toLowerCase())
+  if (!ownsByCustomer && !ownsByEmail) {
     return res.status(404).json({ message: 'Order not found' })
   }
 
