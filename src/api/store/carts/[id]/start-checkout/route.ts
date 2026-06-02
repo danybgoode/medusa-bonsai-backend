@@ -393,8 +393,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       })
     }
 
+    const dimoConfig = (checkoutSettings.dimo ?? {}) as Record<string, unknown>
     const dimoPhone = manualSubType === 'dimo'
-      ? ((bankTransfer.dimo_phone as string | undefined) ?? (checkoutSettings.phone as string | undefined) ?? null)
+      ? ((dimoConfig.phone as string | undefined) ?? (checkoutSettings.phone as string | undefined) ?? null)
       : null
 
     providerData = {

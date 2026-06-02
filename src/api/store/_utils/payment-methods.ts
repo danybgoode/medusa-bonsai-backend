@@ -12,7 +12,7 @@
 
 import { sellerMpConnected } from './mp'
 
-export type PaymentMethodId = 'mercadopago' | 'stripe' | 'spei' | 'cash'
+export type PaymentMethodId = 'mercadopago' | 'stripe' | 'spei' | 'cash' | 'dimo'
 
 export type PaymentMethod = {
   id: PaymentMethodId
@@ -27,12 +27,14 @@ export type PaymentMethod = {
 const PROVIDER_IDS: Record<PaymentMethodId, string> = {
   mercadopago: 'pp_mercadopago_mercadopago',
   stripe: 'pp_stripe-connect_stripe-connect',
-  spei: 'pp_spei_spei',
-  cash: 'pp_cash_cash',
+  // Manual sub-methods all settle through the single unified manual provider.
+  spei: 'pp_manual_manual',
+  cash: 'pp_manual_manual',
+  dimo: 'pp_manual_manual',
 }
 
 // Default selection preference (first available wins).
-const DEFAULT_ORDER: PaymentMethodId[] = ['mercadopago', 'stripe', 'spei', 'cash']
+const DEFAULT_ORDER: PaymentMethodId[] = ['mercadopago', 'stripe', 'spei', 'dimo', 'cash']
 
 function getSettings(seller: any): Record<string, any> {
   const meta = (seller?.metadata ?? {}) as Record<string, unknown>
@@ -51,8 +53,18 @@ export function sellerHasSpei(seller: any): boolean {
 }
 
 export function sellerHasCash(seller: any): boolean {
+  const checkout = (getSettings(seller).checkout ?? {}) as Record<string, any>
+  const cash = (checkout.cash_pickup ?? {}) as Record<string, unknown>
   const shipping = (getSettings(seller).shipping ?? {}) as Record<string, unknown>
-  return shipping.local_pickup === true
+  // Cash at pickup requires local pickup to exist; enabled by default for back-
+  // compat, but sellers can turn it off via settings.checkout.cash_pickup.enabled.
+  return shipping.local_pickup === true && cash.enabled !== false
+}
+
+export function sellerHasDimo(seller: any): boolean {
+  const dimo = ((getSettings(seller).checkout ?? {}).dimo ?? {}) as Record<string, unknown>
+  const phone = typeof dimo.phone === 'string' ? dimo.phone.replace(/\D/g, '') : ''
+  return dimo.enabled === true && phone.length >= 10
 }
 
 /**
@@ -81,6 +93,10 @@ export function resolveSellerPaymentMethods(
       method: { id: 'spei', provider_id: PROVIDER_IDS.spei, label: 'SPEI', note: bankName ?? 'Transferencia bancaria interbancaria.', instant: false },
     },
     {
+      ok: sellerHasDimo(seller),
+      method: { id: 'dimo', provider_id: PROVIDER_IDS.dimo, label: 'DiMo', note: 'Transferencia por número de teléfono.', instant: false },
+    },
+    {
       ok: sellerHasCash(seller),
       method: { id: 'cash', provider_id: PROVIDER_IDS.cash, label: 'Efectivo al recoger', note: 'Pagas en efectivo al recoger tu pedido.', instant: false },
     },
@@ -89,7 +105,10 @@ export function resolveSellerPaymentMethods(
   const regionSet = regionProviderIds && regionProviderIds.length ? new Set(regionProviderIds) : null
 
   const methods = candidates
-    .filter(c => c.ok && (!regionSet || regionSet.has(c.method.provider_id)))
+    // Region intersection gates only the online card providers (these genuinely
+    // vary by region). Manual sub-methods route through the single always-
+    // registered pp_manual provider, so they're never region-gated.
+    .filter(c => c.ok && (!c.method.instant || !regionSet || regionSet.has(c.method.provider_id)))
     .map(c => c.method)
 
   const available = new Set(methods.map(m => m.id))

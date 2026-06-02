@@ -150,16 +150,12 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     delivery_methods.push({ id: 'rental', label: 'Renta', note: 'Coordina las fechas con el vendedor.' })
   }
 
-  // Coordinated fallback only when a physical product has no pickup and no live shipping.
-  if (!localPickup && !isDigital && listingType === 'product' && !hasLiveShipping) {
-    delivery_methods.push({
-      id: 'coord',
-      label: 'Entrega acordada',
-      note: 'El vendedor te contactará para acordar cómo y cuándo recibirás tu pedido.',
-    })
-  }
-
-  const onlyCoordinated = delivery_methods.length === 1 && delivery_methods[0].id === 'coord'
+  // No "coordinate after purchase" fallback — every listing must offer a concrete
+  // delivery method (pickup or shipping for products). The publish gate enforces
+  // this; a product with neither configured returns no delivery methods and the
+  // storefront shows a "delivery not configured" notice instead of an ambiguous
+  // post-purchase coordination.
+  const onlyCoordinated = false
 
   // ── Payment methods (two buckets: online + one consolidated manual) ───────
   const regionProviderIds = await resolveRegionProviderIds(req)
