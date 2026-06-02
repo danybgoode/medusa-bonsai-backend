@@ -62,6 +62,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   )
 
   // ── Step 4: Apply filters ─────────────────────────────────────────────────
+  // Print-ad placements are sold in-portal only — never surface in general browse/search.
+  listings = listings.filter((l: any) => !(l.metadata?.is_print_placement))
   if (q.q) {
     const needle = q.q.toLowerCase()
     listings = listings.filter((l: any) =>
