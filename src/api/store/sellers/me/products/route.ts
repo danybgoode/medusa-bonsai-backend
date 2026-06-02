@@ -11,6 +11,7 @@ import {
   resolveStockLocationId,
   provisionVariantInventory,
 } from '../../../_utils/inventory'
+import { resolveDefaultShippingProfileId } from '../../../_utils/fulfillment'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 function generateSku(): string {
@@ -187,6 +188,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     ? Math.round(body.weight_grams)
     : undefined
 
+  // ── Resolve the shipping profile ─────────────────────────────────────────
+  // Medusa requires every product to belong to a shipping profile; the cart's
+  // shipping method must be on the SAME profile or completeCart rejects the order
+  // ("shipping profiles not satisfied"). Link to the canonical default profile —
+  // the same one the seeded shipping options use.
+  const shippingProfileId = await resolveDefaultShippingProfileId(req.scope)
+
   // ── Create Medusa product ────────────────────────────────────────────────
   const { result } = await createProductsWorkflow(req.scope).run({
     input: {
@@ -195,6 +203,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         description: body.description?.trim() || null,
         status: 'published' as const,
         ...(weightGrams !== undefined ? { weight: weightGrams } : {}),
+        ...(shippingProfileId ? { shipping_profile_id: shippingProfileId } : {}),
         ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
         ...(categoryId ? { category_ids: [categoryId] } : {}),
         ...(ptype ? { type_id: ptype.id } : {}),

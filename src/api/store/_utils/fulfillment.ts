@@ -47,6 +47,26 @@ export async function resolveShippingOptionIds(
   return result
 }
 
+// Canonical default shipping profile. Products MUST be linked to a shipping
+// profile (Medusa requirement for fulfillment) and it must match the profile the
+// seeded shipping options use, or completeCart fails with "shipping profiles not
+// satisfied". Mirrors setup-fulfillment's selection (first `default` profile) so
+// product creation + option creation always agree on the same profile.
+let cachedDefaultProfileId: string | null = null
+
+export async function resolveDefaultShippingProfileId(
+  scope: { resolve: (key: string) => any },
+): Promise<string | null> {
+  if (cachedDefaultProfileId) return cachedDefaultProfileId
+  const fulfillmentService = scope.resolve(Modules.FULFILLMENT) as any
+  const profiles: any[] = await fulfillmentService.listShippingProfiles(
+    {}, { select: ['id', 'type'], take: 50, order: { created_at: 'ASC' } },
+  ).catch(() => [] as any[])
+  const profile = profiles.find((p: any) => p.type === 'default') ?? profiles[0]
+  if (profile?.id) cachedDefaultProfileId = profile.id
+  return profile?.id ?? null
+}
+
 export async function resolveStockLocationId(
   scope: { resolve: (key: string) => any },
 ): Promise<string | null> {
