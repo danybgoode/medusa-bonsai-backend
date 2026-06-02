@@ -166,18 +166,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(400).json({ message: 'provider is required: "stripe", "mercadopago", or "manual"' })
   }
 
-  // Normalize manual payments. The buyer now picks a single "Pago directo" method
-  // and a sub-type; legacy clients still send provider 'spei'/'cash' directly.
-  // All route to the unified pp_manual provider; the sub-type drives the buyer's
-  // instructions and is recorded as metadata.payment_method ('spei'/'cash'/'dimo')
-  // so downstream (confirm-payment, emails) is unchanged.
+  // Manual payments: one "Pago directo" method (legacy clients may still send
+  // 'spei'/'cash'). All route to the unified pp_manual provider and are recorded
+  // as metadata.payment_method = 'manual' with a snapshot of ALL the seller's
+  // configured instructions (filled in the manual branch below).
   const isManual = body.provider === 'manual' || body.provider === 'spei' || body.provider === 'cash'
-  const manualSubType: 'clabe' | 'cash' | 'dimo' =
-    body.provider === 'spei' ? 'clabe'
-    : body.provider === 'cash' ? 'cash'
-    : (body.manual_sub_type ?? 'clabe')
-  // metadata.payment_method keeps the specific method for downstream branching.
-  const manualPaymentMethod = manualSubType === 'clabe' ? 'spei' : manualSubType
 
   // Rule: coordinated delivery (none/coord) requires manual payment coordination.
   // Card payments create buyer anxiety when there is no structured delivery path.
@@ -323,9 +316,38 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const escrowModeSetting = (checkoutSettings.escrow_mode ?? 'off') as EscrowMode
   const useEscrow = escrowModeSetting === 'required' || (escrowModeSetting === 'optional' && body.escrow === true)
 
-  // Specific method recorded for downstream branching (confirm-payment, emails):
-  // manual → 'spei'/'cash'/'dimo'; otherwise the gateway id.
-  const effectivePaymentMethod = isManual ? manualPaymentMethod : body.provider
+  // payment_method recorded on the order: 'manual' for all direct payments,
+  // otherwise the gateway id.
+  const effectivePaymentMethod = isManual ? 'manual' : body.provider
+
+  // ── Manual instruction snapshot ───────────────────────────────────────────
+  // Capture ALL of the seller's configured direct-payment methods so the order /
+  // success page + emails show everything at once (buyer chooses how to pay).
+  let manualPaymentSnapshot: { spei: unknown; dimo: unknown; cash: unknown } | null = null
+  if (isManual) {
+    const bankTransfer = (checkoutSettings.bank_transfer ?? {}) as Record<string, unknown>
+    const clabe = typeof bankTransfer.clabe === 'string' ? bankTransfer.clabe.replace(/\D/g, '') : ''
+    const spei = (bankTransfer.enabled !== false && clabe.length === 18)
+      ? { clabe, bank_name: (bankTransfer.bank_name as string | undefined) ?? null, account_holder: (bankTransfer.account_holder as string | undefined) ?? null }
+      : null
+
+    const dimoConfig = (checkoutSettings.dimo ?? {}) as Record<string, unknown>
+    const dimoPhone = typeof dimoConfig.phone === 'string' ? dimoConfig.phone.replace(/\D/g, '') : ''
+    const dimo = (dimoConfig.enabled === true && dimoPhone.length >= 10) ? { phone: dimoPhone } : null
+
+    const cashConfig = (checkoutSettings.cash_pickup ?? {}) as Record<string, unknown>
+    const cash = (cashConfig.enabled !== false && fulfillmentMethod === 'local_pickup')
+      ? { note: (cashConfig.note as string | undefined) ?? null }
+      : null
+
+    if (!spei && !dimo && !cash) {
+      return res.status(422).json({
+        message: 'Este vendedor no tiene métodos de pago directo configurados. Contáctalo directamente.',
+        code: 'SELLER_MANUAL_MISSING',
+      })
+    }
+    manualPaymentSnapshot = { spei, dimo, cash }
+  }
 
   const checkoutSelection = {
     payment_method: effectivePaymentMethod,
@@ -351,6 +373,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         ...((cart as any).metadata ?? {}),
         checkout_selection: checkoutSelection,
         payment_method: effectivePaymentMethod,
+        ...(manualPaymentSnapshot ? { manual_payment: manualPaymentSnapshot } : {}),
         fulfillment_method: fulfillmentMethod,
         ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
         ...(bundleTier ? {
@@ -408,37 +431,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   let providerId = 'pp_system_default'
 
   // ── Manual ("Pago directo": SPEI / DiMo / cash) ───────────────────────────
+  // Snapshot was already computed + validated above; route to the unified manual
+  // provider. Legacy pp_spei/pp_cash remain registered for in-flight orders.
   if (isManual) {
-    // CLABE lives under settings.checkout.bank_transfer (where ShopSettings saves
-    // it) — NOT settings.bank_transfer.
-    const bankTransfer = (checkoutSettings.bank_transfer ?? {}) as Record<string, unknown>
-    const rawClabe = manualSubType === 'clabe' ? (bankTransfer.clabe as string | undefined) : null
-    const clabe = rawClabe ? rawClabe.replace(/\D/g, '') : null
-
-    if (manualSubType === 'clabe' && (!clabe || clabe.length !== 18)) {
-      return res.status(422).json({
-        message: 'Este vendedor no tiene una CLABE configurada. Contacta al vendedor directamente.',
-        code: 'SELLER_CLABE_MISSING',
-      })
-    }
-
-    const dimoConfig = (checkoutSettings.dimo ?? {}) as Record<string, unknown>
-    const dimoPhone = manualSubType === 'dimo'
-      ? ((dimoConfig.phone as string | undefined) ?? (checkoutSettings.phone as string | undefined) ?? null)
-      : null
-
     providerData = {
-      payment_method: manualPaymentMethod,   // 'spei' | 'cash' | 'dimo'
-      sub_type: manualSubType,
-      clabe: clabe ?? null,
-      bank_name: (bankTransfer.bank_name as string | undefined) ?? null,
-      account_holder: (bankTransfer.account_holder as string | undefined) ?? null,
-      dimo_phone: dimoPhone,
+      payment_method: 'manual',
+      manual_payment: manualPaymentSnapshot,
       payment_received: false,
     }
     redirectUrl = null
-    // Unified manual provider. Legacy pp_spei/pp_cash remain registered for
-    // in-flight orders but new manual checkouts route here.
     providerId = 'pp_manual_manual'
   }
 
@@ -679,15 +680,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       cart_id: cartId,
       payment_session_id: paymentSession.id,
     }
-    // For manual payments: include the structured details so the frontend can
-    // show the right instructions (CLABE / DiMo / cash) inline.
+    // For manual payments: include the full instruction snapshot so the success
+    // page can show every configured method (SPEI / DiMo / cash) at once.
     if (isManual) {
-      responseBody.sub_type = manualSubType
-      responseBody.payment_method = manualPaymentMethod
-      responseBody.clabe = (providerData.clabe as string | null) ?? null
-      responseBody.bank_name = (providerData.bank_name as string | null) ?? null
-      responseBody.account_holder = (providerData.account_holder as string | null) ?? null
-      responseBody.dimo_phone = (providerData.dimo_phone as string | null) ?? null
+      responseBody.payment_method = 'manual'
+      responseBody.manual_payment = manualPaymentSnapshot
     }
     // For escrow: include the mode so frontend can show escrow badge
     if (useEscrow) {

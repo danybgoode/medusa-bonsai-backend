@@ -128,6 +128,11 @@ export function normalizeMedusaOrder(
     currency: ((order.currency_code as string) ?? 'mxn').toUpperCase(),
     shipping_method: selectedFulfillment,
     shipping_cost_cents: 0,
+    // Direct-payment fields so the buyer order/success page can show instructions
+    // and the pending-payment state.
+    payment_method: (metadata.payment_method as string) ?? null,
+    payment_received: metadata.payment_received === true,
+    manual_payment: (metadata.manual_payment ?? null) as unknown,
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
     buyer_clerk_user_id: null,

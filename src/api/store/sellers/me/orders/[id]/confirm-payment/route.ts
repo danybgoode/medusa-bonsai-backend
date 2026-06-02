@@ -64,8 +64,8 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const meta = (order.metadata ?? {}) as Record<string, unknown>
   const paymentMethod = meta.payment_method as string | undefined
 
-  if (paymentMethod !== 'spei' && paymentMethod !== 'cash') {
-    return res.status(422).json({ message: 'Este pedido no es de pago manual (SPEI/efectivo).' })
+  if (!['manual', 'spei', 'cash', 'dimo'].includes(paymentMethod ?? '')) {
+    return res.status(422).json({ message: 'Este pedido no es de pago manual (SPEI/efectivo/DiMo).' })
   }
 
   if (meta.payment_received) {
