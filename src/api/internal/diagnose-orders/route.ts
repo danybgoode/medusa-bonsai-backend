@@ -28,20 +28,38 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   const out: Record<string, unknown> = {}
 
-  // Recent orders
+  // Recent orders. NOTE: loading the shipping_methods relation here throws
+  // "Shipping method version is required to load adjustments", so we read it
+  // separately via query.graph below.
   let orders: any[] = []
   try {
     orders = await orderService.listOrders(
       {},
       {
         select: ['id', 'status', 'payment_status', 'fulfillment_status', 'email', 'customer_id', 'metadata', 'total', 'created_at'],
-        relations: ['items', 'shipping_methods'],
+        relations: ['items'],
         order: { created_at: 'DESC' },
         take: 8,
       },
     )
   } catch (e) {
     out.orders_error = String(e)
+  }
+
+  // Shipping methods via the graph (avoids the version error above).
+  let smByOrder: Record<string, any[]> = {}
+  try {
+    const ids = (orders ?? []).map((o: any) => o.id)
+    if (ids.length) {
+      const { data } = await query.graph({
+        entity: 'order',
+        fields: ['id', 'shipping_methods.name', 'shipping_methods.amount', 'shipping_methods.shipping_option_id'],
+        filters: { id: ids },
+      })
+      smByOrder = Object.fromEntries((data ?? []).map((o: any) => [o.id, o.shipping_methods ?? []]))
+    }
+  } catch (e) {
+    out.shipping_methods_error = String(e)
   }
 
   out.orders = (orders ?? []).map((o: any) => ({
@@ -57,7 +75,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     shipping_rate_id: (o.metadata ?? {}).shipping_rate_id ?? null,
     item_count: (o.items ?? []).length,
     item_product_ids: (o.items ?? []).map((i: any) => i.product_id ?? null),
-    shipping_methods: (o.shipping_methods ?? []).map((s: any) => ({ name: s.name, amount: s.amount, shipping_option_id: s.shipping_option_id })),
+    shipping_methods: (smByOrder[o.id] ?? []).map((s: any) => ({ name: s.name, amount: s.amount, shipping_option_id: s.shipping_option_id })),
   }))
 
   // For the most recent order: resolve customer (by id) + product→seller link
