@@ -94,7 +94,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const listingType = (req.query.listing_type as string) || 'product'
-  const isDigital = req.query.is_digital === 'true' || listingType === 'digital'
+  // Print-ad placements fulfill like digital goods (access / no shipping) — map them
+  // so card/manual checkout works and the coord-only rule never trips.
+  const isDigital = req.query.is_digital === 'true' || listingType === 'digital' || listingType === 'print_ad'
 
   const settings = ((seller.metadata ?? {}) as any).settings ?? {}
   const shipping = (settings.shipping ?? {}) as Record<string, any>
