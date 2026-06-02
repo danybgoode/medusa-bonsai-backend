@@ -11,33 +11,21 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { normalizeMedusaOrder } from '../../../../sellers/me/orders/route'
-import { extractClerkUserId } from '../../../../_utils/clerk-auth'
+import { resolveBuyerCustomerIds } from '../../../../_utils/clerk-auth'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
-  const clerkUserId = extractClerkUserId(req)
+  // Resolve ALL of the buyer's customer ids (external_id + shared email) so an
+  // order linked to either the auth-flow or synced customer passes the check.
+  const { clerkUserId, customerIds } = await resolveBuyerCustomerIds(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
+  if (!customerIds.length) return res.status(404).json({ message: 'Order not found' })
 
   const { id: orderId } = req.params
-  const customerService = req.scope.resolve(Modules.CUSTOMER) as any
-  const orderService = req.scope.resolve(Modules.ORDER) as any
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-
-  // ── Resolve the Medusa customer for this Clerk user ───────────────────────
-  let customer: any = null
-  try {
-    const customers = await customerService.listCustomers(
-      { external_id: clerkUserId },
-      { select: ['id'] },
-    )
-    customer = customers[0] ?? null
-  } catch (e) {
-    console.error('[customers/me/orders/:id] listCustomers error:', e)
-  }
-  if (!customer) return res.status(404).json({ message: 'Order not found' })
 
   // ── Fetch the order ───────────────────────────────────────────────────────
   // Via query.graph — retrieveOrder can throw "Shipping method version is required
@@ -62,7 +50,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── Ownership check — buyer can only see their own order ──────────────────
-  if (order.customer_id !== customer.id) {
+  if (!order.customer_id || !customerIds.includes(order.customer_id as string)) {
     return res.status(404).json({ message: 'Order not found' })
   }
 

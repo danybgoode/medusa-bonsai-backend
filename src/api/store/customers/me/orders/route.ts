@@ -11,37 +11,22 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { normalizeMedusaOrder } from '../../../sellers/me/orders/route'
-import { extractClerkUserId } from '../../../_utils/clerk-auth'
+import { resolveBuyerCustomerIds } from '../../../_utils/clerk-auth'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
-  const clerkUserId = extractClerkUserId(req)
+  // Resolve ALL customer ids for this buyer (external_id + shared email) so an
+  // order linked to the auth-flow customer OR the synced customer both show up.
+  const { clerkUserId, customerIds } = await resolveBuyerCustomerIds(req)
   if (!clerkUserId) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
-
-  const customerService = req.scope.resolve(Modules.CUSTOMER) as any
-  const orderService = req.scope.resolve(Modules.ORDER) as any
-
-  // ── Find Medusa customer by external_id (Clerk user ID) ───────────────────
-  let customers: any[] = []
-  try {
-    customers = await customerService.listCustomers(
-      { external_id: clerkUserId },
-      { select: ['id', 'email', 'first_name', 'last_name', 'external_id'] }
-    )
-  } catch (e) {
-    console.error('[customers/me/orders] listCustomers error:', e)
-  }
-
-  const customer = customers[0] ?? null
-  if (!customer) {
-    // Customer not synced yet — return empty (will populate after next checkout)
+  if (!customerIds.length) {
     return res.json({ orders: [] })
   }
 
-  // ── Fetch orders for this customer ────────────────────────────────────────
+  // ── Fetch orders for this buyer's customers ───────────────────────────────
   // Via query.graph — orderService.listOrders throws "Shipping method version is
   // required to load adjustments" once an order has a shipping method, which the
   // .catch silently turned into an empty list (buyer saw no orders).
@@ -55,7 +40,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         'total', 'subtotal', 'currency_code', 'email', 'metadata', 'created_at', 'updated_at',
         'items.*', 'shipping_address.*', 'fulfillments.*',
       ],
-      filters: { customer_id: customer.id },
+      filters: { customer_id: customerIds },
     })
     orders = data ?? []
   } catch (e) {
@@ -70,5 +55,5 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     normalizeMedusaOrder(o, '', '')
   )
 
-  return res.json({ orders: normalized, customer_id: customer.id })
+  return res.json({ orders: normalized, customer_ids: customerIds })
 }
