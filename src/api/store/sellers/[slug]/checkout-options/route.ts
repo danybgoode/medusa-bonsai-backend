@@ -161,25 +161,53 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   const onlyCoordinated = delivery_methods.length === 1 && delivery_methods[0].id === 'coord'
 
-  // ── Payment methods ─────────────────────────────────────────────────────
+  // ── Payment methods (two buckets: online + one consolidated manual) ───────
   const regionProviderIds = await resolveRegionProviderIds(req)
-  let { methods: payment_methods, default: payment_default } = resolveSellerPaymentMethods(seller, regionProviderIds)
+  let { methods: rawMethods } = resolveSellerPaymentMethods(seller, regionProviderIds)
 
   // Digital goods: MercadoPago restriction (preserved from prior behavior).
-  if (isDigital) {
-    payment_methods = payment_methods.filter(m => m.id !== 'mercadopago')
-  }
+  if (isDigital) rawMethods = rawMethods.filter(m => m.id !== 'mercadopago')
 
   // Coordinated-only delivery: no instant card payment — pay is arranged with
-  // delivery (SPEI/cash/contact). Mirrors the start-checkout 422 guard.
-  if (onlyCoordinated) {
-    payment_methods = payment_methods.filter(m => !m.instant)
-  }
+  // delivery. Mirrors the start-checkout 422 guard.
+  if (onlyCoordinated) rawMethods = rawMethods.filter(m => !m.instant)
 
-  // Re-resolve the default to the first still-available method (MP→Stripe→SPEI→Cash).
-  const order: Array<typeof payment_methods[number]['id']> = ['mercadopago', 'stripe', 'spei', 'cash']
+  // Online (instant, escrow-capable) methods stay as-is.
+  const onlineMethods = rawMethods
+    .filter(m => m.instant)
+    .map(m => ({ id: m.id, kind: 'online' as const, label: m.label, note: m.note, instant: true, protected: true }))
+
+  // Manual methods (SPEI / cash) collapse into ONE "Pago directo" method that
+  // expands to the seller's structured sub-options — removes the ambiguous,
+  // overlapping top-level choices. Cash is a sub-option only with pickup delivery.
+  const hasPickup = delivery_methods.some(d => d.id === 'local_pickup')
+  const sub_options = rawMethods
+    .filter(m => !m.instant)
+    .filter(m => m.id !== 'cash' || hasPickup)
+    .map(m => ({
+      type: m.id === 'spei' ? 'clabe' : m.id,   // 'clabe' | 'cash'
+      label: m.id === 'spei' ? 'Transferencia SPEI' : m.label,
+      note: m.note,
+      requires_pickup: m.id === 'cash',
+    }))
+
+  const manualMethod = sub_options.length
+    ? [{
+        id: 'manual' as const,
+        kind: 'manual' as const,
+        label: 'Pago directo al vendedor',
+        note: 'Acuerdas el pago directamente con el vendedor (sin protección de Miyagi).',
+        instant: false,
+        protected: false,
+        sub_options,
+      }]
+    : []
+
+  const payment_methods = [...onlineMethods, ...manualMethod]
+
+  // Default: prefer the protected online rails, else manual.
   const ids = new Set(payment_methods.map(m => m.id))
-  payment_default = order.find(id => ids.has(id)) ?? null
+  const payment_default = (['mercadopago', 'stripe', 'manual'] as const).find(id => ids.has(id)) ?? null
 
   return res.json({
     payment_methods,

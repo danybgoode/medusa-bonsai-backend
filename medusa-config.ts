@@ -120,12 +120,18 @@ module.exports = defineConfig({
               accessToken: process.env.MP_ACCESS_TOKEN,
             },
           },
-          // SPEI — Mexican interbank transfer (authorize now, seller confirms receipt)
+          // Unified manual payment ("Pago directo") — SPEI / DiMo / cash at pickup.
+          // Sub-type is data on the payment, not a separate provider.
+          {
+            resolve: './src/modules/payment-manual',
+            id: 'manual',
+          },
+          // Legacy single-method manual providers — kept registered for any
+          // in-flight orders; new checkouts route through pp_manual_manual.
           {
             resolve: './src/modules/payment-spei',
             id: 'spei',
           },
-          // Cash on pickup (authorize now, seller confirms receipt in person)
           {
             resolve: './src/modules/payment-cash',
             id: 'cash',

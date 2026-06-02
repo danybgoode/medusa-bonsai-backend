@@ -147,7 +147,9 @@ function normalizeShippingQuote(input?: CheckoutShippingQuote | null) {
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
   const body = req.body as {
-    provider: 'stripe' | 'mercadopago' | 'spei' | 'cash'
+    provider: 'stripe' | 'mercadopago' | 'spei' | 'cash' | 'manual'
+    /** For provider 'manual': which structured instruction the buyer chose. */
+    manual_sub_type?: 'clabe' | 'cash' | 'dimo'
     buyer_email?: string
     offer_amount_cents?: number   // accepted offer override
     offer_id?: string             // Supabase offer ID for webhook reconciliation
@@ -159,19 +161,32 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     escrow?: boolean              // buyer explicitly opts in to escrow when mode='optional'
   }
 
-  if (!body.provider || !['stripe', 'mercadopago', 'spei', 'cash'].includes(body.provider)) {
-    return res.status(400).json({ message: 'provider is required: "stripe", "mercadopago", "spei", or "cash"' })
+  if (!body.provider || !['stripe', 'mercadopago', 'spei', 'cash', 'manual'].includes(body.provider)) {
+    return res.status(400).json({ message: 'provider is required: "stripe", "mercadopago", or "manual"' })
   }
+
+  // Normalize manual payments. The buyer now picks a single "Pago directo" method
+  // and a sub-type; legacy clients still send provider 'spei'/'cash' directly.
+  // All route to the unified pp_manual provider; the sub-type drives the buyer's
+  // instructions and is recorded as metadata.payment_method ('spei'/'cash'/'dimo')
+  // so downstream (confirm-payment, emails) is unchanged.
+  const isManual = body.provider === 'manual' || body.provider === 'spei' || body.provider === 'cash'
+  const manualSubType: 'clabe' | 'cash' | 'dimo' =
+    body.provider === 'spei' ? 'clabe'
+    : body.provider === 'cash' ? 'cash'
+    : (body.manual_sub_type ?? 'clabe')
+  // metadata.payment_method keeps the specific method for downstream branching.
+  const manualPaymentMethod = manualSubType === 'clabe' ? 'spei' : manualSubType
 
   // Rule: coordinated delivery (none/coord) requires manual payment coordination.
   // Card payments create buyer anxiety when there is no structured delivery path.
   const fulfillmentMethodEarly = body.fulfillment_method ?? 'none'
   if (
     (fulfillmentMethodEarly === 'none' || fulfillmentMethodEarly === 'coord') &&
-    (body.provider === 'stripe' || body.provider === 'mercadopago')
+    !isManual
   ) {
     return res.status(422).json({
-      message: 'Este vendedor coordina la entrega personalmente. El pago debe acordarse junto con la entrega — usa SPEI, efectivo o WhatsApp.',
+      message: 'Este vendedor coordina la entrega personalmente. El pago debe acordarse junto con la entrega — usa pago directo (SPEI / efectivo).',
     })
   }
 
@@ -279,8 +294,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const escrowModeSetting = (checkoutSettings.escrow_mode ?? 'off') as EscrowMode
   const useEscrow = escrowModeSetting === 'required' || (escrowModeSetting === 'optional' && body.escrow === true)
 
+  // Specific method recorded for downstream branching (confirm-payment, emails):
+  // manual → 'spei'/'cash'/'dimo'; otherwise the gateway id.
+  const effectivePaymentMethod = isManual ? manualPaymentMethod : body.provider
+
   const checkoutSelection = {
-    payment_method: body.provider,
+    payment_method: effectivePaymentMethod,
     fulfillment_method: fulfillmentMethod,
     pickup_spot_id: body.pickup_spot_id ?? null,
     has_shipping_address: !!body.shipping_address,
@@ -302,7 +321,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       metadata: {
         ...((cart as any).metadata ?? {}),
         checkout_selection: checkoutSelection,
-        payment_method: body.provider,
+        payment_method: effectivePaymentMethod,
         fulfillment_method: fulfillmentMethod,
         ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
         ...(bundleTier ? {
@@ -359,35 +378,38 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   let redirectUrl: string | null = null
   let providerId = 'pp_system_default'
 
-  // ── SPEI / cash (manual payment — system provider) ────────────────────────
-  if (body.provider === 'spei' || body.provider === 'cash') {
+  // ── Manual ("Pago directo": SPEI / DiMo / cash) ───────────────────────────
+  if (isManual) {
     // CLABE lives under settings.checkout.bank_transfer (where ShopSettings saves
-    // it) — NOT settings.bank_transfer. Reading the wrong path made every SPEI
-    // checkout fail with "no CLABE configured" even on shops that had one.
+    // it) — NOT settings.bank_transfer.
     const bankTransfer = (checkoutSettings.bank_transfer ?? {}) as Record<string, unknown>
-    // Normalize: sellers may save the CLABE with spaces/dashes.
-    const rawClabe = body.provider === 'spei' ? (bankTransfer.clabe as string | undefined) : null
+    const rawClabe = manualSubType === 'clabe' ? (bankTransfer.clabe as string | undefined) : null
     const clabe = rawClabe ? rawClabe.replace(/\D/g, '') : null
 
-    if (body.provider === 'spei' && (!clabe || clabe.length !== 18)) {
+    if (manualSubType === 'clabe' && (!clabe || clabe.length !== 18)) {
       return res.status(422).json({
         message: 'Este vendedor no tiene una CLABE configurada. Contacta al vendedor directamente.',
         code: 'SELLER_CLABE_MISSING',
       })
     }
 
+    const dimoPhone = manualSubType === 'dimo'
+      ? ((bankTransfer.dimo_phone as string | undefined) ?? (checkoutSettings.phone as string | undefined) ?? null)
+      : null
+
     providerData = {
-      payment_method: body.provider,
+      payment_method: manualPaymentMethod,   // 'spei' | 'cash' | 'dimo'
+      sub_type: manualSubType,
       clabe: clabe ?? null,
       bank_name: (bankTransfer.bank_name as string | undefined) ?? null,
       account_holder: (bankTransfer.account_holder as string | undefined) ?? null,
+      dimo_phone: dimoPhone,
       payment_received: false,
     }
     redirectUrl = null
-    // First-class manual providers (registered in medusa-config + enabled on the
-    // region) so SPEI/cash appear in the Payment registry instead of riding on
-    // the generic system provider.
-    providerId = body.provider === 'spei' ? 'pp_spei_spei' : 'pp_cash_cash'
+    // Unified manual provider. Legacy pp_spei/pp_cash remain registered for
+    // in-flight orders but new manual checkouts route here.
+    providerId = 'pp_manual_manual'
   }
 
   // ── Stripe Connect ────────────────────────────────────────────────────────
@@ -627,11 +649,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       cart_id: cartId,
       payment_session_id: paymentSession.id,
     }
-    // For SPEI/cash: include bank transfer details so frontend can show instructions
-    if (body.provider === 'spei' || body.provider === 'cash') {
+    // For manual payments: include the structured details so the frontend can
+    // show the right instructions (CLABE / DiMo / cash) inline.
+    if (isManual) {
+      responseBody.sub_type = manualSubType
+      responseBody.payment_method = manualPaymentMethod
       responseBody.clabe = (providerData.clabe as string | null) ?? null
       responseBody.bank_name = (providerData.bank_name as string | null) ?? null
       responseBody.account_holder = (providerData.account_holder as string | null) ?? null
+      responseBody.dimo_phone = (providerData.dimo_phone as string | null) ?? null
     }
     // For escrow: include the mode so frontend can show escrow badge
     if (useEscrow) {
