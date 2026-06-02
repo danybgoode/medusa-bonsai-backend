@@ -72,29 +72,49 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (linkErrors.length) report.product_link_errors = linkErrors.slice(0, 10)
 
   // ── 2. Dismiss dangling location ↔ sales_channel links ────────────────────
-  const danglingIds = body.dangling_channel_ids ?? []
+  // Auto-detect: read the raw pivot (sales_channel_location), then dismiss any
+  // link whose sales_channel no longer exists — these dead rows render as `null`
+  // in the admin and crash /settings/locations ("null is not an object o.name").
+  // Explicit ids in the body are also honored as a fallback.
   const dismissed: string[] = []
   const dismissErrors: string[] = []
-  if (danglingIds.length) {
-    const stockLocation: any = req.scope.resolve(Modules.STOCK_LOCATION)
-    const locations: any[] = await stockLocation
-      .listStockLocations({}, { select: ['id'], take: 100 })
-      .catch(() => [] as any[])
 
-    for (const loc of locations) {
-      for (const channelId of danglingIds) {
-        try {
-          await link.dismiss({
-            [Modules.SALES_CHANNEL]: { sales_channel_id: channelId },
-            [Modules.STOCK_LOCATION]: { stock_location_id: loc.id },
-          })
-          dismissed.push(`${loc.id}↔${channelId}`)
-        } catch (e) {
-          dismissErrors.push(`${loc.id}↔${channelId}: ${e instanceof Error ? e.message : String(e)}`)
-        }
-      }
+  const salesChannel: any = req.scope.resolve(Modules.SALES_CHANNEL)
+  const liveChannels: any[] = await salesChannel
+    .listSalesChannels({}, { select: ['id'], take: 500 })
+    .catch(() => [] as any[])
+  const liveChannelIds = new Set(liveChannels.map((c: any) => c.id))
+
+  // Raw link rows from the pivot — these carry the FK even when the channel is gone.
+  let pivotRows: any[] = []
+  try {
+    const { data } = await query.graph({
+      entity: 'sales_channel_location',
+      fields: ['sales_channel_id', 'stock_location_id'],
+      pagination: { take: 500, skip: 0 },
+    })
+    pivotRows = data ?? []
+  } catch (e) {
+    report.pivot_query_error = e instanceof Error ? e.message : String(e)
+  }
+
+  const explicit = new Set(body.dangling_channel_ids ?? [])
+  const deadLinks = pivotRows.filter(
+    (r: any) => !liveChannelIds.has(r.sales_channel_id) || explicit.has(r.sales_channel_id),
+  )
+
+  for (const r of deadLinks) {
+    try {
+      await link.dismiss({
+        [Modules.SALES_CHANNEL]: { sales_channel_id: r.sales_channel_id },
+        [Modules.STOCK_LOCATION]: { stock_location_id: r.stock_location_id },
+      })
+      dismissed.push(`${r.stock_location_id}↔${r.sales_channel_id}`)
+    } catch (e) {
+      dismissErrors.push(`${r.stock_location_id}↔${r.sales_channel_id}: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
+  report.dead_channel_links_found = deadLinks.length
   report.channel_links_dismissed = dismissed
   if (dismissErrors.length) report.dismiss_errors = dismissErrors.slice(0, 10)
 
