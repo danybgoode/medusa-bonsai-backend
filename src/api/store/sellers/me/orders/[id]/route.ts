@@ -31,21 +31,28 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (!seller) return res.status(401).json({ message: 'Unauthorized' })
 
   const { id: orderId } = req.params
-  const orderService = req.scope.resolve(Modules.ORDER) as any
 
+  // Fetch via query.graph — orderService.retrieveOrder throws "Shipping method
+  // version is required to load adjustments" once an order has a shipping method,
+  // which the catch turned into a 404 (seller order detail page was unreachable).
   let order: Record<string, unknown>
   try {
-    const result = await orderService.retrieveOrder(orderId, {
-      select: [
+    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await (query as any).graph({
+      entity: 'order',
+      fields: [
         'id', 'status', 'payment_status', 'fulfillment_status',
         'total', 'subtotal', 'currency_code',
         'email', 'metadata', 'created_at', 'updated_at',
+        'items.*', 'shipping_address.*', 'customer.*', 'fulfillments.*',
       ],
-      relations: ['items', 'shipping_address', 'customer', 'fulfillments', 'payments'],
+      filters: { id: orderId },
     })
+    const result = (data ?? [])[0]
     if (!result) return res.status(404).json({ message: 'Order not found' })
     order = result as Record<string, unknown>
-  } catch {
+  } catch (e) {
+    console.error('[seller/me/orders/:id] order query error:', e)
     return res.status(404).json({ message: 'Order not found' })
   }
 

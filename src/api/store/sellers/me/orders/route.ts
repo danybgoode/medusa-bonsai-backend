@@ -101,9 +101,17 @@ export function normalizeMedusaOrder(
   const checkoutSelection = (metadata.checkout_selection ?? {}) as Record<string, unknown>
   const selectedFulfillment = (metadata.fulfillment_method ?? checkoutSelection.fulfillment_method ?? 'standard') as string
 
-  // Map to our status vocabulary. Refund/cancel always wins; otherwise prefer the
-  // explicit lifecycle state we persist on the order (set by the seller PATCH
-  // route), falling back to Medusa's native fulfillment_status for legacy orders.
+  // Manual payments (SPEI/cash/DiMo) are only *authorized* at checkout — the funds
+  // aren't captured until the seller confirms receipt. Until then the order is
+  // PENDING PAYMENT, not paid. (Card/MP orders are captured → 'paid'.)
+  const paymentMethod = (metadata.payment_method as string) ?? null
+  const isManualPay = ['manual', 'spei', 'cash', 'dimo'].includes(paymentMethod ?? '')
+  const paymentStatus = (order.payment_status as string) ?? ''
+  const isCaptured = paymentStatus === 'captured' || paymentStatus === 'partially_captured'
+  const manualConfirmed = metadata.payment_received === true
+
+  // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
+  // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
   let status = 'paid'
   if (
     order.status === 'canceled' ||
@@ -111,6 +119,8 @@ export function normalizeMedusaOrder(
     (order.fulfillment_status as string) === 'returned'
   ) {
     status = 'refunded'
+  } else if (isManualPay && !isCaptured && !manualConfirmed) {
+    status = 'pending_payment'
   } else if (typeof metadata.fulfillment_state === 'string') {
     status = metadata.fulfillment_state as string
   } else if ((order.fulfillment_status as string) === 'delivered') {
