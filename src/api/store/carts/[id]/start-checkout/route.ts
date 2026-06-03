@@ -21,7 +21,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
-import { extractClerkUserId } from '../../../_utils/clerk-auth'
+import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_utils/clerk-auth'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -205,24 +205,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   // ── Link the buyer's Medusa customer to the cart ──────────────────────────
   // completeCart copies cart.customer_id → order.customer_id, which the buyer
-  // order pages (/store/customers/me/orders) use for ownership. Store cart
-  // creation does NOT set it from the Clerk JWT, so orders ended up with a null
-  // customer_id → invisible to the buyer ("ver mi pedido" 404, empty list).
-  // Resolve the customer by Clerk external_id and set it here.
+  // order pages (/store/customers/me/orders) use for ownership. Resolve (or
+  // create) the ONE canonical customer for this Clerk buyer — keyed by Clerk id
+  // (customer.metadata.clerk_user_id) + email — and attach it, so the order is
+  // owned by a stable, clerk-linked customer instead of a throwaway guest.
   if (!(cart as any).customer_id) {
     const clerkUserId = extractClerkUserId(req)
     if (clerkUserId) {
       try {
-        const customerService: any = req.scope.resolve(Modules.CUSTOMER)
-        const [customer] = await customerService.listCustomers(
-          { external_id: clerkUserId },
-          { select: ['id', 'email'], take: 1 },
-        )
-        if (customer?.id) {
-          await cartService.updateCarts(cartId, {
-            customer_id: customer.id,
-            ...(customer.email ? { email: customer.email } : {}),
-          } as any)
+        const customerId = await resolveOrCreateBuyerCustomer(req.scope, {
+          clerkUserId,
+          email: (cart as any).email ?? body.buyer_email ?? null,
+        })
+        if (customerId) {
+          await cartService.updateCarts(cartId, { customer_id: customerId } as any)
         }
       } catch (e) {
         console.error('[start-checkout] customer link failed:', e)

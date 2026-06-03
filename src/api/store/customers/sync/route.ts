@@ -13,8 +13,7 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules } from '@medusajs/framework/utils'
-import { extractClerkUserId } from '../../_utils/clerk-auth'
+import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../_utils/clerk-auth'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const clerkUserId = extractClerkUserId(req)
@@ -32,46 +31,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(400).json({ message: 'email is required' })
   }
 
-  const customerService = req.scope.resolve(Modules.CUSTOMER) as any
+  // Find-or-create the ONE canonical customer for this Clerk buyer, keyed by
+  // metadata.clerk_user_id + email (Medusa v2 customer has no external_id column).
+  const customerId = await resolveOrCreateBuyerCustomer(req.scope, {
+    clerkUserId,
+    email: body.email,
+    firstName: body.first_name ?? null,
+    lastName: body.last_name ?? null,
+  })
 
-  // Find existing customer by email or external_id (Clerk user ID)
-  let customers: any[] = []
-  try {
-    customers = await customerService.listCustomers({
-      email: body.email,
-    }, { select: ['id', 'email', 'external_id', 'first_name', 'last_name'] })
-  } catch (e) {
-    console.error('[customer-sync] listCustomers error:', e)
+  if (!customerId) {
+    return res.status(500).json({ message: 'Failed to create customer' })
   }
 
-  // Prefer one that's already linked to this Clerk user
-  let customer = customers.find((c: any) => c.external_id === clerkUserId)
-    ?? customers[0]
-    ?? null
-
-  if (!customer) {
-    // Create new Medusa customer
-    try {
-      customer = await customerService.createCustomers({
-        email: body.email,
-        first_name: body.first_name ?? '',
-        last_name: body.last_name ?? '',
-        external_id: clerkUserId,
-      })
-    } catch (e) {
-      console.error('[customer-sync] createCustomers error:', e)
-      return res.status(500).json({ message: 'Failed to create customer' })
-    }
-  } else if (!customer.external_id) {
-    // Backfill external_id on an existing customer
-    try {
-      await customerService.updateCustomers(customer.id, {
-        external_id: clerkUserId,
-      })
-    } catch {
-      // Non-fatal — customer exists, just couldn't link
-    }
-  }
-
-  return res.json({ customer_id: customer.id })
+  return res.json({ customer_id: customerId })
 }
