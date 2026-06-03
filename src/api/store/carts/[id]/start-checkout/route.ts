@@ -16,12 +16,13 @@
 import Stripe from 'stripe'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
-import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/types'
+import { ICartModuleService, IPaymentModuleService, IPromotionModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
 import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_utils/clerk-auth'
+import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -153,6 +154,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     manual_sub_type?: 'clabe' | 'cash' | 'dimo'
     buyer_email?: string
     offer_amount_cents?: number   // accepted offer override
+    coupon_code?: string          // seller coupon code applied at checkout
     offer_id?: string             // Supabase offer ID for webhook reconciliation
     seller_id?: string            // skip expensive seller scan when caller already knows it
     fulfillment_method?: FulfillmentMethod
@@ -303,8 +305,28 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const bundleDiscountCents = bundleTier
     ? Math.round(itemsTotalCents * bundleTier.percent_off / 100)
     : 0
-  // priceCents = item charge after discount (providers bill this); checkoutTotalCents adds shipping
-  const priceCents = Math.max(0, rawItemsCents - bundleDiscountCents)
+
+  // ── Coupon code (seller-scoped) ───────────────────────────────────────────
+  // Applied on the post-bundle item subtotal. Like the bundle discount, it's
+  // ignored when an accepted offer override is present. Validated against the
+  // Promotion module + the seller's own coupon_ids; a bad code fails the
+  // checkout loudly so the buyer never silently pays full price.
+  const postBundleBase = Math.max(0, rawItemsCents - bundleDiscountCents)
+  let couponInfo: { code: string; promotion_id: string; discount_cents: number } | null = null
+  let couponDiscountCents = 0
+  if (body.coupon_code && !body.offer_amount_cents) {
+    const couponIds = Array.isArray((sellerMeta as any).coupon_ids) ? (sellerMeta as any).coupon_ids as string[] : []
+    const promotionService = req.scope.resolve(Modules.PROMOTION) as IPromotionModuleService
+    const resolution = await resolveCouponForCheckout(promotionService, body.coupon_code, couponIds, postBundleBase)
+    if (!resolution.ok) {
+      return res.status(422).json({ message: couponErrorMessage(resolution.reason), code: 'COUPON_INVALID' })
+    }
+    couponDiscountCents = resolution.discount_cents
+    couponInfo = { code: resolution.code, promotion_id: resolution.promotion_id, discount_cents: couponDiscountCents }
+  }
+
+  // priceCents = item charge after discounts (providers bill this); checkoutTotalCents adds shipping
+  const priceCents = Math.max(0, rawItemsCents - bundleDiscountCents - couponDiscountCents)
   const checkoutTotalCents = priceCents + shippingCents
 
   // ── Escrow mode is resolved early so it can be written to cart metadata before the payment branch
@@ -360,6 +382,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         tier_min_items: bundleTier.min_items,
       },
     } : {}),
+    ...(couponInfo ? { coupon: couponInfo } : {}),
   }
 
   try {
@@ -376,6 +399,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           bundle_discount_pct: bundleTier.percent_off,
           bundle_discount_cents: bundleDiscountCents,
         } : {}),
+        // Carried onto the order (cart.metadata → order.metadata) so the
+        // order.placed subscriber can register coupon usage exactly once.
+        ...(couponInfo ? { coupon: couponInfo } : {}),
         ...(shippingQuote ? {
           shipping_rate_id: shippingQuote.rate_id,
           shipping_carrier: shippingQuote.carrier,
@@ -693,6 +719,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         discount_cents: bundleDiscountCents,
         item_count: itemCount,
       }
+    }
+    // Coupon applied
+    if (couponInfo) {
+      responseBody.coupon = couponInfo
     }
     return res.json(responseBody)
   } catch (e) {
