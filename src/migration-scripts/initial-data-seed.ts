@@ -34,6 +34,19 @@ export default async function initial_data_seed({
     ModuleRegistrationName.FULFILLMENT
   );
 
+  // ── Idempotency guard ──────────────────────────────────────────────────────
+  // This is a FIRST-RUN seed, not a migration. Re-invoking it against a populated
+  // DB (e.g. a stray `medusa exec` pointed at prod) previously created 70+
+  // duplicate stores / publishable keys / sales channels. Bail if a store exists.
+  const storeModuleService = container.resolve(Modules.STORE);
+  const existingStores = await storeModuleService.listStores({}, { take: 1 });
+  if (existingStores.length > 0) {
+    logger.info(
+      "[initial-data-seed] a store already exists — skipping seed (idempotent)."
+    );
+    return;
+  }
+
   const countries = ["gb", "de", "dk", "se", "fr", "es", "it"];
 
   logger.info("Seeding store data...");
