@@ -11,7 +11,7 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../_utils/clerk-auth'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -39,20 +39,24 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── Fetch Medusa orders that contain these products ───────────────────────
-  const orderService = req.scope.resolve(Modules.ORDER) as any
+  const knex = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
 
   let orders: unknown[] = []
   try {
-    // Step 1: find line items for seller's products → get order IDs
-    const lineItems: Array<{ order_id?: string; order?: { id: string } }> =
-      await orderService.listLineItems(
-        { product_id: productIds },
-        { select: ['id', 'order_id', 'product_id', 'title', 'thumbnail', 'unit_price', 'quantity'] }
-      ).catch(() => [] as any[])
-
-    const orderIds = [...new Set(
-      lineItems.map(li => li.order_id ?? (li.order as any)?.id).filter(Boolean)
-    )] as string[]
+    // Step 1: order IDs that contain the seller's products. Raw SQL via the join
+    // table — order_line_item has no order_id column (it links through order_item),
+    // and orderService.listLineItems does not exist on the Order service in this
+    // Medusa version (it threw a TypeError → every seller's orders page was empty).
+    const liRows = await knex.raw(
+      `select distinct oi.order_id
+         from order_item oi
+         join order_line_item li on li.id = oi.item_id
+        where li.product_id = ANY(?)`,
+      [productIds],
+    )
+    const orderIds = ((liRows?.rows ?? []) as Array<{ order_id?: string }>)
+      .map((r) => r.order_id)
+      .filter(Boolean) as string[]
 
     if (!orderIds.length) {
       return res.json({ orders: [], seller_id: sellerId })
