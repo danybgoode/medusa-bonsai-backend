@@ -97,6 +97,19 @@ export function normalizeMedusaOrder(
   const item = (order.items as any[])?.[0]
   const sa = order.shipping_address as Record<string, string> | undefined
   const customer = order.customer as Record<string, string> | undefined
+
+  // Buyer personalization rides each line item's metadata (set at checkout). Surface
+  // it per item so the seller (fulfillment) and the buyer can both see exactly what
+  // was requested — Configurable & Personalized Products epic.
+  const personalization = ((order.items as any[]) ?? [])
+    .map((it: any) => {
+      const p = it?.metadata?.personalization as { fields?: Array<{ id?: string; label?: string; value?: string }> } | undefined
+      const fields = Array.isArray(p?.fields)
+        ? p!.fields.filter(f => f && typeof f.value === 'string' && f.value.trim())
+        : []
+      return fields.length ? { title: (it?.title as string) ?? 'Producto', fields } : null
+    })
+    .filter(Boolean)
   const metadata = (order.metadata ?? {}) as Record<string, unknown>
   const checkoutSelection = (metadata.checkout_selection ?? {}) as Record<string, unknown>
   const selectedFulfillment = (metadata.fulfillment_method ?? checkoutSelection.fulfillment_method ?? 'standard') as string
@@ -150,6 +163,8 @@ export function normalizeMedusaOrder(
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
     buyer_clerk_user_id: null,
+    // Per-line-item buyer personalization (empty array when none).
+    personalization,
     created_at: order.created_at,
     updated_at: order.updated_at,
     shipping_address: sa ? {
