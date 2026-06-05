@@ -2,6 +2,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { toListingShape } from '../_utils/listing'
+import { isHiddenCatalogProduct } from '../_utils/support'
 
 const PAGE_SIZE = 24
 
@@ -62,8 +63,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   )
 
   // ── Step 4: Apply filters ─────────────────────────────────────────────────
-  // Print-ad placements are sold in-portal only — never surface in general browse/search.
-  listings = listings.filter((l: any) => !(l.metadata?.is_print_placement))
+  // Print-ad placements and support primitives are sold through dedicated flows only.
+  listings = listings.filter((l: any) => !(l.metadata?.is_print_placement) && !isHiddenCatalogProduct(l.metadata))
   if (q.q) {
     const needle = q.q.toLowerCase()
     listings = listings.filter((l: any) =>

@@ -4,6 +4,7 @@ import SellerModuleService from '../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
 import { toListingShape } from '../../../_utils/listing'
 import { createSellerProduct, type CreateProductBody } from '../../../_utils/seller-product-create'
+import { isHiddenCatalogProduct } from '../../../_utils/support'
 
 // GET /store/sellers/me/products — list all products for the authenticated seller
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -58,11 +59,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     pagination: { take: 2000, skip: 0 },
   })
 
-  const products = (allProducts ?? [])
+  const matchedProducts = (allProducts ?? [])
     .filter((product: { id: string }) => linkedIdSet.has(product.id))
+    .filter((product: { metadata?: unknown }) => !isHiddenCatalogProduct(product.metadata))
     .sort((a: { created_at?: string | Date }, b: { created_at?: string | Date }) =>
       new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
     )
+  const products = matchedProducts
     .slice(offset, offset + limit)
   const listings = products
     .map((product) => toListingShape(product, seller))
@@ -71,7 +74,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     seller,
     listings,
     products,
-    count: linkedIds.length,
+    count: matchedProducts.length,
     limit,
     offset,
   })
