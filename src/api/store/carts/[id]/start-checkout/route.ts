@@ -162,6 +162,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     shipping_address?: CheckoutShippingAddress
     shipping_quote?: CheckoutShippingQuote
     escrow?: boolean              // buyer explicitly opts in to escrow when mode='optional'
+    origin_domain?: string        // tenant custom domain the buyer came from (own-channel hop)
   }
 
   if (!body.provider || !['stripe', 'mercadopago', 'spei', 'cash', 'manual'].includes(body.provider)) {
@@ -173,6 +174,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // as metadata.payment_method = 'manual' with a snapshot of ALL the seller's
   // configured instructions (filled in the manual branch below).
   const isManual = body.provider === 'manual' || body.provider === 'spei' || body.provider === 'cash'
+
+  // Own-channel hop: the buyer came from a tenant's custom domain and was sent to
+  // the platform for the secure step. We record the origin domain + channel on the
+  // cart (→ order metadata) so the success page can return them to their domain and
+  // the sale is attributed `custom_domain`. Stored only — never used to build a
+  // redirect here (the success page validates it against the verified-domain set
+  // before redirecting, so a forged value can't become an open redirect).
+  const originDomain = ((): string | null => {
+    const raw = (body.origin_domain ?? '').trim().toLowerCase()
+      .replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    if (!raw || raw.length > 253) return null
+    return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(raw) ? raw : null
+  })()
 
   // Rule: coordinated delivery (none/coord) requires manual payment coordination.
   // Card payments create buyer anxiety when there is no structured delivery path.
@@ -414,6 +428,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.seller_id ? { seller_id: body.seller_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
+        // Own-channel attribution + return target (see originDomain above).
+        ...(originDomain ? { origin_domain: originDomain, channel: 'custom_domain' } : {}),
       },
     } as any)
   } catch (e) {
