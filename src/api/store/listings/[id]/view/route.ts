@@ -26,8 +26,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     ? Math.max(currentViews, Math.floor(requestedViews))
     : currentViews + 1
 
-  await (productService as any).updateProducts({
-    id,
+  // Two-arg (id, data) form — a single merged object is read as a selector.
+  await (productService as any).updateProducts(id, {
     metadata: {
       ...current,
       views: nextViews,
