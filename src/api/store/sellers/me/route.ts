@@ -12,6 +12,29 @@ function slugify(text: string) {
     .slice(0, 60)
 }
 
+// Slugs the storefront/platform can't give away — system routes and high-risk
+// words. Keep in sync with the frontend's RESERVED_SLUGS (lib/slug.ts).
+const RESERVED_SLUGS = new Set([
+  'admin', 'api', 'app', 'sell', 'search', 'orders', 'inbox', 'profile', 'perfil',
+  'ayuda', 'help', 's', 'shop', 'www', 'billing', 'support', 'soporte', 'account',
+  'cuenta', 'sign-in', 'sign-up', 'embed', 'l', 'messages', 'mensajes', 'checkout',
+  'cart', 'carrito', 'settings', 'ajustes', 'supply', 'terminos', 'mschz',
+])
+
+/**
+ * Validate a seller-chosen slug. Returns an error message, or null if valid.
+ * Format mirrors the frontend: 3–40 chars, lowercase alphanumeric + hyphens,
+ * no leading/trailing hyphen, not reserved.
+ */
+function validateSlug(slug: string): string | null {
+  if (slug.length < 3 || slug.length > 40) return 'El slug debe tener entre 3 y 40 caracteres.'
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {
+    return 'Solo minúsculas, números y guiones; sin guion al inicio o al final.'
+  }
+  if (RESERVED_SLUGS.has(slug)) return 'Ese slug está reservado. Elige otro.'
+  return null
+}
+
 // GET /store/sellers/me — fetch current seller profile (requires Clerk auth)
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const clerkUserId = extractClerkUserId(req)
@@ -91,7 +114,24 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     description?: string
     location?: string
     logo_url?: string
+    slug?: string
     metadata?: Record<string, unknown>
+  }
+
+  // Slug change — validate format/reserved (422) + uniqueness (409). Only when it
+  // actually differs from the current slug, so re-saving the profile is a no-op.
+  let nextSlug: string | undefined
+  if (body.slug !== undefined) {
+    const candidate = body.slug.trim().toLowerCase()
+    if (candidate !== seller.slug) {
+      const invalid = validateSlug(candidate)
+      if (invalid) return res.status(422).json({ message: invalid, field: 'slug' })
+      const [conflict] = await sellerService.listSellers({ slug: candidate })
+      if (conflict && conflict.id !== seller.id) {
+        return res.status(409).json({ message: 'Ese slug ya está en uso.', field: 'slug' })
+      }
+      nextSlug = candidate
+    }
   }
 
   // Deep-merge metadata so partial updates don't overwrite existing settings
@@ -105,6 +145,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     ...(body.description !== undefined && { description: body.description }),
     ...(body.location !== undefined && { location: body.location }),
     ...(body.logo_url !== undefined && { logo_url: body.logo_url }),
+    ...(nextSlug && { slug: nextSlug }),
     ...(updatedMetadata && { metadata: updatedMetadata }),
   })
 
