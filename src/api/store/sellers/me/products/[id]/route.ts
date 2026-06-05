@@ -47,7 +47,8 @@ export async function DELETE(req: MedusaRequest, res: MedusaResponse) {
   if (!seller) return res.status(status).json({ message: error })
 
   const productService: IProductModuleService = req.scope.resolve(Modules.PRODUCT)
-  await (productService as any).updateProducts({ id, status: 'draft', metadata: { deleted: true } })
+  // Two-arg (id, data) form — a single merged object is read as a selector.
+  await (productService as any).updateProducts(id, { status: 'draft', metadata: { deleted: true } })
 
   res.json({ product_id: id, deleted: true })
 }

@@ -67,7 +67,12 @@ export async function updateSellerProduct(
   }
 
   if (Object.keys(baseUpdate).length > 1) {
-    await (productService as any).updateProducts(baseUpdate)
+    // Update by id with the explicit (id, data) form. Passing a single merged
+    // object makes Medusa treat it as a SELECTOR (matching on title/description/
+    // metadata), which never matches the stored row once metadata carries
+    // custom_fields → the save 500s ("unknown error") or silently no-ops.
+    const { id: _productId, ...productData } = baseUpdate
+    await (productService as any).updateProducts(id, productData)
   }
 
   // ── Price update ───────────────────────────────────────────────────────────
