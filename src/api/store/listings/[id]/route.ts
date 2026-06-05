@@ -2,6 +2,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { toListingShape } from '../../_utils/listing'
+import { isHiddenCatalogProduct } from '../../_utils/support'
 
 // GET /store/listings/:id — single listing with seller enrichment
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -26,6 +27,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   const product = products?.[0]
   if (!product) {
+    return res.status(404).json({ message: 'Listing not found' })
+  }
+  if ((product.metadata as any)?.is_print_placement || isHiddenCatalogProduct(product.metadata)) {
     return res.status(404).json({ message: 'Listing not found' })
   }
 

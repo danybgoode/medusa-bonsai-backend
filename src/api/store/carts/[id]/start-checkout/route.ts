@@ -23,6 +23,7 @@ import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from
 import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
 import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_utils/clerk-auth'
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
+import { isSupportProductMetadata, normalizeSupportCheckout, type NormalizedSupportCheckout } from '../../../_utils/support'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -146,6 +147,26 @@ function normalizeShippingQuote(input?: CheckoutShippingQuote | null) {
   }
 }
 
+async function loadProductForCheckout(remoteQuery: any, productId?: string | null) {
+  if (!productId) return null
+  if (typeof remoteQuery?.graph === 'function') {
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['id', 'title', 'metadata', 'status'],
+      filters: { id: productId },
+    })
+    return rows?.[0] ?? null
+  }
+
+  const { data: rows } = await remoteQuery({
+    product: {
+      fields: ['id', 'title', 'metadata', 'status'],
+      variables: { filters: { id: productId } },
+    },
+  })
+  return rows?.[0] ?? null
+}
+
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
   const body = req.body as {
@@ -163,6 +184,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     shipping_quote?: CheckoutShippingQuote
     escrow?: boolean              // buyer explicitly opts in to escrow when mode='optional'
     origin_domain?: string        // tenant custom domain the buyer came from (own-channel hop)
+    support?: {
+      amount_cents?: number
+      supporter_name?: string
+      supporter_email?: string
+      message?: string
+      visibility?: 'public' | 'private'
+      embed_key?: string
+      channel?: string
+    }
   }
 
   if (!body.provider || !['stripe', 'mercadopago', 'spei', 'cash', 'manual'].includes(body.provider)) {
@@ -174,6 +204,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // as metadata.payment_method = 'manual' with a snapshot of ALL the seller's
   // configured instructions (filled in the manual branch below).
   const isManual = body.provider === 'manual' || body.provider === 'spei' || body.provider === 'cash'
+
+  const supportResolution = body.support === undefined ? null : normalizeSupportCheckout(body.support)
+  if (supportResolution && !supportResolution.ok) {
+    return res.status(422).json({ message: supportResolution.message, code: 'SUPPORT_INVALID' })
+  }
+  const supportCheckout: NormalizedSupportCheckout | null = supportResolution?.ok ? supportResolution.support : null
+  if (supportCheckout && isManual) {
+    return res.status(422).json({
+      message: 'Los apoyos solo pueden pagarse con Stripe o Mercado Pago.',
+      code: 'SUPPORT_PROVIDER_UNSUPPORTED',
+    })
+  }
 
   // Own-channel hop: the buyer came from a tenant's custom domain and was sent to
   // the platform for the secure step. We record the origin domain + channel on the
@@ -190,7 +232,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   // Rule: coordinated delivery (none/coord) requires manual payment coordination.
   // Card payments create buyer anxiety when there is no structured delivery path.
-  const fulfillmentMethodEarly = body.fulfillment_method ?? 'none'
+  const fulfillmentMethodEarly = supportCheckout ? 'digital' : (body.fulfillment_method ?? 'none')
   if (
     (fulfillmentMethodEarly === 'none' || fulfillmentMethodEarly === 'coord') &&
     !isManual
@@ -255,6 +297,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     ? `${allTitles[0]} + ${allTitles.length - 1} más`
     : (allTitles[0] ?? 'Producto')
   const productImage = (item as any).thumbnail ?? null
+  const productRecord = await loadProductForCheckout(remoteQuery as any, productId)
+  const productMetadata = ((productRecord as any)?.metadata ?? {}) as Record<string, unknown>
+
+  if (supportCheckout && !isSupportProductMetadata(productMetadata)) {
+    return res.status(422).json({
+      message: 'Este producto no puede usarse para apoyos.',
+      code: 'SUPPORT_PRODUCT_INVALID',
+    })
+  }
 
   // ── Find seller for this product ──────────────────────────────────────────
   let seller: any = null
@@ -291,7 +342,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     (sum: number, i: any) => sum + Math.round(Number(i.unit_price ?? 0) * Number(i.quantity ?? 1)),
     0,
   )
-  const rawItemsCents = body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
+  const rawItemsCents = supportCheckout?.amount_cents ?? body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
   const shippingQuote = normalizeShippingQuote(body.shipping_quote)
   const shippingCents = shippingQuote?.amount_cents ?? 0
   // priceCents and checkoutTotalCents are finalized after bundle discount is resolved below
@@ -305,7 +356,35 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
   const sellerSettings = (sellerMeta.settings ?? {}) as Record<string, unknown>
-  const fulfillmentMethod = body.fulfillment_method ?? 'none'
+  const supportSettings = (sellerSettings.support ?? {}) as Record<string, unknown>
+  if (supportCheckout) {
+    const configuredSupportProductId = typeof supportSettings.support_product_id === 'string'
+      ? supportSettings.support_product_id
+      : null
+    const supportCurrency = String(supportSettings.currency ?? cart.currency_code ?? 'MXN').toUpperCase()
+    const configuredMinCents = Math.round(Number(supportSettings.custom_min_cents ?? 100))
+    const configuredMaxCents = Math.round(Number(supportSettings.custom_max_cents ?? 500_000))
+    const minCents = Number.isFinite(configuredMinCents) ? Math.max(100, configuredMinCents) : 100
+    const maxCents = Number.isFinite(configuredMaxCents) ? Math.min(500_000, configuredMaxCents) : 500_000
+
+    if (supportSettings.enabled !== true) {
+      return res.status(422).json({ message: 'Este vendedor no tiene apoyos activos.', code: 'SUPPORT_DISABLED' })
+    }
+    if (configuredSupportProductId && configuredSupportProductId !== productId) {
+      return res.status(422).json({ message: 'La configuración de apoyos no coincide con este producto.', code: 'SUPPORT_PRODUCT_MISMATCH' })
+    }
+    if (supportCurrency.toLowerCase() !== currency) {
+      return res.status(422).json({ message: 'La moneda del apoyo no coincide con el carrito.', code: 'SUPPORT_CURRENCY_MISMATCH' })
+    }
+    if (supportCheckout.amount_cents < minCents || supportCheckout.amount_cents > maxCents) {
+      return res.status(422).json({
+        message: 'El monto de apoyo está fuera de los límites configurados.',
+        code: 'SUPPORT_AMOUNT_OUT_OF_RANGE',
+      })
+    }
+  }
+
+  const fulfillmentMethod = supportCheckout ? 'digital' : (body.fulfillment_method ?? 'none')
   if (fulfillmentMethod === 'shipping' && !shippingQuote) {
     return res.status(400).json({ message: 'Selecciona una tarifa de envío para continuar.' })
   }
@@ -315,7 +394,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // offer override (offer_amount_cents already reflects an agreed price).
   const bundleSettings = (sellerSettings.bundles ?? null) as BundleSettings | null
   const itemCount = (cart.items ?? []).length
-  const bundleTier = body.offer_amount_cents ? null : resolveBundleTier(bundleSettings, itemCount)
+  const bundleTier = body.offer_amount_cents || supportCheckout ? null : resolveBundleTier(bundleSettings, itemCount)
   const bundleDiscountCents = bundleTier
     ? Math.round(itemsTotalCents * bundleTier.percent_off / 100)
     : 0
@@ -328,7 +407,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const postBundleBase = Math.max(0, rawItemsCents - bundleDiscountCents)
   let couponInfo: { code: string; promotion_id: string; discount_cents: number } | null = null
   let couponDiscountCents = 0
-  if (body.coupon_code && !body.offer_amount_cents) {
+  if (body.coupon_code && !body.offer_amount_cents && !supportCheckout) {
     const couponIds = Array.isArray((sellerMeta as any).coupon_ids) ? (sellerMeta as any).coupon_ids as string[] : []
     const promotionService = req.scope.resolve(Modules.PROMOTION) as IPromotionModuleService
     const resolution = await resolveCouponForCheckout(promotionService, body.coupon_code, couponIds, postBundleBase)
@@ -351,6 +430,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // payment_method recorded on the order: 'manual' for all direct payments,
   // otherwise the gateway id.
   const effectivePaymentMethod = isManual ? 'manual' : body.provider
+  const supportMetadata = supportCheckout ? {
+    kind: 'support',
+    amount_cents: supportCheckout.amount_cents,
+    currency: currency.toUpperCase(),
+    supporter_name: supportCheckout.supporter_name,
+    supporter_email: supportCheckout.supporter_email,
+    message: supportCheckout.message,
+    visibility: supportCheckout.visibility,
+    embed_key: supportCheckout.embed_key,
+    channel: supportCheckout.channel,
+    support_product_id: productId ?? null,
+    seller_id: seller.id,
+    seller_slug: seller.slug,
+  } : null
 
   // ── Manual instruction snapshot ───────────────────────────────────────────
   // Capture ALL of the seller's configured direct-payment methods so the order /
@@ -397,6 +490,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       },
     } : {}),
     ...(couponInfo ? { coupon: couponInfo } : {}),
+    ...(supportMetadata ? { support: supportMetadata } : {}),
   }
 
   try {
@@ -428,8 +522,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.seller_id ? { seller_id: body.seller_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
+        ...(supportMetadata ? {
+          support: supportMetadata,
+          support_amount_cents: supportCheckout?.amount_cents,
+          support_visibility: supportCheckout?.visibility,
+          channel: supportCheckout?.channel,
+        } : {}),
         // Own-channel attribution + return target (see originDomain above).
-        ...(originDomain ? { origin_domain: originDomain, channel: 'custom_domain' } : {}),
+        ...(originDomain ? { origin_domain: originDomain, ...(supportMetadata ? {} : { channel: 'custom_domain' }) } : {}),
       },
     } as any)
   } catch (e) {
@@ -462,7 +562,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const successUrl = `${SITE_URL}/payment/success?cart_id=${cartId}`
-  const cancelUrl = `${SITE_URL}/l/${productId ?? cartId}?payment=cancelled`
+  const cancelUrl = supportCheckout
+    ? `${SITE_URL}/s/${seller.slug}?payment=cancelled`
+    : `${SITE_URL}/l/${productId ?? cartId}?payment=cancelled`
+  const paymentProductTitle = supportCheckout ? `Apoyo para ${seller.name}` : productTitle
+  const paymentProductImage = supportCheckout ? null : productImage
 
   let providerData: Record<string, unknown> = {}
   let redirectUrl: string | null = null
@@ -504,8 +608,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         currency,
         unit_amount: priceCents,
         product_data: {
-          name: productTitle,
-          ...(productImage ? { images: [productImage] } : {}),
+          name: paymentProductTitle,
+          ...(paymentProductImage ? { images: [paymentProductImage] } : {}),
         },
       },
     }]
@@ -540,6 +644,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         seller_id: seller?.id ?? '',
         payment_method: 'stripe',
         fulfillment_method: fulfillmentMethod,
+        ...(supportMetadata ? {
+          checkout_kind: 'support',
+          channel: supportMetadata.channel,
+          support_amount_cents: String(supportMetadata.amount_cents),
+          support_visibility: supportMetadata.visibility,
+        } : {}),
         ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
         ...(shippingQuote ? {
           shipping_rate_id: shippingQuote.rate_id,
@@ -559,6 +669,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       stripe_session_id: session.id,
       stripe_seller_account: sellerStripeAccountId,
       redirect_url: session.url!,
+      ...(supportMetadata ? {
+        checkout_kind: 'support',
+        support: {
+          amount_cents: supportMetadata.amount_cents,
+          currency: supportMetadata.currency,
+          visibility: supportMetadata.visibility,
+          channel: supportMetadata.channel,
+        },
+      } : {}),
       ...(useEscrow ? { escrow_mode: escrowModeSetting } : {}),
     }
     redirectUrl = session.url!
@@ -584,7 +703,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
     const mpItems = [{
         id: productId ?? cartId,
-        title: productTitle,
+        title: paymentProductTitle,
         quantity: 1,
         unit_price: priceCents / 100,
         currency_id: currency.toUpperCase(),
@@ -624,6 +743,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         seller_id: seller?.id ?? '',
         payment_method: 'mercadopago',
         fulfillment_method: fulfillmentMethod,
+        ...(supportMetadata ? {
+          checkout_kind: 'support',
+          channel: supportMetadata.channel,
+          support_amount_cents: String(supportMetadata.amount_cents),
+          support_visibility: supportMetadata.visibility,
+        } : {}),
         ...(shippingQuote ? {
           shipping_rate_id: shippingQuote.rate_id,
           shipping_carrier: shippingQuote.carrier,
@@ -659,6 +784,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     providerData = {
       mp_preference_id: pref.id,
       redirect_url: checkoutUrl,
+      ...(supportMetadata ? {
+        checkout_kind: 'support',
+        support: {
+          amount_cents: supportMetadata.amount_cents,
+          currency: supportMetadata.currency,
+          visibility: supportMetadata.visibility,
+          channel: supportMetadata.channel,
+        },
+      } : {}),
     }
     redirectUrl = checkoutUrl
     providerId = 'pp_mercadopago_mercadopago'
@@ -739,6 +873,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // Coupon applied
     if (couponInfo) {
       responseBody.coupon = couponInfo
+    }
+    if (supportMetadata) {
+      responseBody.support = {
+        amount_cents: supportMetadata.amount_cents,
+        currency: supportMetadata.currency,
+        visibility: supportMetadata.visibility,
+        channel: supportMetadata.channel,
+      }
     }
     return res.json(responseBody)
   } catch (e) {

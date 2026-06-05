@@ -112,6 +112,8 @@ export function normalizeMedusaOrder(
     .filter(Boolean)
   const metadata = (order.metadata ?? {}) as Record<string, unknown>
   const checkoutSelection = (metadata.checkout_selection ?? {}) as Record<string, unknown>
+  const support = (metadata.support ?? null) as Record<string, unknown> | null
+  const isSupportOrder = support?.kind === 'support'
   const selectedFulfillment = (metadata.fulfillment_method ?? checkoutSelection.fulfillment_method ?? 'standard') as string
 
   // Manual payments (SPEI/cash/DiMo) are only *authorized* at checkout — the funds
@@ -151,9 +153,9 @@ export function normalizeMedusaOrder(
   return {
     id: order.id,
     status,
-    amount_cents: order.total ?? 0,
+    amount_cents: isSupportOrder ? (support.amount_cents ?? order.total ?? 0) : (order.total ?? 0),
     currency: ((order.currency_code as string) ?? 'mxn').toUpperCase(),
-    shipping_method: selectedFulfillment,
+    shipping_method: isSupportOrder ? 'support' : selectedFulfillment,
     shipping_cost_cents: 0,
     // Direct-payment fields so the buyer order/success page can show instructions
     // and the pending-payment state.
@@ -165,6 +167,7 @@ export function normalizeMedusaOrder(
     buyer_clerk_user_id: null,
     // Per-line-item buyer personalization (empty array when none).
     personalization,
+    support: isSupportOrder ? support : null,
     created_at: order.created_at,
     updated_at: order.updated_at,
     shipping_address: sa ? {
@@ -179,10 +182,10 @@ export function normalizeMedusaOrder(
     // Nested shapes that the UI expects
     marketplace_listings: {
       id: (item?.product_id as string) ?? (order.id as string),
-      title: (item?.title as string) ?? 'Producto',
+      title: isSupportOrder ? 'Apoyo / contribución' : ((item?.title as string) ?? 'Producto'),
       images: item?.thumbnail ? [{ url: item.thumbnail as string }] : null,
-      listing_type: 'product',
-      metadata: null,
+      listing_type: isSupportOrder ? 'support' : 'product',
+      metadata: isSupportOrder ? support : null,
     },
     marketplace_shops: {
       id: sellerId,

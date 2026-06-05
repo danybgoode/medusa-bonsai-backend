@@ -1,6 +1,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
+import { isHiddenCatalogProduct } from '../../../_utils/support'
 
 // GET /store/sellers/:slug/products — all active products for a seller storefront
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -56,6 +57,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   const matchedProducts = (allProducts ?? [])
     .filter((product: { id: string }) => linkedIdSet.has(product.id))
+    .filter((product: { metadata?: unknown }) => !isHiddenCatalogProduct(product.metadata))
     .sort((a: { created_at?: string | Date }, b: { created_at?: string | Date }) =>
       new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
     )
