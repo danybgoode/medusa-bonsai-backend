@@ -1,0 +1,16 @@
+{
+  "name": "cicd-telegram-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloud Build Pub/Sub to Telegram CI/CD notifier for medusa-bonsai-backend.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.5.1"
+  }
+}

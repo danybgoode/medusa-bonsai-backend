@@ -1,0 +1,62 @@
+name: Notify Telegram
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Push notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram notification
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CICD_CHAT_ID: ${{ secrets.TELEGRAM_CICD_CHAT_ID }}
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
+          ACTOR_HANDLE: ${{ github.actor }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          HEAD_COMMIT_URL: ${{ github.event.head_commit.url }}
+        run: |
+          # Telegram is observability only; this step must never fail the workflow.
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CICD_CHAT_ID:-}" ]; then
+            echo "Telegram CI/CD secrets are not configured; skipping notification."
+            exit 0
+          fi
+
+          esc() {
+            local s="${1:-}"
+            s="${s//&/&amp;}"
+            s="${s//</&lt;}"
+            s="${s//>/&gt;}"
+            printf '%s' "$s"
+          }
+
+          short_sha="${GITHUB_SHA:0:7}"
+          commit_header="$(printf '%s' "${HEAD_COMMIT_MESSAGE:-Push to main}" | sed -n '1p')"
+          if [ -z "$commit_header" ]; then
+            commit_header="Push to main"
+          fi
+          commit_url="${HEAD_COMMIT_URL:-https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}}"
+
+          message="$(printf '<b>%s</b> · 📦 · <code>%s</code>\n%s\nAuthor: <code>%s</code>\n<a href="%s">View commit diff</a>' \
+            "$(esc "$REPOSITORY_NAME")" \
+            "$(esc "$short_sha")" \
+            "$(esc "$commit_header")" \
+            "$(esc "@$ACTOR_HANDLE")" \
+            "$(esc "$commit_url")")"
+
+          curl --silent --connect-timeout 5 --max-time 10 \
+            --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CICD_CHAT_ID}" \
+            --data-urlencode "text=${message}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "disable_web_page_preview=true" \
+            >/dev/null 2>&1 || true
+
+          exit 0
