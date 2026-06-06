@@ -24,6 +24,7 @@ import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
 import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_utils/clerk-auth'
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
 import { isSupportProductMetadata, normalizeSupportCheckout, type NormalizedSupportCheckout } from '../../../_utils/support'
+import { resolveSellerForCheckout } from '../../../_utils/support-seller-resolution'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -308,32 +309,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── Find seller for this product ──────────────────────────────────────────
-  let seller: any = null
-  if (body.seller_id) {
-    // Fast path — caller already knows the seller
-    const [found] = await sellerService.listSellers({ id: body.seller_id } as any, { take: 1 })
-    seller = found ?? null
-  } else if (productId) {
-    // Slow path — scan all sellers to find which one owns this product
-    const allSellers = await sellerService.listSellers({}, { take: 500 })
-    for (const s of allSellers) {
-      try {
-        const { data: rows } = await (remoteQuery as any)({
-          seller: {
-            fields: ['id', 'products.id'],
-            variables: { filters: { id: s.id } },
-          },
-        })
-        const ids = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id)
-        if (ids.includes(productId)) {
-          seller = s
-          break
-        }
-      } catch {
-        // no products linked
-      }
-    }
-  }
+  const seller = await resolveSellerForCheckout({
+    sellerService,
+    remoteQuery,
+    productId,
+    bodySellerId: body.seller_id,
+    productMetadata,
+    isSupportCheckout: !!supportCheckout,
+  })
 
   const currency = (cart.currency_code ?? 'mxn').toLowerCase()
   // A plain listCarts may not compute `total`; fall back to summing line items
