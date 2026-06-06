@@ -76,7 +76,11 @@ export function sellerHasDimo(seller: any): boolean {
 export function resolveSellerPaymentMethods(
   seller: any,
   regionProviderIds?: string[],
+  opts?: { stripeEnabled?: boolean },
 ): { methods: PaymentMethod[]; default: PaymentMethodId | null } {
+  // Platform kill-switch: when `checkout.stripe_enabled` is OFF, drop Stripe from
+  // the catalog entirely (agents/UCP read this too). Defaults to on (fail-open).
+  const stripeKilled = opts?.stripeEnabled === false
   const bankName = ((getSettings(seller).checkout ?? {}).bank_transfer ?? {}).bank_name as string | undefined
 
   const candidates: Array<{ ok: boolean; method: PaymentMethod }> = [
@@ -85,7 +89,7 @@ export function resolveSellerPaymentMethods(
       method: { id: 'mercadopago', provider_id: PROVIDER_IDS.mercadopago, label: 'Mercado Pago', note: 'Tarjeta, wallet, OXXO y meses sin intereses.', instant: true },
     },
     {
-      ok: sellerHasStripe(seller),
+      ok: sellerHasStripe(seller) && !stripeKilled,
       method: { id: 'stripe', provider_id: PROVIDER_IDS.stripe, label: 'Tarjeta', note: 'Checkout seguro de Stripe.', instant: true },
     },
     {

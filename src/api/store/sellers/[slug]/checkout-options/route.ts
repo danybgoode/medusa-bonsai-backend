@@ -27,6 +27,7 @@ import { Modules } from '@medusajs/framework/utils'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerPaymentMethods } from '../../../_utils/payment-methods'
+import { isEnabled } from '../../../../../lib/flags'
 
 type PickupSpot = {
   id?: string
@@ -161,7 +162,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   // ── Payment methods (two buckets: online + one consolidated manual) ───────
   const regionProviderIds = await resolveRegionProviderIds(req)
-  let { methods: rawMethods } = resolveSellerPaymentMethods(seller, regionProviderIds)
+  const stripeEnabled = await isEnabled('checkout.stripe_enabled')
+  let { methods: rawMethods } = resolveSellerPaymentMethods(seller, regionProviderIds, { stripeEnabled })
 
   // Digital goods: MercadoPago restriction (preserved from prior behavior).
   if (isDigital) rawMethods = rawMethods.filter(m => m.id !== 'mercadopago')

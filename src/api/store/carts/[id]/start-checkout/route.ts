@@ -21,6 +21,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
+import { isEnabled } from '../../../../../lib/flags'
 import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_utils/clerk-auth'
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
 import { isSupportProductMetadata, normalizeSupportCheckout, type NormalizedSupportCheckout } from '../../../_utils/support'
@@ -570,6 +571,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   // ── Stripe Connect ────────────────────────────────────────────────────────
   else if (body.provider === 'stripe') {
+    // Platform kill-switch: this is the real enforcement point. The frontend
+    // hides Stripe when `checkout.stripe_enabled` is OFF, but agents/UCP and
+    // stale in-flight pages POST here directly — so reject before charging.
+    // Fail-open: isEnabled → true if Flagsmith is unreachable.
+    if (!(await isEnabled('checkout.stripe_enabled'))) {
+      return res.status(422).json({
+        message: 'El pago con tarjeta no está disponible en este momento. Usa otro método de pago.',
+        code: 'PAYMENT_METHOD_DISABLED',
+      })
+    }
+
     const stripeKey = process.env.STRIPE_SECRET_KEY
     if (!stripeKey) return res.status(500).json({ message: 'Stripe not configured' })
 
