@@ -86,6 +86,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(422).json({ message: `Order is already ${meta.fulfillment_state}.` })
   }
 
+  // Guard: a manual (SPEI/DiMo/cash) order cannot ship before payment is confirmed
+  // (S2.2 — server gate, foolproof even if the UI is bypassed). Card/MP are captured.
+  if (['manual', 'spei', 'cash', 'dimo'].includes((meta.payment_method as string) ?? '') && meta.payment_received !== true) {
+    return res.status(422).json({ message: 'Aún no confirmas el pago de este pedido.' })
+  }
+
   // ── 2. Resolve Envia context ──────────────────────────────────────────────
   const rateId = meta.shipping_rate_id as string | undefined
   if (!rateId) {

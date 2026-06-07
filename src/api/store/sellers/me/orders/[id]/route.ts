@@ -131,6 +131,18 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   } catch { /* if the link query fails, skip the check rather than block shipping */ }
 
   const meta = ((order.metadata ?? {}) as Record<string, any>)
+
+  // Guard: a manual (SPEI/DiMo/cash) order cannot transition to shipped/in_transit
+  // before payment is confirmed (S2.2 — server gate; this PATCH is what the manual-
+  // carrier "ship-manual" path proxies to, and the bypass-proof enforcement point).
+  if (
+    (newStatus === 'shipped' || newStatus === 'in_transit') &&
+    ['manual', 'spei', 'cash', 'dimo'].includes((meta.payment_method as string) ?? '') &&
+    meta.payment_received !== true
+  ) {
+    return res.status(422).json({ message: 'Aún no confirmas el pago de este pedido.' })
+  }
+
   const prevShipment = (meta.shipment ?? {}) as Record<string, any>
   const now = new Date().toISOString()
 
