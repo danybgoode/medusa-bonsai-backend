@@ -29,6 +29,13 @@ gcloud services enable \
   secretmanager.googleapis.com \
   >/dev/null
 
+if ! gcloud pubsub topics describe cloud-builds --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  echo "Creating Pub/Sub topic cloud-builds..."
+  gcloud pubsub topics create cloud-builds \
+    --project="${PROJECT_ID}" \
+    >/dev/null
+fi
+
 for secret in TELEGRAM_BOT_TOKEN TELEGRAM_CICD_CHAT_ID; do
   if ! gcloud secrets describe "${secret}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
     echo "Missing Secret Manager secret: ${secret}" >&2
