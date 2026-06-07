@@ -92,4 +92,13 @@ gcloud functions deploy "${FUNCTION_NAME}" \
   --set-secrets="TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,TELEGRAM_CICD_CHAT_ID=TELEGRAM_CICD_CHAT_ID:latest" \
   --quiet
 
+echo "Granting Eventarc invoke access to ${FUNCTION_NAME}..."
+gcloud run services add-iam-policy-binding "${FUNCTION_NAME}" \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+  --role="roles/run.invoker" \
+  --quiet \
+  >/dev/null
+
 echo "Done. Live smoke is a backend main build: ${BACKEND_REPO_OWNER}/${BACKEND_REPO_NAME} -> ${BACKEND_TRIGGER_NAME}."
