@@ -146,6 +146,20 @@ export function normalizeMedusaOrder(
     status = 'processing'
   }
 
+  // Manual-payment state machine (mirrors the frontend lib/manual-payment-state.ts
+  // vocabulary so the UCP/MCP order object an agent reads carries the same state).
+  // pending_payment → buyer_reported_paid → payment_confirmed → processing.
+  const buyerReportedPaid = metadata.buyer_reported_paid === true
+  const paymentConfirmed = isCaptured || manualConfirmed
+  const fulfillmentStarted = ['processing', 'shipped', 'in_transit', 'delivered', 'fulfilled', 'completed'].includes(status)
+  const manualPaymentState = !isManualPay
+    ? null
+    : paymentConfirmed
+      ? (fulfillmentStarted ? 'processing' : 'payment_confirmed')
+      : buyerReportedPaid
+        ? 'buyer_reported_paid'
+        : 'pending_payment'
+
   const buyerName = customer
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
     : null
@@ -161,6 +175,11 @@ export function normalizeMedusaOrder(
     // and the pending-payment state.
     payment_method: (metadata.payment_method as string) ?? null,
     payment_received: metadata.payment_received === true,
+    // Durable manual-payment lifecycle (Sprint 1): the buyer's "Ya hice el pago"
+    // persists here and survives reload; manual_payment_state is the shared vocabulary.
+    buyer_reported_paid: buyerReportedPaid,
+    buyer_reported_paid_at: (metadata.buyer_reported_paid_at as string) ?? null,
+    manual_payment_state: manualPaymentState,
     manual_payment: (metadata.manual_payment ?? null) as unknown,
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
