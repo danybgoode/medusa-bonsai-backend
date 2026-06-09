@@ -181,6 +181,7 @@ export function normalizeMedusaOrder(
     buyer_reported_paid_at: (metadata.buyer_reported_paid_at as string) ?? null,
     manual_payment_state: manualPaymentState,
     manual_payment: (metadata.manual_payment ?? null) as unknown,
+    event_tickets: Array.isArray(metadata.event_tickets) ? metadata.event_tickets : [],
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
     buyer_clerk_user_id: null,
