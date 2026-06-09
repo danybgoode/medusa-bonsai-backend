@@ -79,8 +79,8 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   if (!order) return res.status(code).json({ message: code === 401 ? 'Unauthorized' : code === 403 ? 'Forbidden' : 'Order not found' })
 
   const body = (req.body ?? {}) as { action?: string; refund_amount_cents?: number; note?: string }
-  if (!['accept', 'decline', 'seller_refund'].includes(body.action ?? '')) {
-    return res.status(422).json({ message: 'action must be "accept", "decline", or "seller_refund"' })
+  if (!['accept', 'decline', 'seller_refund', 'transfer_sent'].includes(body.action ?? '')) {
+    return res.status(422).json({ message: 'action must be "accept", "decline", "seller_refund", or "transfer_sent"' })
   }
 
   const meta = (order.metadata ?? {}) as Record<string, unknown>
@@ -122,10 +122,26 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
       refunded_at: null,
     }
   } else {
-    // Buyer-driven accept / decline
+    // Buyer-driven accept / decline / transfer_sent
     if (!returnRequest) return res.status(404).json({ message: 'No return request found for this order' })
     if (returnRequest.status === 'refunded') return res.status(409).json({ message: 'Return already refunded' })
     if (returnRequest.status === 'declined') return res.status(409).json({ message: 'Return already declined' })
+  }
+
+  // ── transfer_sent — off-platform (SPEI/cash) rail only ────────────────────
+  // Seller confirms they sent the transfer: aceptado → transferencia_pendiente. This
+  // never closes the refund — only the BUYER's "Recibí" does (S1.3). Guards keep it on
+  // the ladder (no card orders, no double-mark, no skipping ahead).
+  if (body.action === 'transfer_sent') {
+    if (returnRequest!.refund_status !== 'manual') {
+      return res.status(409).json({ message: 'Esta acción solo aplica a reembolsos por SPEI/efectivo.' })
+    }
+    if (returnRequest!.status !== 'accepted' || returnRequest!.transfer_sent_at) {
+      return res.status(409).json({ message: 'La transferencia ya se marcó o el reembolso no está en el estado correcto.' })
+    }
+    const updated = { ...returnRequest, transfer_sent_at: now }
+    await orderService.updateOrders(orderId, { metadata: { ...meta, return_request: updated } })
+    return res.json({ return_request: updated, refund_state: 'transferencia_pendiente' })
   }
 
   if (body.action === 'decline') {
@@ -140,7 +156,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
         },
       },
     })
-    return res.json({ return_request: { ...returnRequest, status: 'declined', seller_action: 'declined', seller_action_at: now } })
+    return res.json({ return_request: { ...returnRequest, status: 'declined', seller_action: 'declined', seller_action_at: now }, refund_state: 'rechazado' })
   }
 
   // ── Accept (buyer) or seller_refund — refund/void ─────────────────────────
@@ -229,27 +245,30 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
         escrow_captured: false,
       },
     })
-    return res.json({ refunded: true, refund_status: 'voided', refund_amount_cents: refundAmountCents, note: 'Escrow authorization voided — no money was charged' })
+    return res.json({ refunded: true, refund_status: 'voided', refund_state: 'confirmado', refund_amount_cents: refundAmountCents, note: 'Escrow authorization voided — no money was charged' })
   }
 
   // Non-escrow or already-captured: standard refund flow
   if (!paymentId) {
-    // No payment linked (e.g. SPEI/cash order) — mark as manual refund required
+    // No on-platform payment (SPEI/cash): the refund is sent off-platform by the seller,
+    // so accepting does NOT close it — that would claim money moved before it did. It
+    // enters the two-sided ladder at `aceptado` (status:accepted + refund_status:manual,
+    // no refunded_at). The seller then transfers and marks "Ya transferí"
+    // (→ transferencia_pendiente), and the BUYER confirms receipt (→ confirmado, S1.3).
     await orderService.updateOrders(orderId, {
       metadata: {
         ...meta,
         return_request: {
           ...returnRequest,
-          status: 'refunded',
+          status: 'accepted',
           seller_action: 'accepted',
           seller_action_at: now,
           refund_status: 'manual',
           refund_amount_cents: refundAmountCents,
-          refunded_at: now,
         },
       },
     })
-    return res.json({ refunded: true, refund_status: 'manual', refund_amount_cents: refundAmountCents, note: 'No payment found — manual refund required' })
+    return res.json({ accepted: true, refund_status: 'manual', refund_state: 'aceptado', refund_amount_cents: refundAmountCents, note: 'Off-platform refund accepted — transfer pending' })
   }
 
   try {
@@ -291,5 +310,5 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     },
   })
 
-  return res.json({ refunded: true, refund_status: 'refunded', refund_amount_cents: refundAmountCents })
+  return res.json({ refunded: true, refund_status: 'refunded', refund_state: 'confirmado', refund_amount_cents: refundAmountCents })
 }

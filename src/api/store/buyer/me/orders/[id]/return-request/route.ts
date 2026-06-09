@@ -9,6 +9,11 @@
  * GET /store/customers/me/orders/:id/return-request
  *   Returns the current return_request state for this order.
  *
+ * PATCH /store/customers/me/orders/:id/return-request
+ *   Body: { action: 'confirm_receipt' }
+ *   The buyer confirms they received an off-platform (SPEI/cash) refund, closing the
+ *   two-sided ladder: transferencia_pendiente → confirmado. Only the buyer can close it.
+ *
  * Auth: Clerk JWT — must match the order's customer.
  */
 
@@ -99,4 +104,39 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   })
 
   return res.status(201).json({ return_request: returnRequest })
+}
+
+// ── PATCH — buyer confirms receipt of an off-platform refund ──────────────────
+
+export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
+  const { id: orderId } = req.params
+  const { order, code } = await resolveOrderForBuyer(req, orderId)
+  if (!order) return res.status(code).json({ message: code === 401 ? 'Unauthorized' : 'Order not found' })
+
+  const body = (req.body ?? {}) as { action?: string }
+  if (body.action !== 'confirm_receipt') {
+    return res.status(422).json({ message: 'action must be "confirm_receipt"' })
+  }
+
+  const meta = (order.metadata ?? {}) as Record<string, unknown>
+  const rr = (meta.return_request ?? null) as Record<string, unknown> | null
+  if (!rr) return res.status(404).json({ message: 'No return request found for this order' })
+
+  // Only the off-platform (SPEI/cash) ladder reaches the buyer-confirm step, and only
+  // once the seller marked the transfer sent (transferencia_pendiente). Card/escrow
+  // refunds auto-confirm seller-side and never wait on the buyer (the S1.1 guard:
+  // aceptado → confirmado is rejected — the buyer can only close from transfer-sent).
+  if (rr.refund_status !== 'manual' || !rr.transfer_sent_at) {
+    return res.status(409).json({ message: 'No hay un reembolso por confirmar en este pedido.' })
+  }
+  if (rr.buyer_confirmed_at || rr.status === 'refunded') {
+    return res.status(409).json({ message: 'El reembolso ya fue confirmado.' })
+  }
+
+  const now = new Date().toISOString()
+  const orderService: any = req.scope.resolve(Modules.ORDER)
+  const updated = { ...rr, status: 'refunded', buyer_confirmed_at: now, refunded_at: now }
+  await orderService.updateOrders(orderId, { metadata: { ...meta, return_request: updated } })
+
+  return res.json({ return_request: updated, refund_state: 'confirmado' })
 }

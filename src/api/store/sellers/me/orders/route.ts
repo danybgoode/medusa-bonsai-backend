@@ -160,6 +160,25 @@ export function normalizeMedusaOrder(
         ? 'buyer_reported_paid'
         : 'pending_payment'
 
+  // Refund-state machine (mirrors the frontend lib/refund-state.ts vocabulary so the
+  // UCP/MCP order object an agent reads carries the same derived refund_state). The
+  // off-platform SPEI/cash rail walks solicitado → aceptado → transferencia_pendiente →
+  // confirmado (buyer confirms receipt); card/escrow refunds auto-confirm.
+  const rr = (metadata.return_request ?? null) as Record<string, unknown> | null
+  const refundState: string = (() => {
+    if (!rr || !rr.status) return 'none'
+    if (rr.status === 'requested') return 'solicitado'
+    if (rr.status === 'declined') return 'rechazado'
+    const refundStatus = (rr.refund_status as string | null) ?? null
+    if (refundStatus === 'refunded' || refundStatus === 'voided') return 'confirmado'
+    if (refundStatus === 'manual') {
+      if (rr.buyer_confirmed_at) return 'confirmado'
+      if (rr.transfer_sent_at || rr.refunded_at) return 'transferencia_pendiente'
+      return 'aceptado'
+    }
+    return 'aceptado'
+  })()
+
   const buyerName = customer
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
     : null
@@ -181,6 +200,11 @@ export function normalizeMedusaOrder(
     buyer_reported_paid_at: (metadata.buyer_reported_paid_at as string) ?? null,
     manual_payment_state: manualPaymentState,
     manual_payment: (metadata.manual_payment ?? null) as unknown,
+    // Two-sided refund lifecycle (Delivery & Manual-Money Polish S1): the derived state
+    // both sides + agents read, plus the raw record so the order pages can render detail
+    // without a second fetch. refund_state ?? 'none' degrades gracefully pre-deploy.
+    refund_state: refundState,
+    return_request: rr,
     event_tickets: Array.isArray(metadata.event_tickets) ? metadata.event_tickets : [],
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
