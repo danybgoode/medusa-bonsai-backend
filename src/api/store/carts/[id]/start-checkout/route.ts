@@ -182,6 +182,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     seller_id?: string            // skip expensive seller scan when caller already knows it
     fulfillment_method?: FulfillmentMethod
     pickup_spot_id?: string
+    /** Local pickup: the buyer's proposed appointment (Delivery & Manual-Money Polish S2.1). */
+    pickup_appointment?: { date?: string; window?: string }
     shipping_address?: CheckoutShippingAddress
     shipping_quote?: CheckoutShippingQuote
     escrow?: boolean              // buyer explicitly opts in to escrow when mode='optional'
@@ -458,10 +460,28 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     manualPaymentSnapshot = { spei, dimo, cash }
   }
 
+  // Pickup appointment (S2.1) — for local pickup, the buyer proposes a date + time
+  // window. We persist the initial `propuesta` (proposed_by buyer); the seller confirms
+  // or reschedules later (S2.2). State rides order.metadata (Medusa-first, no new table)
+  // and the normalizer derives pickup_appointment_state from it for both sides + agents.
+  const pickupAppointment =
+    fulfillmentMethod === 'local_pickup' && body.pickup_appointment?.date && body.pickup_appointment?.window
+      ? {
+          spot_id: body.pickup_spot_id ?? null,
+          date: String(body.pickup_appointment.date),
+          window: String(body.pickup_appointment.window),
+          status: 'propuesta',
+          proposed_by: 'buyer',
+          proposed_at: new Date().toISOString(),
+          confirmed_at: null,
+        }
+      : null
+
   const checkoutSelection = {
     payment_method: effectivePaymentMethod,
     fulfillment_method: fulfillmentMethod,
     pickup_spot_id: body.pickup_spot_id ?? null,
+    pickup_appointment: pickupAppointment,
     has_shipping_address: !!body.shipping_address,
     shipping_quote: shippingQuote,
     escrow_mode: useEscrow ? escrowModeSetting : null,
@@ -504,6 +524,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           shipping_delivery_label: shippingQuote.delivery_label,
         } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
+        ...(pickupAppointment ? { pickup_appointment: pickupAppointment } : {}),
         ...(body.seller_id ? { seller_id: body.seller_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
         ...(supportMetadata ? {

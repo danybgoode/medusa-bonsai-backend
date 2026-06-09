@@ -179,6 +179,18 @@ export function normalizeMedusaOrder(
     return 'aceptado'
   })()
 
+  // Pickup-appointment machine (Delivery & Manual-Money Polish S2 — mirrors the frontend
+  // lib/pickup-appointment.ts vocabulary so the UCP/MCP order object an agent reads carries
+  // the same derived state). The buyer proposes a date + window at checkout (propuesta), the
+  // seller confirms (confirmada) or reschedules (back to propuesta, proposed_by seller).
+  const pa = (metadata.pickup_appointment ?? null) as Record<string, unknown> | null
+  const pickupAppointmentState: string = (() => {
+    if (!pa || !pa.status) return 'none'
+    if (pa.status === 'confirmada') return 'confirmada'
+    if (pa.status === 'propuesta') return 'propuesta'
+    return 'none'
+  })()
+
   const buyerName = customer
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
     : null
@@ -205,6 +217,11 @@ export function normalizeMedusaOrder(
     // without a second fetch. refund_state ?? 'none' degrades gracefully pre-deploy.
     refund_state: refundState,
     return_request: rr,
+    // Pickup appointment (S2): the derived state both sides + agents read, plus the raw
+    // record so the order pages render the slot without a second fetch. Degrades to
+    // 'none' / null pre-deploy (frontend reads pickup_appointment_state ?? 'none').
+    pickup_appointment_state: pickupAppointmentState,
+    pickup_appointment: pa,
     event_tickets: Array.isArray(metadata.event_tickets) ? metadata.event_tickets : [],
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
