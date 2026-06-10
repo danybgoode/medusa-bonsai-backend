@@ -2,8 +2,9 @@ import { model } from '@medusajs/framework/utils'
 
 const Seller = model.define('seller', {
   id: model.id({ prefix: 'sel' }).primaryKey(),
-  // Clerk user ID — the authenticated seller identity
-  clerk_user_id: model.text().unique(),
+  // Clerk user ID — the authenticated seller identity.
+  // NULL = unclaimed (supply-imported) shop awaiting its real owner via the claim flow.
+  clerk_user_id: model.text().unique().nullable(),
   // URL slug for the storefront (/s/[slug])
   slug: model.text().unique(),
   name: model.text(),
