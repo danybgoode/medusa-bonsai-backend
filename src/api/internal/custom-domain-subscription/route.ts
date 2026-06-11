@@ -29,7 +29,10 @@ import {
   CUSTOM_DOMAIN_PLAN_KIND,
 } from '../setup-custom-domain-plan/route'
 
-const LIVE_STATUSES = new Set(['active', 'trialing'])
+// `past_due` counts as live: it's a grace window while Stripe retries the card —
+// the domain stays connected so a transient payment failure never darkens the
+// seller's site. Only a definitive `canceled` (subscription.deleted) disconnects.
+const LIVE_STATUSES = new Set(['active', 'trialing', 'past_due'])
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const secret = req.headers['x-internal-secret']
