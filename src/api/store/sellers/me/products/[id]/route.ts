@@ -40,15 +40,20 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   res.json({ product_id: id, updated: true })
 }
 
-// DELETE /store/sellers/me/products/:id — unpublish (draft) the product
+// DELETE /store/sellers/me/products/:id — soft-delete the product
 export async function DELETE(req: MedusaRequest, res: MedusaResponse) {
   const { id } = req.params
   const { seller, error, status } = await resolveOwnership(req, id)
   if (!seller) return res.status(status).json({ message: error })
 
   const productService: IProductModuleService = req.scope.resolve(Modules.PRODUCT)
-  // Two-arg (id, data) form — a single merged object is read as a selector.
-  await (productService as any).updateProducts(id, { status: 'draft', metadata: { deleted: true } })
+  // Native Medusa soft-delete — sets deleted_at, so the product drops out of
+  // GET /store/sellers/me/products and /store/listings (both query the product
+  // entity, which excludes deleted_at by default) while keeping the row so past
+  // order line-items still resolve. Never the merged-object updateProducts
+  // selector form (LEARNINGS → Medusa gotchas); soft-delete is the single source
+  // of truth for "deleted".
+  await productService.softDeleteProducts([id])
 
   res.json({ product_id: id, deleted: true })
 }
