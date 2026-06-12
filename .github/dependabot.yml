@@ -1,0 +1,31 @@
+# Backend Production Readiness — Sprint 4, Story 4.3 (audit gap #13).
+# Dependency/CVE scanning for the Medusa backend. GitHub-native, no build gate:
+# Dependabot raises weekly dependency PRs and security PRs for known CVEs, so a
+# vulnerable package is surfaced as a reviewable PR instead of shipping silently.
+# (Chosen over a build-failing npm-audit/Trivy step so a transitive advisory never
+# blocks an unrelated deploy — see the epic plan.)
+version: 2
+updates:
+  # Medusa app dependencies (package.json at repo root).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # Collapse the routine churn into one PR; security updates still come separately.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+
+  # Keep the CI/CD GitHub Actions (notify-telegram.yml) patched too.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
