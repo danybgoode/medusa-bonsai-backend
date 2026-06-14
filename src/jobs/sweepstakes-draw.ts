@@ -55,5 +55,9 @@ export default async function sweepstakesDrawJob(container: MedusaContainer) {
 
 export const config = {
   name: 'sweepstakes-draw',
-  schedule: '* * * * *',
+  // Every 15 min (was `* * * * *` = every minute). The draw is idempotent and only acts when a
+  // sweepstakes has actually ended, so minute-precision is unnecessary — a ≤15 min draw latency is
+  // fine and this fetches the Vercel `/api/cron/sweepstakes-draw` route ~96×/day instead of ~1,440×
+  // (≈ -43K Vercel function invocations/month + the matching Fluid Active CPU). See cost-reduction epic.
+  schedule: '*/15 * * * *',
 }

@@ -50,5 +50,7 @@ export default async function reconcileCheckoutsJob(container: MedusaContainer) 
 
 export const config = {
   name: 'reconcile-checkouts',
-  schedule: '*/15 * * * *',
+  // Every 30 min (was */15). Incomplete-cart reconciliation isn't time-critical, so halving the cadence
+  // halves this job's fetches to the Vercel /api/cron/reconcile-checkouts route at no UX cost.
+  schedule: '*/30 * * * *',
 }
