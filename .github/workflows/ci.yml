@@ -1,0 +1,46 @@
+name: CI
+
+# Deterministic pre-merge gate for the backend (Roadmap/WAYS-OF-WORKING.md → Review & merge).
+# Mirrors the frontend's `typecheck-build` job (apps/miyagisanchez/.github/workflows/ci.yml),
+# adapted for Medusa:
+#
+#   build      — `medusa build` FIRST: it generates `.medusa/types/*` (the link/module
+#                declarations tsconfig `include`s) and proves the app compiles. swc-based,
+#                so it does NOT type-check on its own.
+#   type-check — `tsc --noEmit` AFTER the build, so the generated types resolve. This is the
+#                real type gate (swc strips types without checking them).
+#   unit       — `npm run test:unit`: the DB-free unit specs (also runs the ci.yml self-check).
+#
+# No `e2e` job: the backend has no per-branch preview (WAYS §40), so there is nothing to run
+# Playwright against — that's correct, not a gap. No `services:` block: the unit specs are
+# DB-free and `medusa build` never connects (it falls back to a fake redis), so no Postgres/
+# Redis container is needed.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  type-check-build:
+    name: Type-check + build + unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - name: Build
+        # Generates .medusa/types (needed by tsc) and verifies the app compiles.
+        run: npm run build
+      - name: Type-check
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm run test:unit
