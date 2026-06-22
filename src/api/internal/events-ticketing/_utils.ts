@@ -86,3 +86,114 @@ export function redeemTicket(ticket: EventTicket, input: {
     redeemed_by: input.redeemedBy ?? null,
   }
 }
+
+/** Stable per-unit subject for unit `k` of a line item — the idempotency key. */
+export function unitSubjectId(lineItemId: string, k: number): string {
+  return `${lineItemId}#${k}`
+}
+
+type ReconcileLineItem = {
+  id: string
+  quantity?: number | null
+  product_id?: string | null
+  metadata?: Record<string, unknown> | null
+}
+
+/**
+ * Reconcile order-level event tickets from the order's line items, minting one
+ * token PER UNIT (`item.quantity`), idempotent on the per-unit subject.
+ *
+ * `issue` is re-called by the reconcile-checkouts cron AND both payment webhooks,
+ * so the dedupe keys on the per-unit subject (`${line_item_id}#${k}`), NOT the
+ * `line_item_id`: all N units of a line item share one `line_item_id`, so keying
+ * on it collapses N→1 on replay. A unit already present (matched by subject) is
+ * reused verbatim so its `state`/`redeemed_at` survive a replay.
+ *
+ * Pure + injectable `mint()` for tests.
+ */
+export function reconcileOrderTickets(input: {
+  items: ReconcileLineItem[]
+  existing: EventTicket[]
+  orderId: string
+  buyerEmail: string | null
+  now: string
+  mint?: () => string
+}): EventTicket[] {
+  const mint = input.mint ?? mintTicketToken
+  const existing = input.existing
+  const usedTokens = new Set<string>(existing.map(t => t.token))
+  const matchedSubjects = new Set<string>()
+  const result: EventTicket[] = []
+
+  for (const item of input.items) {
+    const meta = (item.metadata ?? {}) as Record<string, unknown>
+    const stamp = readTicket(meta[EVENT_TICKET_METADATA_KEY])
+    // The line-item `event_ticket` stamp is the "this is an event admission"
+    // marker (it may carry a pre-minted token + event_id/product_id).
+    if (!stamp && !meta[EVENT_TICKET_METADATA_KEY]) continue
+
+    const lineItemId = String(item.id)
+    const qty = Math.max(1, Math.floor(Number(item.quantity ?? 1)) || 1)
+
+    for (let k = 0; k < qty; k++) {
+      const subject = unitSubjectId(lineItemId, k)
+
+      // 1. Idempotent reuse — a ticket already issued at this per-unit subject.
+      const bySubject = existing.find(t => t.subject_id === subject)
+      if (bySubject) {
+        matchedSubjects.add(bySubject.subject_id)
+        result.push(bySubject)
+        continue
+      }
+
+      // 2. Back-compat — pre-`#k` orders stored unit 0 under subject =
+      //    line_item_id. Adopt it (reuse the token; migrate the subject) so a
+      //    late webhook replay on a pre-deploy order does NOT re-mint.
+      if (k === 0) {
+        const legacy = existing.find(t => t.subject_id === lineItemId)
+        if (legacy) {
+          matchedSubjects.add(legacy.subject_id)
+          result.push({ ...legacy, subject_id: subject, line_item_id: lineItemId })
+          continue
+        }
+      }
+
+      // 3. Mint a fresh unit. Unit 0 reuses the line-item stamp's token (so a
+      //    quantity-1 order is byte-unchanged vs today); units ≥1 mint new.
+      let token = k === 0 && stamp && isTicketToken(stamp.token) && !usedTokens.has(stamp.token)
+        ? stamp.token
+        : mint()
+      for (let attempt = 0; usedTokens.has(token) && attempt < 5; attempt++) token = mint()
+      if (!isTicketToken(token) || usedTokens.has(token)) {
+        throw new Error('Unable to mint a unique event ticket token.')
+      }
+      usedTokens.add(token)
+      matchedSubjects.add(subject)
+
+      result.push({
+        version: 1,
+        token,
+        source: 'paid',
+        state: 'issued',
+        issued_at: input.now,
+        subject_id: subject,
+        event_id: stamp?.event_id ?? null,
+        product_id: stamp?.product_id ?? (item.product_id != null ? String(item.product_id) : null),
+        order_id: input.orderId,
+        line_item_id: lineItemId,
+        attendee_name: null,
+        attendee_email: input.buyerEmail,
+        redeemed_at: null,
+        redeemed_by: null,
+      })
+    }
+  }
+
+  // Preserve any existing ticket we didn't recompute (e.g. a free RSVP row, or a
+  // ticket whose line item is no longer present) — never drop an issued token.
+  for (const t of existing) {
+    if (!matchedSubjects.has(t.subject_id)) result.push(t)
+  }
+
+  return result
+}
