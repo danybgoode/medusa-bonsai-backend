@@ -1,0 +1,88 @@
+name: Cross-agent review (advisory)
+
+# A NON-BLOCKING, advisory cross-agent second opinion on every PR (Roadmap epic
+# 09 cross-agent-review-always). It pipes the PR diff into a DIFFERENT model
+# family's CLI (Codex) via the canonical scripts/cross-review.mjs and posts one
+# labeled "advisory only — not a gate" comment.
+#
+#   • NEVER gates  — continue-on-error + must NOT be a required check. CI + the
+#     Claude reviewer + the risk-tier merge rule remain the only authorities.
+#   • Single source of truth — the script lives only in the private root repo
+#     (danybgoode/miyagi-product-management); we sparse-checkout it with a
+#     read-only PAT instead of vendoring (no drift).
+#   • Cost guard — the script's --skip-trivial skips docs-only / tiny diffs.
+#
+# Two repo secrets (owed to Daniel) make it run; absent EITHER, it skips cleanly:
+#   OPENAI_API_KEY   — Codex API key (token-billed). Absent → the whole job no-ops green.
+#   TOOLING_REPO_PAT — fine-grained PAT, read-only Contents on the root repo only.
+
+on:
+  pull_request:
+    types: [opened, reopened] # one advisory comment per PR (the script posts a new comment each run)
+
+permissions:
+  contents: read
+  pull-requests: write # post the advisory comment
+
+concurrency:
+  group: cross-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cross-review:
+    name: Cross-agent second opinion
+    runs-on: ubuntu-latest
+    continue-on-error: true # ADVISORY — a failure here must never red the PR
+    steps:
+      - name: Skip cleanly if no Codex credential
+        id: guard
+        # notify-telegram.yml idiom: a missing optional secret logs + exits 0, never fails.
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "cross-review skipped (no codex credential)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout canonical scripts (private root repo)
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: danybgoode/miyagi-product-management
+          token: ${{ secrets.TOOLING_REPO_PAT }}
+          sparse-checkout: scripts
+          path: _tooling
+
+      - name: Set up Node
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install + authenticate Codex (headless)
+        if: steps.guard.outputs.run == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          npm install -g @openai/codex
+          printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
+          # Non-interactive posture for `codex exec` in a fresh runner. The review is read-only
+          # reasoning over a piped diff, so it shouldn't execute commands; these belt-and-suspenders
+          # keys keep it from ever waiting on an approval. (Verified against the CI codex version on
+          # the first credentialed run — if a key is rejected or it still stalls, pass
+          # --dangerously-bypass-approvals-and-sandbox: safe here, the runner is the sandbox.)
+          mkdir -p ~/.codex
+          printf 'approval_policy = "never"\nsandbox_mode = "read-only"\n' > ~/.codex/config.toml
+
+      - name: Run cross-agent review (advisory, single-pass)
+        if: steps.guard.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh targets THIS app repo's PR via --repo
+        run: |
+          node _tooling/scripts/cross-review.mjs "${{ github.event.pull_request.number }}" \
+            --agent codex \
+            --repo "${{ github.repository }}" \
+            --skip-trivial
