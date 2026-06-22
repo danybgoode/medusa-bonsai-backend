@@ -80,13 +80,19 @@ type ShopRow = { id: string; slug: string; name: string }
 
 async function readShop(supabase: SupabaseLike, clerkUserId: string): Promise<ShopRow | null> {
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('marketplace_shops')
       .select('id, slug, name')
       .eq('clerk_user_id', clerkUserId)
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle()
+    // Supabase reports query errors in-band (no throw) — surface it so a transient DB
+    // failure isn't silently read as "not a seller" (hasShop=false for a real seller).
+    if (error) {
+      console.error('[home-personalization] shop read error:', error)
+      return null
+    }
     return (data as ShopRow | null) ?? null
   } catch (e) {
     console.error('[home-personalization] shop read failed:', e)
@@ -189,6 +195,10 @@ async function readOfferAlertInputs(
         : Promise.resolve({ data: [] as unknown[] }),
     ])
 
+    const buyerErr = (buyerRes as { error?: unknown }).error
+    const sellerErr = (sellerRes as { error?: unknown }).error
+    if (buyerErr) console.error('[home-personalization] buyer offers read error:', buyerErr)
+    if (sellerErr) console.error('[home-personalization] seller offers read error:', sellerErr)
     const buyerOffers = ((buyerRes as { data?: unknown }).data ?? []) as OfferRow[]
     const sellerOffers = ((sellerRes as { data?: unknown }).data ?? []) as OfferRow[]
 
@@ -196,10 +206,11 @@ async function readOfferAlertInputs(
     const offerIds = [...buyerOffers, ...sellerOffers].map((o) => o.id)
     let convByOfferId: Record<string, string> = {}
     if (offerIds.length > 0) {
-      const { data: convs } = await supabase
+      const { data: convs, error: convErr } = await supabase
         .from('marketplace_conversations')
         .select('id, offer_id')
         .in('offer_id', offerIds)
+      if (convErr) console.error('[home-personalization] conversations read error:', convErr)
       convByOfferId = Object.fromEntries(
         ((convs ?? []) as Array<{ id: string; offer_id: string | null }>)
           .filter((c) => c.offer_id)
@@ -217,7 +228,7 @@ async function readOfferAlertInputs(
         expiresAt: o.expires_at,
         amountCents: o.offer_amount_cents,
         currency: (listing?.currency ?? 'MXN').toUpperCase(),
-        listingTitle: listing?.title ?? 'Anuncio',
+        listingTitle: listing?.title ?? '',
         shopName: one(listing?.marketplace_shops)?.name ?? null,
       }
     })
@@ -231,7 +242,7 @@ async function readOfferAlertInputs(
         expiresAt: o.expires_at,
         amountCents: o.offer_amount_cents,
         currency: (listing?.currency ?? 'MXN').toUpperCase(),
-        listingTitle: listing?.title ?? 'Anuncio',
+        listingTitle: listing?.title ?? '',
         shopName: null,
       }
     })

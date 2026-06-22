@@ -30,6 +30,23 @@ export interface VerifiedClerkUser {
   email?: string
 }
 
+// jose's createRemoteJWKSet returns a resolver that caches the fetched key set; build
+// it ONCE per Clerk frontend host (a hot homepage endpoint would otherwise re-fetch
+// JWKS every request). Keyed by host so a key rotation is still picked up by jose's
+// own cache TTL within the resolver.
+const _jwksByHost = new Map<string, Awaited<ReturnType<typeof loadJwks>>>()
+async function loadJwks(frontendApi: string) {
+  const { createRemoteJWKSet } = await import('jose')
+  return createRemoteJWKSet(new URL(`https://${frontendApi}/.well-known/jwks.json`))
+}
+async function getJwks(frontendApi: string) {
+  const cached = _jwksByHost.get(frontendApi)
+  if (cached) return cached
+  const jwks = await loadJwks(frontendApi)
+  _jwksByHost.set(frontendApi, jwks)
+  return jwks
+}
+
 /** Pull the bearer token from the Authorization header (or null). */
 export function bearerToken(req: MedusaRequest): string | null {
   const header = req.headers['authorization'] as string | undefined
@@ -52,9 +69,9 @@ export async function verifyClerkJwt(token: string | null): Promise<VerifiedCler
   }
 
   // Dynamic import — matches auth-clerk's CommonJS/ESM-safe pattern for jose.
-  const { createRemoteJWKSet, jwtVerify } = await import('jose')
+  const { jwtVerify } = await import('jose')
   const frontendApi = getFrontendApiFromKey(pk)
-  const jwks = createRemoteJWKSet(new URL(`https://${frontendApi}/.well-known/jwks.json`))
+  const jwks = await getJwks(frontendApi)
 
   let payload: { sub?: string; email?: string; email_address?: string }
   try {
