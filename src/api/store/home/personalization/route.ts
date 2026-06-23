@@ -258,16 +258,36 @@ export interface RemoteQueryLike {
   graph: (args: unknown) => Promise<{ data?: unknown[] }>
 }
 
-/** Sum the caller's listings' view counts (Medusa-native: seller → products.metadata.views). */
-async function readSellerVisitas(
+type SellerRow = { id: string; name: string }
+
+/**
+ * The caller's CANONICAL shop = the Medusa seller (`listSellers({clerk_user_id})`,
+ * the same source `/store/sellers/me` uses). This — not the best-effort Supabase
+ * `marketplace_shops` mirror — must decide `hasShop`: the mirror sync is fire-and-
+ * forget (`ensureSupabaseShopMirror(...).catch(() => {})` on the frontend), so a
+ * real seller whose mirror row is missing/stale would otherwise be told "open your
+ * store" (the recruit card) on the homepage.
+ */
+async function readSeller(
   sellerService: Pick<SellerModuleService, 'listSellers'>,
-  remoteQuery: RemoteQueryLike,
   clerkUserId: string,
-): Promise<number> {
+): Promise<SellerRow | null> {
   try {
     const sellers = await sellerService.listSellers({ clerk_user_id: clerkUserId })
     const seller = sellers?.[0]
-    if (!seller) return 0
+    return seller ? { id: seller.id, name: seller.name } : null
+  } catch (e) {
+    console.error('[home-personalization] seller read failed:', e)
+    return null
+  }
+}
+
+/** Sum the caller's listings' view counts (Medusa-native: seller → products.metadata.views). */
+async function readSellerVisitas(
+  seller: SellerRow,
+  remoteQuery: RemoteQueryLike,
+): Promise<number> {
+  try {
     const { data } = await remoteQuery.graph({
       entity: 'seller',
       fields: ['id', 'products.metadata'],
@@ -299,20 +319,28 @@ export interface PersonalizationDeps {
 export async function buildHomePersonalization(deps: PersonalizationDeps): Promise<HomePersonalization> {
   const { supabase, sellerService, remoteQuery, clerkUserId } = deps
 
-  const shop = await readShop(supabase, clerkUserId)
+  // Canonical ownership from the Medusa seller; the Supabase mirror row is read only
+  // for the seller-offers join (`shop.id`) + a shop-name source — it never decides
+  // `hasShop` (see readSeller).
+  const [seller, shop] = await Promise.all([
+    readSeller(sellerService, clerkUserId),
+    readShop(supabase, clerkUserId),
+  ])
   const [recentFavorites, offerAlertInputs] = await Promise.all([
     readRecentFavorites(supabase, clerkUserId, 3),
     readOfferAlertInputs(supabase, clerkUserId, shop),
   ])
 
   let sellerSnapshot: SellerSnapshot | null = null
-  if (shop) {
+  if (seller) {
+    // ofertasNuevas needs the mirror's shop.id for the seller-offers query; if the
+    // mirror is missing it degrades to 0, but the snapshot still renders (no recruit).
     const ofertasNuevas = offerAlertInputs.filter((o) => o.perspective === 'seller').length
-    const visitas = await readSellerVisitas(sellerService, remoteQuery, clerkUserId)
-    sellerSnapshot = { shopName: shop.name, visitas, ofertasNuevas }
+    const visitas = await readSellerVisitas(seller, remoteQuery)
+    sellerSnapshot = { shopName: shop?.name ?? seller.name, visitas, ofertasNuevas }
   }
 
-  return { recentFavorites, offerAlertInputs, sellerSnapshot, hasShop: !!shop }
+  return { recentFavorites, offerAlertInputs, sellerSnapshot, hasShop: !!seller }
 }
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {

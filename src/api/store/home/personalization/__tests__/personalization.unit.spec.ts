@@ -56,8 +56,15 @@ function makeSupabase(
 }
 
 const sellerService = {
-  listSellers: jest.fn(async () => [{ id: 'sel_1' }]),
+  listSellers: jest.fn(async () => [{ id: 'sel_1', name: 'Mi Tienda' }]),
 } as unknown as Parameters<typeof buildHomePersonalization>[0]['sellerService']
+
+/** A seller service that resolves to a given list — for per-test ownership control. */
+function makeSellerService(sellers: Array<{ id: string; name: string }>) {
+  return {
+    listSellers: jest.fn(async () => sellers),
+  } as unknown as Parameters<typeof buildHomePersonalization>[0]['sellerService']
+}
 
 const remoteQuery = {
   graph: jest.fn(async () => ({
@@ -199,15 +206,33 @@ describe('buildHomePersonalization — shape', () => {
     expect(out.sellerSnapshot).toEqual({ shopName: 'Mi Tienda', visitas: 20, ofertasNuevas: 1 })
   })
 
-  it('hasShop=false and null snapshot when the user has no shop', async () => {
+  it('hasShop=false and null snapshot when the user has NO Medusa seller', async () => {
     const noShop = (ctx: QueryCtx) =>
       ctx.table === 'marketplace_shops' ? { data: null } : resolver(ctx)
     const out = await buildHomePersonalization({
-      supabase: makeSupabase(noShop), sellerService, remoteQuery, clerkUserId: 'user_42',
+      supabase: makeSupabase(noShop), sellerService: makeSellerService([]),
+      remoteQuery, clerkUserId: 'user_42',
     })
     expect(out.hasShop).toBe(false)
     expect(out.sellerSnapshot).toBeNull()
     // buyer offers still returned; seller offers skipped (no shop)
+    expect(out.offerAlertInputs.every((o) => o.perspective === 'buyer')).toBe(true)
+  })
+
+  it('REGRESSION: hasShop=true (canonical Medusa seller) even when the Supabase mirror row is MISSING', async () => {
+    // The reported bug: a real seller whose marketplace_shops mirror sync never landed
+    // was shown the "¿Vendes algo?" recruit card. hasShop must follow the Medusa seller,
+    // not the mirror — so the snapshot renders (shopName from the seller), never recruit.
+    const mirrorMissing = (ctx: QueryCtx) =>
+      ctx.table === 'marketplace_shops' ? { data: null } : resolver(ctx)
+    const out = await buildHomePersonalization({
+      supabase: makeSupabase(mirrorMissing),
+      sellerService: makeSellerService([{ id: 'sel_1', name: 'Mi Tienda' }]),
+      remoteQuery, clerkUserId: 'user_42',
+    })
+    expect(out.hasShop).toBe(true)
+    expect(out.sellerSnapshot).toEqual({ shopName: 'Mi Tienda', visitas: 20, ofertasNuevas: 0 })
+    // seller offers can't resolve without the mirror's shop.id → only buyer offers
     expect(out.offerAlertInputs.every((o) => o.perspective === 'buyer')).toBe(true)
   })
 })
