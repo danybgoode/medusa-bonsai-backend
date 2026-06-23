@@ -31,18 +31,21 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   if (typeof body.featured !== 'boolean') {
     return res.status(400).json({ message: 'featured (boolean) required' })
   }
-  // featured_rank: a finite number, or null to clear. Absent ⇒ leave as-is is not
-  // supported here — the admin UI always sends the current rank (null when unpinned).
-  let featured_rank: number | null = null
-  if (body.featured_rank != null) {
-    const n = Number(body.featured_rank)
-    if (!Number.isFinite(n)) return res.status(400).json({ message: 'featured_rank must be a number or null' })
-    featured_rank = n
+  // featured_rank semantics: ABSENT ⇒ leave the existing rank untouched (the
+  // metadata merge preserves it); explicit `null` ⇒ clear it; a finite number ⇒
+  // set it. So a `{ featured: true }` call never silently wipes a stored rank.
+  const metadata: Record<string, unknown> = { featured: body.featured }
+  if ('featured_rank' in body) {
+    if (body.featured_rank == null) {
+      metadata.featured_rank = null
+    } else {
+      const n = Number(body.featured_rank)
+      if (!Number.isFinite(n)) return res.status(400).json({ message: 'featured_rank must be a number or null' })
+      metadata.featured_rank = n
+    }
   }
 
-  const result = await updateSellerProduct(req.scope, id, {
-    metadata: { featured: body.featured, featured_rank },
-  })
+  const result = await updateSellerProduct(req.scope, id, { metadata })
   if (!result.ok) return res.status(result.status).json({ message: result.message })
 
   res.json({ product_id: id, updated: true })
