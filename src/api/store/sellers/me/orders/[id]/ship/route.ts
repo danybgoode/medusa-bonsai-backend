@@ -35,10 +35,20 @@ import {
   type EnviaPackage,
 } from '../../../../../../../modules/fulfillment-envia/envia-client'
 import { toEnviaStateCode } from '../../../../../../../modules/fulfillment-envia/mx-state-codes'
+import { isEnabled } from '../../../../../../../lib/flags'
+import { enviaKillGate, ENVIA_LABEL_DISABLED_MESSAGE } from '../../../../../../../lib/envia-killswitch'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const seller = await resolveSeller(req)
   if (!seller) return res.status(401).json({ message: 'Unauthorized' })
+
+  // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open).
+  // This whole route is the Envía label path; when off, reject so the UI steers to
+  // the existing manual-carrier flow. Server-side gate — agents / stale ship screens
+  // can't bypass it.
+  if (enviaKillGate({ enviaEnabled: await isEnabled('shipping.envia_enabled') }).blocked) {
+    return res.status(422).json({ message: ENVIA_LABEL_DISABLED_MESSAGE })
+  }
 
   const { id: orderId } = req.params
   const body = req.body as {
