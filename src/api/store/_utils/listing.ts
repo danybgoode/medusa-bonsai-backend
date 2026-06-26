@@ -99,6 +99,18 @@ export function toSellerShape(seller: any): SellerShape {
   }
 }
 
+/**
+ * Whether a listing is an admin/seller pin — `metadata.featured === true`.
+ *
+ * Mirrors the frontend `isPinned` (lib/home-curation.ts): a pin is the strict
+ * boolean `true`, never the string `"true"` or any truthy value. Backs the
+ * `/store/listings?featured=true` read-filter (seleccion-pins-authoritative S2.1)
+ * so the homepage can fetch pins explicitly, regardless of freshness.
+ */
+export function isFeaturedPin(l: { metadata?: Record<string, unknown> | null }): boolean {
+  return l.metadata?.featured === true
+}
+
 export function toListingShape(product: any, seller?: any): ListingShape {
   const meta = (product.metadata ?? {}) as Record<string, unknown>
   const variant = product.variants?.[0]

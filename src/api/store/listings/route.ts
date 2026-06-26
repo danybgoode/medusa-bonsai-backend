@@ -1,7 +1,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
-import { toListingShape } from '../_utils/listing'
+import { toListingShape, isFeaturedPin } from '../_utils/listing'
 import { isHiddenCatalogProduct } from '../_utils/support'
 
 const PAGE_SIZE = 24
@@ -92,6 +92,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     listings = target ? listings.filter((l: any) => l.shop_id === target.id) : []
   }
   if (q.listing_type) listings = listings.filter((l: any) => l.listing_type === q.listing_type)
+  // Selección: fetch only admin/seller pins so the homepage can render a pin regardless of
+  // freshness (seleccion-pins-authoritative S2.1). Additive — absent param = unchanged.
+  if (q.featured === 'true') listings = listings.filter(isFeaturedPin)
 
   // Autos filters
   if (q.brand) listings = listings.filter((l: any) => (l.metadata?.brand as string ?? '').toLowerCase().includes(q.brand.toLowerCase()))
