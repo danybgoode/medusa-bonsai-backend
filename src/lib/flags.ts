@@ -23,11 +23,21 @@
  */
 import { Flagsmith, DefaultFlag } from 'flagsmith-nodejs'
 
-export type FlagKey = 'checkout.stripe_enabled'
+export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled'
 
-/** Fail-open defaults. Kill-switch → true (feature stays on if Flagsmith is down). */
+/**
+ * Fail-open defaults. Two polarities live here — both fail-open, to opposite values:
+ *  - KILL-SWITCH (`checkout.stripe_enabled`): default `true`. The feature keeps
+ *    working if Flagsmith is down (disabling is the deliberate action).
+ *  - ENABLEMENT (`shipping.envia_enabled`): default `false`. The Envia.com
+ *    integration stays OFF if Flagsmith is unreachable — so a flag outage can never
+ *    push checkout/fulfillment at an unfunded carrier; OFF ⇒ arranged-delivery /
+ *    manual-carrier fallback. Enabling is the deliberate action (flip ON in
+ *    Flagsmith the instant the platform Envía account is funded).
+ */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
+  'shipping.envia_enabled': false,
 }
 
 const ENV_KEY = process.env.FLAGSMITH_ENVIRONMENT_KEY
