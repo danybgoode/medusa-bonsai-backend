@@ -48,7 +48,12 @@ const client: Flagsmith | null = ENV_KEY
   ? new Flagsmith({
       environmentKey: ENV_KEY,
       enableLocalEvaluation: true,
-      environmentRefreshIntervalSeconds: 60,
+      // Refresh the Environment Document every 5 min, not the SDK default 60 s. Each
+      // refresh is one Flagsmith API call, and the always-on Cloud Run instance
+      // (min-instances=1) polls 24/7 regardless of traffic: 60 s ≈ 43k calls/mo (blew
+      // the free tier with zero users), 300 s ≈ 8.6k. These flags are deliberate
+      // kill-switches — a ~5 min flip-propagation delay is fine.
+      environmentRefreshIntervalSeconds: 300,
       // Fail FAST on the checkout path: bound a hung Flagsmith to ~2 s instead of
       // the SDK default 3 retries × 10 s (+ delays) ≈ 33 s.
       requestTimeoutSeconds: 2,
