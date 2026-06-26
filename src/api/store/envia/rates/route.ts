@@ -21,6 +21,8 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { quoteShipments, mapEnviaError, type EnviaAddress, type EnviaPackage } from '../../../../modules/fulfillment-envia/envia-client'
 import { toEnviaStateCode } from '../../../../modules/fulfillment-envia/mx-state-codes'
+import { isEnabled } from '../../../../lib/flags'
+import { enviaKillGate, ENVIA_ARRANGED_DELIVERY_MESSAGE } from '../../../../lib/envia-killswitch'
 
 const DEFAULT_CARRIERS = ['dhl', 'fedex', 'estafeta', 'ups', 'redpack', 'paquetexpress']
 
@@ -82,6 +84,14 @@ function deliveryLabel(days: number | null) {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
+  // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open).
+  // When off, short-circuit BEFORE any Envía call to the graceful arranged-delivery
+  // fallback so checkout never hits an unfunded carrier. This is the real
+  // enforcement — UCP/MCP/agent + stale checkout pages proxying here inherit it.
+  if (enviaKillGate({ enviaEnabled: await isEnabled('shipping.envia_enabled') }).blocked) {
+    return res.json({ rates: [], package_count: 0, message: ENVIA_ARRANGED_DELIVERY_MESSAGE })
+  }
+
   const body = req.body as {
     listingId?: string
     items?: string[]
@@ -241,7 +251,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       return res.json({
         rates: [],
         package_count: packages.length,
-        message: 'Las paqueterías no tienen cobertura para ese destino. Puedes coordinar la entrega directamente con el vendedor.',
+        message: ENVIA_ARRANGED_DELIVERY_MESSAGE,
       })
     }
 
