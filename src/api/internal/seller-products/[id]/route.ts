@@ -5,7 +5,9 @@
  * ownership-checked the agent token → shop) calls this with the shop slug.
  *
  *   PATCH /internal/seller-products/:id   body: { seller_slug, title?, description?,
- *           price_cents?, quantity?, weight_grams?, status?, attrs?, metadata? }
+ *           price_cents?, quantity?, weight_grams?, status?, attrs?, metadata?,
+ *           images?: [{ url, alt? }], images_mode?: 'append'|'replace' }
+ *   On an image write the response echoes the final, de-duped { images } set.
  *
  * Auth: x-internal-secret must match MEDUSA_INTERNAL_SECRET (same as other
  * /internal routes). Ownership is double-checked here (seller-by-slug owns the
@@ -50,5 +52,5 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const result = await updateSellerProduct(req.scope, id, body)
   if (!result.ok) return res.status(result.status).json({ message: result.message })
 
-  res.json({ product_id: id, updated: true })
+  res.json({ product_id: id, updated: true, ...(result.images ? { images: result.images } : {}) })
 }

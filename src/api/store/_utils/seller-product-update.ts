@@ -27,9 +27,21 @@ export interface SellerProductUpdateBody {
   status?: 'published' | 'draft'
   attrs?: Record<string, unknown>
   metadata?: Record<string, unknown>
+  /**
+   * Replace or extend the product's image set. `images_mode` defaults to
+   * 'append' (merge with the existing images, de-duped by URL); 'replace' swaps
+   * the whole set. Powers the supply image-backfill path so older one-photo gems
+   * can grow a real gallery without re-importing.
+   */
+  images?: Array<{ url: string; alt?: string | null }>
+  images_mode?: 'append' | 'replace'
 }
 
-export type SellerProductUpdateResult = { ok: true } | { ok: false; status: number; message: string }
+export type SellerProductImage = { url: string; alt: string | null }
+
+export type SellerProductUpdateResult =
+  | { ok: true; images?: SellerProductImage[] }
+  | { ok: false; status: number; message: string }
 
 export async function updateSellerProduct(
   scope: MedusaRequest['scope'],
@@ -66,6 +78,39 @@ export async function updateSellerProduct(
     }
   }
 
+  // ── Images (append / replace, de-duped by URL) ───────────────────────────────
+  // Computed up front so the final set rides along in the single updateProducts
+  // call below AND can be returned to the caller for mirroring.
+  let finalImages: SellerProductImage[] | undefined
+  if (body.images !== undefined) {
+    const mode = body.images_mode === 'replace' ? 'replace' : 'append'
+
+    const incoming: SellerProductImage[] = (body.images ?? [])
+      .filter((img) => img && typeof img.url === 'string' && img.url.trim())
+      .map((img) => ({ url: img.url.trim(), alt: img.alt ?? null }))
+
+    let existing: SellerProductImage[] = []
+    if (mode === 'append') {
+      const { data: rows } = await remoteQuery.graph({
+        entity: 'product',
+        fields: ['images.url', 'images.metadata'],
+        filters: { id },
+      })
+      existing = (((rows?.[0] as any)?.images ?? []) as Array<{ url: string; metadata?: any }>)
+        .filter((img) => img?.url)
+        .map((img) => ({ url: img.url, alt: (img.metadata?.alt as string | undefined) ?? null }))
+    }
+
+    // De-dupe by URL, first occurrence wins → existing images keep their order
+    // and alt; only genuinely new URLs are appended.
+    const seen = new Set<string>()
+    finalImages = [...existing, ...incoming].filter((img) => {
+      if (seen.has(img.url)) return false
+      seen.add(img.url)
+      return true
+    })
+  }
+
   if (Object.keys(baseUpdate).length > 1) {
     // Update by id with the explicit (id, data) form. Passing a single merged
     // object makes Medusa treat it as a SELECTOR (matching on title/description/
@@ -73,6 +118,25 @@ export async function updateSellerProduct(
     // custom_fields → the save 500s ("unknown error") or silently no-ops.
     const { id: _productId, ...productData } = baseUpdate
     await (productService as any).updateProducts(id, productData)
+  }
+
+  // ── Image set replace (via the workflow, like create) ────────────────────────
+  // Images go through updateProductsWorkflow (not productService.updateProducts)
+  // because the workflow owns the image-relation replace the same way
+  // createProductsWorkflow seeds it; passing `images` swaps the whole set, which
+  // is why `finalImages` already carries the merged 'append' result.
+  if (finalImages !== undefined) {
+    await updateProductsWorkflow(scope).run({
+      input: {
+        selector: { id },
+        update: {
+          images: finalImages.map((img) => ({
+            url: img.url,
+            ...(img.alt ? { metadata: { alt: img.alt } } : {}),
+          })),
+        },
+      },
+    })
   }
 
   // ── Price update ───────────────────────────────────────────────────────────
@@ -148,5 +212,5 @@ export async function updateSellerProduct(
     }
   }
 
-  return { ok: true }
+  return { ok: true, images: finalImages }
 }
