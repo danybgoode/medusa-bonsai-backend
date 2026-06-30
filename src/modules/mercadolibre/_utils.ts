@@ -115,6 +115,94 @@ export function sanitizeConnection(row: unknown): SanitizedMlConnection | null {
   }
 }
 
+// ── Publish: payload build + action decision (Sprint 3) ────────────────────────
+import type { MlItemPayload } from './client'
+import { ML_DEFAULT_LISTING_TYPE } from './client'
+
+/** Map an ML country code → its site id (the predictor + publish are per-site). */
+export function mlSiteForCountry(countryCode: string | null | undefined): string {
+  const map: Record<string, string> = {
+    MX: 'MLM', AR: 'MLA', BR: 'MLB', CL: 'MLC', CO: 'MCO', UY: 'MLU', PE: 'MPE',
+  }
+  return map[(countryCode ?? 'MX').toUpperCase()] ?? 'MLM'
+}
+
+/** The minimal product shape `buildMlItemPayload` needs (a subset of ListingShape). */
+export type MlPublishInput = {
+  title: string
+  price_cents: number | null
+  currency: string
+  description: string | null
+  condition: string | null
+  available_quantity: number | null
+  images: { url: string }[]
+}
+
+/**
+ * Build the `MlItemPayload` POST /items expects from a normalised Miyagi product.
+ * Pure + degrades gracefully: price → major units (ML quotes pesos), condition →
+ * ML's `new`/`used` binary (anything not `new` is `used`), quantity clamped to ≥1
+ * (ML rejects 0 on an active item; stock accuracy is Sprint 4's job), pictures as
+ * `{source}`. `category_id` is supplied by the caller (predicted/overridden, US-9).
+ */
+export function buildMlItemPayload(
+  input: MlPublishInput,
+  opts: { categoryId: string; listingTypeId?: string },
+): MlItemPayload {
+  const title = (input.title ?? '').trim()
+  const price = input.price_cents != null && Number.isFinite(input.price_cents)
+    ? Math.round((input.price_cents / 100) * 100) / 100
+    : 0
+  const qty = input.available_quantity != null && Number.isFinite(input.available_quantity)
+    ? Math.max(1, Math.trunc(input.available_quantity))
+    : 1
+  const pictures = (Array.isArray(input.images) ? input.images : [])
+    .map((i) => i?.url)
+    .filter((u): u is string => typeof u === 'string' && u.length > 0)
+    .map((source) => ({ source }))
+
+  const payload: MlItemPayload = {
+    title,
+    category_id: opts.categoryId,
+    price,
+    currency_id: (input.currency || 'MXN').toUpperCase(),
+    available_quantity: qty,
+    buying_mode: 'buy_it_now',
+    condition: input.condition === 'new' ? 'new' : 'used',
+    listing_type_id: opts.listingTypeId || ML_DEFAULT_LISTING_TYPE,
+  }
+  const desc = (input.description ?? '').trim()
+  if (desc) payload.description = { plain_text: desc }
+  if (pictures.length) payload.pictures = pictures
+  return payload
+}
+
+export type MlPublishAction = 'create' | 'update' | 'close' | 'relist' | 'noop'
+
+/**
+ * Decide what the explicit "Sincronizar con Mercado Libre" action should do,
+ * given the current linkage + the live ML/Miyagi statuses. This is the single
+ * authoritative reconcile decision (US-7 + US-8); the Sprint-4 inventory
+ * subscriber will drive the same outbound seam.
+ *
+ *  - not linked            → create (publish)
+ *  - linked, Miyagi closed → close the ML item (archive/draft propagates)
+ *  - linked, ML closed, Miyagi active → relist
+ *  - linked, both active   → update (title/price/images propagate)
+ */
+export function decidePublishAction(args: {
+  linked: boolean
+  mlStatus?: string | null
+  productPublished: boolean
+}): MlPublishAction {
+  if (!args.linked) return 'create'
+  if (!args.productPublished) {
+    return args.mlStatus === 'closed' ? 'noop' : 'close'
+  }
+  if (args.mlStatus === 'closed') return 'relist'
+  return 'update'
+}
+
 // ── Linkage conflict guard (enforces the 1:1 join) ─────────────────────────────
 // `existing` is the set of links that already match the candidate's product_id OR
 // ml_item_id (the caller queries both directions). A conflict means linking would

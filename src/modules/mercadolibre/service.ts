@@ -9,7 +9,14 @@ import {
   getItemDetail,
   getItemDescription,
   toMlImportItem,
+  publishItem,
+  updateMlItem,
+  updateMlItemDescription,
+  setMlItemStatus,
+  relistMlItem,
+  predictCategory,
   type MlImportItem,
+  type MlCategoryCandidate,
 } from './client'
 import {
   encryptToken,
@@ -17,7 +24,12 @@ import {
   shouldRefresh,
   sanitizeConnection,
   isDuplicateLink,
+  buildMlItemPayload,
+  decidePublishAction,
+  mlSiteForCountry,
   type SanitizedMlConnection,
+  type MlPublishInput,
+  type MlPublishAction,
 } from './_utils'
 
 /**
@@ -111,6 +123,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     productId: string
     variantId?: string | null
     mlItemId: string
+    metadata?: Record<string, unknown> | null
   }) {
     // Query both directions so the 1:1 guard can reject "product already linked"
     // AND "ML item already linked", not just an exact-pair duplicate.
@@ -129,6 +142,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       product_id: input.productId,
       variant_id: input.variantId ?? null,
       ml_item_id: input.mlItemId,
+      metadata: input.metadata ?? null,
     })
   }
 
@@ -192,6 +206,131 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       throw Object.assign(new Error('Failed to load any ML item detail'), { code: 'ML_FETCH_FAILED' })
     }
     return { items, paging: page.paging, skipped }
+  }
+
+  // ── Sprint 3: publish / sync (the reconcile seam) ────────────────────────────────
+
+  /**
+   * Predict valid ML categories for a product title (US-9). Returns ranked
+   * candidates; the FE applies the low-confidence/override decision and never lets
+   * publish guess silently. Empty array ⇒ no prediction (the caller falls back to a
+   * safe default / asks the seller).
+   */
+  async predictMlCategory(sellerId: string, query: string): Promise<MlCategoryCandidate[]> {
+    const conn = await this.getConnection(sellerId)
+    if (!conn || conn.status !== 'connected') {
+      throw Object.assign(new Error('No active MercadoLibre connection'), { code: 'ML_NOT_CONNECTED' })
+    }
+    const token = await this.getAccessTokenForSeller(sellerId)
+    return predictCategory(token, mlSiteForCountry(conn.country_code), query)
+  }
+
+  /**
+   * The single outbound reconcile seam (US-7 + US-8) — create / update / close /
+   * relist a Miyagi product's linked ML item from the product's current state.
+   * Decides the action from the linkage + statuses (`decidePublishAction`), runs
+   * the matching ML write, then persists the linkage + ML state into the link's
+   * metadata. Sprint 4's inventory subscriber will call this same method.
+   *
+   * On a `create` with no `categoryId`, throws `ML_NO_CATEGORY` — the FE resolves
+   * the category (predicted/overridden) BEFORE publishing, so the backend never
+   * guesses a category on a live external write.
+   */
+  async publishOrSyncProduct(args: {
+    sellerId: string
+    productId: string
+    variantId?: string | null
+    input: MlPublishInput
+    productPublished: boolean
+    categoryId?: string | null
+  }): Promise<{
+    action: MlPublishAction
+    created: boolean
+    ml_item_id: string | null
+    permalink: string | null
+    status: string | null
+  }> {
+    const link = await this.getLinkByProduct(args.productId)
+    const linkMeta = (link?.metadata ?? {}) as Record<string, unknown>
+    const action = decidePublishAction({
+      linked: !!link,
+      mlStatus: (linkMeta.ml_status as string | undefined) ?? null,
+      productPublished: args.productPublished,
+    })
+
+    // A linked product reconciles via the stored category; a fresh publish needs one.
+    const categoryId = args.categoryId || (linkMeta.ml_category_id as string | undefined) || ''
+
+    if (action === 'noop') {
+      return {
+        action,
+        created: false,
+        ml_item_id: link?.ml_item_id ?? null,
+        permalink: (linkMeta.permalink as string | undefined) ?? null,
+        status: (linkMeta.ml_status as string | undefined) ?? null,
+      }
+    }
+
+    const token = await this.getAccessTokenForSeller(args.sellerId)
+
+    if (action === 'create') {
+      if (!categoryId) {
+        throw Object.assign(new Error('A category is required to publish'), { code: 'ML_NO_CATEGORY' })
+      }
+      const payload = buildMlItemPayload(args.input, { categoryId })
+      const item = await publishItem(token, payload)
+      const meta = {
+        ml_status: item.status ?? 'active',
+        permalink: item.permalink ?? null,
+        ml_category_id: categoryId,
+        last_synced_at: new Date().toISOString(),
+      }
+      await this.linkProductToMlItem({
+        sellerId: args.sellerId,
+        productId: args.productId,
+        variantId: args.variantId ?? null,
+        mlItemId: item.id,
+        metadata: meta,
+      })
+      return { action, created: true, ml_item_id: item.id, permalink: item.permalink ?? null, status: meta.ml_status }
+    }
+
+    // From here the link exists (any non-create, non-noop action).
+    const mlItemId = link!.ml_item_id
+    let item
+
+    if (action === 'close') {
+      item = await setMlItemStatus(token, mlItemId, 'closed')
+    } else {
+      // update OR relist — relist reactivates first, then we still sync the fields.
+      if (action === 'relist') await relistMlItem(token, mlItemId)
+      const payload = buildMlItemPayload(args.input, { categoryId: categoryId || 'unused' })
+      item = await updateMlItem(token, mlItemId, {
+        title: payload.title,
+        price: payload.price,
+        available_quantity: payload.available_quantity,
+        ...(payload.pictures ? { pictures: payload.pictures } : {}),
+      })
+      if (payload.description?.plain_text) {
+        await updateMlItemDescription(token, mlItemId, payload.description.plain_text)
+      }
+    }
+
+    const newMeta = {
+      ...linkMeta,
+      ml_status: item.status ?? (action === 'close' ? 'closed' : 'active'),
+      permalink: item.permalink ?? (linkMeta.permalink as string | undefined) ?? null,
+      last_synced_at: new Date().toISOString(),
+    }
+    await this.updateProductMlLinks({ id: link!.id, metadata: newMeta })
+
+    return {
+      action,
+      created: false,
+      ml_item_id: mlItemId,
+      permalink: newMeta.permalink as string | null,
+      status: newMeta.ml_status as string,
+    }
   }
 }
 
