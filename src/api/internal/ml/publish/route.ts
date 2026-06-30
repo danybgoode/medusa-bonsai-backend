@@ -113,6 +113,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const err = e as { code?: string; message?: string }
     if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
     if (err.code === 'ML_NO_CATEGORY') return res.status(422).json({ message: 'A category is required to publish', code: 'ML_NO_CATEGORY' })
+    if (err.code === 'ML_INVALID_PRODUCT') return res.status(422).json({ message: 'Product needs a title and a price to publish', code: 'ML_INVALID_PRODUCT' })
     if (err.code === 'ML_LINK_CONFLICT') return res.status(409).json({ message: 'Product or ML item is already linked', code: 'ML_LINK_CONFLICT' })
     return res.status(502).json({ message: err.message ?? 'Failed to publish to Mercado Libre' })
   }

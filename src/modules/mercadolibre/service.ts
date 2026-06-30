@@ -277,6 +277,13 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     status: string | null
   }> {
     const link = await this.getLinkByProduct(args.productId)
+    // Defense in depth (mirrors closeProductMl): never act on a link that isn't
+    // this seller's — a stale/cross-seller link must not be updated/closed with
+    // the caller's token. The route already checks product ownership; this guards
+    // the 1:1 link row itself.
+    if (link && link.seller_id !== args.sellerId) {
+      throw Object.assign(new Error('Product or ML item is already linked'), { code: 'ML_LINK_CONFLICT' })
+    }
     const linkMeta = (link?.metadata ?? {}) as Record<string, unknown>
     const action = decidePublishAction({
       linked: !!link,
@@ -302,6 +309,11 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     if (action === 'create') {
       if (!categoryId) {
         throw Object.assign(new Error('A category is required to publish'), { code: 'ML_NO_CATEGORY' })
+      }
+      // Validate locally so a missing title / non-positive price surfaces a clear
+      // seller-facing 422 instead of a generic ML 502 (ML would reject these).
+      if (!(args.input.title ?? '').trim() || args.input.price_cents == null || args.input.price_cents <= 0) {
+        throw Object.assign(new Error('Product needs a title and a price to publish'), { code: 'ML_INVALID_PRODUCT' })
       }
       const payload = buildMlItemPayload(args.input, { categoryId })
       const item = await publishItem(token, payload)
