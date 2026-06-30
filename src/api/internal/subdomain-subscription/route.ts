@@ -1,0 +1,112 @@
+/**
+ * GET /internal/subdomain-subscription?seller_clerk_id=...
+ *
+ * Source of truth for the subdomain paywall entitlement (epic 07 ·
+ * subdomain-pricing, Sprint 2): "does this seller have a LIVE subscription to the
+ * platform subdomain plan?" A faithful clone of `/internal/custom-domain-subscription`.
+ * The frontend bridge (lib/subdomain-subscription.ts) calls this to derive
+ * `hasActiveSubscription` for the subdomain entitlement seam.
+ *
+ * Returns `{ active, plan_id, stripe_price_id, price_cents }` — `active` is true
+ * iff a Subscription row exists for that seller against the platform subdomain plan
+ * with status in LIVE_STATUSES. The plan fields let the frontend's buy route build
+ * the Stripe checkout in the same call. Fails closed to `{ active: false }` on any
+ * lookup error (the paywall simply stays gated — never wrongly grants).
+ *
+ * PATCH /internal/subdomain-subscription  { stripe_subscription_id, status }
+ *   — flips the Medusa Subscription status by its Stripe id (lapse path: the
+ *   webhook only has the Stripe subscription id, and entitlement reads Medusa, so
+ *   the row must be updated there for the gate to flip off).
+ *
+ * The subdomain plan is a DISTINCT row (metadata.kind === 'subdomain_plan'), so its
+ * subscriptions are naturally separated from custom-domain ones by plan_id.
+ *
+ * Auth: x-internal-secret header must match MEDUSA_INTERNAL_SECRET.
+ */
+
+import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { SUBSCRIPTIONS_MODULE } from '../../../modules/subscriptions'
+import type SubscriptionsModuleService from '../../../modules/subscriptions/service'
+import { PLATFORM_SELLER_ID } from '../setup-custom-domain-plan/route'
+import { SUBDOMAIN_PLAN_KIND } from '../setup-subdomain-plan/route'
+
+// `past_due` counts as live: it's a grace window while Stripe retries the card —
+// the subdomain stays white-label so a transient payment failure never collapses
+// the seller's site to /s/slug. Only a definitive `canceled` lapses it.
+const LIVE_STATUSES = new Set(['active', 'trialing', 'past_due'])
+
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  const secret = req.headers['x-internal-secret']
+  if (!secret || secret !== process.env.MEDUSA_INTERNAL_SECRET) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
+  const sellerClerkId = req.query.seller_clerk_id as string | undefined
+  if (!sellerClerkId) {
+    return res.status(400).json({ message: 'seller_clerk_id query param is required' })
+  }
+
+  try {
+    const subs = req.scope.resolve(SUBSCRIPTIONS_MODULE) as SubscriptionsModuleService
+
+    // Resolve the platform subdomain plan.
+    const platformPlans: any[] = await (subs as any)
+      .listSubscriptionPlans({ seller_id: PLATFORM_SELLER_ID }, { take: 100 })
+      .catch(() => [])
+    const plan = platformPlans.find(
+      (p) => (p?.metadata as Record<string, unknown> | null)?.kind === SUBDOMAIN_PLAN_KIND,
+    )
+    if (!plan) return res.json({ active: false, reason: 'no_plan' })
+
+    const rows: any[] = await (subs as any)
+      .listSubscriptions(
+        { plan_id: plan.id, clerk_user_id: sellerClerkId },
+        { take: 50 },
+      )
+      .catch(() => [])
+
+    const active = rows.some((r) => LIVE_STATUSES.has(r?.status))
+    return res.json({
+      active,
+      plan_id: plan.id,
+      stripe_price_id: plan.stripe_price_id ?? null,
+      price_cents: plan.price_cents ?? null,
+    })
+  } catch (e) {
+    console.error('[subdomain-subscription] lookup failed:', e)
+    return res.json({ active: false, reason: 'error' })
+  }
+}
+
+const SETTABLE_STATUSES = new Set([
+  'active',
+  'trialing',
+  'past_due',
+  'canceled',
+])
+
+export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
+  const secret = req.headers['x-internal-secret']
+  if (!secret || secret !== process.env.MEDUSA_INTERNAL_SECRET) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
+  const body = (req.body ?? {}) as { stripe_subscription_id?: string; status?: string }
+  if (!body.stripe_subscription_id || !body.status) {
+    return res.status(400).json({ message: 'stripe_subscription_id and status are required' })
+  }
+  if (!SETTABLE_STATUSES.has(body.status)) {
+    return res.status(400).json({ message: `unsupported status: ${body.status}` })
+  }
+
+  const subs = req.scope.resolve(SUBSCRIPTIONS_MODULE) as SubscriptionsModuleService
+  const rows: any[] = await (subs as any)
+    .listSubscriptions({ stripe_subscription_id: body.stripe_subscription_id }, { take: 50 })
+    .catch(() => [])
+
+  for (const r of rows) {
+    await (subs as any).updateSubscriptions(r.id, { status: body.status }).catch(() => {})
+  }
+
+  return res.json({ updated: rows.length })
+}
