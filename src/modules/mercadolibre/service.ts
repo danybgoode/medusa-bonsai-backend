@@ -1,7 +1,16 @@
 import { MedusaService } from '@medusajs/framework/utils'
 import MlConnection from './models/ml-connection'
 import ProductMlLink from './models/product-ml-link'
-import { exchangeCode, refreshMlToken, getMlUser } from './client'
+import {
+  exchangeCode,
+  refreshMlToken,
+  getMlUser,
+  getSellerItems,
+  getItemDetail,
+  getItemDescription,
+  toMlImportItem,
+  type MlImportItem,
+} from './client'
 import {
   encryptToken,
   decryptToken,
@@ -141,6 +150,41 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   async unlink(id: string): Promise<{ ok: true }> {
     await this.deleteProductMlLinks(id)
     return { ok: true }
+  }
+
+  // ── Sprint 2: import — list the seller's active ML items ─────────────────────────
+
+  /**
+   * List a connected seller's active ML items as import-ready rows: page the
+   * user's item ids, fetch each item's detail + description, annotate whether it
+   * is already linked (so the UI can flag duplicates). Per-item failures are
+   * skipped so one bad item never fails the whole page. Tokens never leave here.
+   */
+  async listActiveImportItems(
+    sellerId: string,
+    opts: { offset?: number; limit?: number } = {},
+  ): Promise<{ items: MlImportItem[]; paging: { total: number; offset: number; limit: number } }> {
+    const conn = await this.getConnection(sellerId)
+    if (!conn || conn.status !== 'connected') {
+      throw Object.assign(new Error('No active MercadoLibre connection'), { code: 'ML_NOT_CONNECTED' })
+    }
+    const token = await this.getAccessTokenForSeller(sellerId)
+    const page = await getSellerItems(token, conn.ml_user_id, opts)
+
+    const items: MlImportItem[] = []
+    for (const id of page.results) {
+      try {
+        const [detail, description, link] = await Promise.all([
+          getItemDetail(token, id),
+          getItemDescription(token, id).catch(() => ''),
+          this.getLinkByMlItem(id),
+        ])
+        items.push(toMlImportItem(detail, description, !!link))
+      } catch {
+        // skip a single bad item; the rest of the page still imports
+      }
+    }
+    return { items, paging: page.paging }
   }
 }
 
