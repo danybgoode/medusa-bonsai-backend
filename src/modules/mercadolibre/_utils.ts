@@ -115,11 +115,14 @@ export function sanitizeConnection(row: unknown): SanitizedMlConnection | null {
   }
 }
 
-// ── Linkage duplicate guard ─────────────────────────────────────────────────────
+// ── Linkage conflict guard (enforces the 1:1 join) ─────────────────────────────
+// `existing` is the set of links that already match the candidate's product_id OR
+// ml_item_id (the caller queries both directions). A conflict means linking would
+// violate the 1:1 constraint — the product is already linked, or the ML item is.
 type LinkPair = { product_id: string; ml_item_id: string }
 
 export function isDuplicateLink(existing: LinkPair[], candidate: LinkPair): boolean {
   return existing.some(
-    (l) => l.product_id === candidate.product_id && l.ml_item_id === candidate.ml_item_id,
+    (l) => l.product_id === candidate.product_id || l.ml_item_id === candidate.ml_item_id,
   )
 }

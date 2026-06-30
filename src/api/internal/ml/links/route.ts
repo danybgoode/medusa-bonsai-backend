@@ -52,9 +52,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
     res.status(201).json({ link })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'unknown'
-    const status = msg.includes('already exists') ? 409 : 500
-    res.status(status).json({ message: msg })
+    const conflict = (e as { code?: string }).code === 'ML_LINK_CONFLICT'
+    res.status(conflict ? 409 : 500).json({
+      message: conflict ? 'Product or ML item is already linked' : 'Failed to link',
+    })
   }
 }
 
@@ -77,10 +78,21 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 export async function DELETE(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
 
-  const { id } = (req.body ?? {}) as { id?: string }
-  if (!id) return res.status(400).json({ message: 'id required' })
+  const { id, seller_slug } = (req.body ?? {}) as { id?: string; seller_slug?: string }
+  if (!id || !seller_slug) return res.status(400).json({ message: 'id and seller_slug required' })
+
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+  const [seller] = await sellerService.listSellers({ slug: seller_slug } as never, { take: 1 })
+  if (!seller) return res.status(404).json({ message: 'Seller not found' })
 
   const ml: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
+  // Verify the link belongs to this seller before deleting (defense in depth —
+  // the internal secret is a trusted boundary, but a known/colliding id must not
+  // let one seller delete another's link).
+  const link = await ml.getLink(id)
+  if (!link || link.seller_id !== seller.id) {
+    return res.status(404).json({ message: 'Link not found' })
+  }
   await ml.unlink(id)
   res.status(200).json({ ok: true })
 }

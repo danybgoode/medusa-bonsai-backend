@@ -114,18 +114,24 @@ describe('sanitizeConnection', () => {
   })
 })
 
-describe('isDuplicateLink', () => {
+describe('isDuplicateLink (1:1 conflict guard)', () => {
+  // `existing` = links already matching the candidate's product OR ml_item
+  // (the service queries both directions and passes the union).
   const existing = [{ product_id: 'prod_1', ml_item_id: 'MLM1' }]
 
-  it('detects an exact pair duplicate', () => {
+  it('rejects an exact pair (already linked)', () => {
     expect(isDuplicateLink(existing, { product_id: 'prod_1', ml_item_id: 'MLM1' })).toBe(true)
   })
 
-  it('allows the same product linked to a different ML item', () => {
-    expect(isDuplicateLink(existing, { product_id: 'prod_1', ml_item_id: 'MLM2' })).toBe(false)
+  it('rejects re-linking a product that is already linked to a different ML item', () => {
+    expect(isDuplicateLink(existing, { product_id: 'prod_1', ml_item_id: 'MLM2' })).toBe(true)
   })
 
-  it('allows a different product linked to the same ML item', () => {
-    expect(isDuplicateLink(existing, { product_id: 'prod_2', ml_item_id: 'MLM1' })).toBe(false)
+  it('rejects linking a different product to an already-linked ML item', () => {
+    expect(isDuplicateLink(existing, { product_id: 'prod_2', ml_item_id: 'MLM1' })).toBe(true)
+  })
+
+  it('allows a brand-new product ↔ brand-new ML item pair', () => {
+    expect(isDuplicateLink([], { product_id: 'prod_9', ml_item_id: 'MLM9' })).toBe(false)
   })
 })

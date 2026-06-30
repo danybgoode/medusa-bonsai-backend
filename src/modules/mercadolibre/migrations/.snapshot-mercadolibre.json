@@ -430,13 +430,22 @@
           "expression": "CREATE INDEX IF NOT EXISTS \"IDX_product_ml_link_deleted_at\" ON \"product_ml_link\" (\"deleted_at\") WHERE deleted_at IS NULL"
         },
         {
-          "keyName": "IDX_product_ml_link_product_id_ml_item_id_unique",
+          "keyName": "IDX_product_ml_link_product_id_unique",
           "columnNames": [],
           "composite": false,
           "constraint": false,
           "primary": false,
           "unique": false,
-          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_product_ml_link_product_id_ml_item_id_unique\" ON \"product_ml_link\" (\"product_id\", \"ml_item_id\") WHERE deleted_at IS NULL"
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_product_ml_link_product_id_unique\" ON \"product_ml_link\" (\"product_id\") WHERE deleted_at IS NULL"
+        },
+        {
+          "keyName": "IDX_product_ml_link_ml_item_id_unique",
+          "columnNames": [],
+          "composite": false,
+          "constraint": false,
+          "primary": false,
+          "unique": false,
+          "expression": "CREATE UNIQUE INDEX IF NOT EXISTS \"IDX_product_ml_link_ml_item_id_unique\" ON \"product_ml_link\" (\"ml_item_id\") WHERE deleted_at IS NULL"
         },
         {
           "keyName": "product_ml_link_pkey",

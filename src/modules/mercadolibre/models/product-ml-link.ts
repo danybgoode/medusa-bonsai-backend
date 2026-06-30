@@ -5,10 +5,13 @@ import { model } from '@medusajs/framework/utils'
  * variant) and its Mercado Libre item id. This is the linkage primitive that
  * import (S2), publish (S3), and two-way stock sync (S4) all share.
  *
- * Lookups resolve both directions (Medusa→ML via `product_id`, ML→Medusa via
- * `ml_item_id`). A unique constraint on (`product_id`, `ml_item_id`) rejects a
- * duplicate link; `unlink` soft-deletes (the partial index lets the same pair be
- * re-linked afterwards).
+ * It is a **1:1 join**: a product maps to at most one ML item and an ML item to
+ * at most one product (separate unique constraints on each), so `getLinkByProduct`
+ * / `getLinkByMlItem` resolve **deterministically** and a sync can never address
+ * an ambiguous many-to-many. `variant_id` is informational (later per-variant
+ * stock targeting); per-variant *separate* ML items would be a deliberate future
+ * evolution of this constraint. `unlink` soft-deletes (the partial indexes let the
+ * product/item be re-linked afterwards).
  */
 const ProductMlLink = model
   .define('product_ml_link', {
@@ -20,7 +23,8 @@ const ProductMlLink = model
     metadata: model.json().nullable(),
   })
   .indexes([
-    { on: ['product_id', 'ml_item_id'], unique: true, where: 'deleted_at IS NULL' },
+    { on: ['product_id'], unique: true, where: 'deleted_at IS NULL' },
+    { on: ['ml_item_id'], unique: true, where: 'deleted_at IS NULL' },
   ])
 
 export default ProductMlLink

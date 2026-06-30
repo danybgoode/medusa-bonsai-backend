@@ -103,9 +103,17 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     variantId?: string | null
     mlItemId: string
   }) {
-    const existing = await this.listProductMlLinks({ product_id: input.productId })
+    // Query both directions so the 1:1 guard can reject "product already linked"
+    // AND "ML item already linked", not just an exact-pair duplicate.
+    const [byProduct, byMlItem] = await Promise.all([
+      this.getLinkByProduct(input.productId),
+      this.getLinkByMlItem(input.mlItemId),
+    ])
+    const existing = [byProduct, byMlItem].filter(Boolean) as { product_id: string; ml_item_id: string }[]
     if (isDuplicateLink(existing, { product_id: input.productId, ml_item_id: input.mlItemId })) {
-      throw new Error('Link already exists for this product and ML item')
+      throw Object.assign(new Error('Product or ML item is already linked'), {
+        code: 'ML_LINK_CONFLICT',
+      })
     }
     return this.createProductMlLinks({
       seller_id: input.sellerId,
@@ -122,6 +130,11 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
 
   async getLinkByMlItem(mlItemId: string) {
     const [link] = await this.listProductMlLinks({ ml_item_id: mlItemId }, { take: 1 })
+    return link ?? null
+  }
+
+  async getLink(id: string) {
+    const [link] = await this.listProductMlLinks({ id }, { take: 1 })
     return link ?? null
   }
 
