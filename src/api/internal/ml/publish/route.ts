@@ -30,11 +30,12 @@ function unauthorized(req: MedusaRequest): boolean {
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
 
-  const { seller_slug, product_id, category_id, variant_id } = (req.body ?? {}) as {
+  const { seller_slug, product_id, category_id, variant_id, action } = (req.body ?? {}) as {
     seller_slug?: string
     product_id?: string
     category_id?: string | null
     variant_id?: string | null
+    action?: string
   }
   if (!seller_slug || !product_id) {
     return res.status(400).json({ message: 'seller_slug and product_id required' })
@@ -43,6 +44,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const [seller] = await sellerService.listSellers({ slug: seller_slug } as never, { take: 1 })
   if (!seller) return res.status(404).json({ message: 'Seller not found' })
+
+  const ml: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
+
+  // Best-effort close (archive/delete hook): keyed off the linkage only, so it
+  // works even after the Medusa product is soft-deleted/unreadable.
+  if (action === 'close') {
+    try {
+      const result = await ml.closeProductMl(seller.id, product_id)
+      return res.status(200).json(result)
+    } catch (e) {
+      const err = e as { code?: string; message?: string }
+      if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
+      return res.status(502).json({ message: err.message ?? 'Failed to close ML item' })
+    }
+  }
 
   const remoteQuery = req.scope.resolve('remoteQuery')
 
@@ -83,7 +99,6 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     images: listing.images.map((i) => ({ url: i.url })),
   }
 
-  const ml: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
   try {
     const result = await ml.publishOrSyncProduct({
       sellerId: seller.id,
@@ -96,9 +111,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(200).json(result)
   } catch (e) {
     const err = e as { code?: string; message?: string }
-    if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection' })
+    if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
     if (err.code === 'ML_NO_CATEGORY') return res.status(422).json({ message: 'A category is required to publish', code: 'ML_NO_CATEGORY' })
-    if (err.code === 'ML_LINK_CONFLICT') return res.status(409).json({ message: 'Product or ML item is already linked' })
+    if (err.code === 'ML_LINK_CONFLICT') return res.status(409).json({ message: 'Product or ML item is already linked', code: 'ML_LINK_CONFLICT' })
     return res.status(502).json({ message: err.message ?? 'Failed to publish to Mercado Libre' })
   }
 }

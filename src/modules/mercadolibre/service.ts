@@ -80,7 +80,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   async getAccessTokenForSeller(sellerId: string): Promise<string> {
     const conn = await this.getConnection(sellerId)
     if (!conn || conn.status !== 'connected') {
-      throw new Error('No active MercadoLibre connection')
+      throw Object.assign(new Error('No active MercadoLibre connection'), { code: 'ML_NOT_CONNECTED' })
     }
 
     if (shouldRefresh(conn.expires_at)) {
@@ -209,6 +209,32 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   }
 
   // ── Sprint 3: publish / sync (the reconcile seam) ────────────────────────────────
+
+  /**
+   * Best-effort close of a product's linked ML item — keyed off the LINK only, so
+   * it still works when the Medusa product is soft-deleted/unreadable (the
+   * archive/delete hook). Verifies the link belongs to the seller. Idempotent: an
+   * already-closed item, or no link, is a noop.
+   */
+  async closeProductMl(sellerId: string, productId: string): Promise<{
+    action: 'close' | 'noop'
+    ml_item_id: string | null
+    status: string | null
+  }> {
+    const link = await this.getLinkByProduct(productId)
+    if (!link || link.seller_id !== sellerId) return { action: 'noop', ml_item_id: null, status: null }
+    const meta = (link.metadata ?? {}) as Record<string, unknown>
+    if (meta.ml_status === 'closed') {
+      return { action: 'noop', ml_item_id: link.ml_item_id, status: 'closed' }
+    }
+    const token = await this.getAccessTokenForSeller(sellerId)
+    const item = await setMlItemStatus(token, link.ml_item_id, 'closed')
+    await this.updateProductMlLinks({
+      id: link.id,
+      metadata: { ...meta, ml_status: item.status ?? 'closed', last_synced_at: new Date().toISOString() },
+    })
+    return { action: 'close', ml_item_id: link.ml_item_id, status: item.status ?? 'closed' }
+  }
 
   /**
    * Predict valid ML categories for a product title (US-9). Returns ranked
