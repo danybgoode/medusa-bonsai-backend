@@ -163,7 +163,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   async listActiveImportItems(
     sellerId: string,
     opts: { offset?: number; limit?: number } = {},
-  ): Promise<{ items: MlImportItem[]; paging: { total: number; offset: number; limit: number } }> {
+  ): Promise<{ items: MlImportItem[]; paging: { total: number; offset: number; limit: number }; skipped: number }> {
     const conn = await this.getConnection(sellerId)
     if (!conn || conn.status !== 'connected') {
       throw Object.assign(new Error('No active MercadoLibre connection'), { code: 'ML_NOT_CONNECTED' })
@@ -172,6 +172,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     const page = await getSellerItems(token, conn.ml_user_id, opts)
 
     const items: MlImportItem[] = []
+    let skipped = 0
     for (const id of page.results) {
       try {
         const [detail, description, link] = await Promise.all([
@@ -181,10 +182,16 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
         ])
         items.push(toMlImportItem(detail, description, !!link))
       } catch {
-        // skip a single bad item; the rest of the page still imports
+        skipped++ // one bad item shouldn't fail the whole page
       }
     }
-    return { items, paging: page.paging }
+    // But if we found ids and loaded NONE, that's an ML outage (auth / rate-limit /
+    // shape change), not an empty catalog — signal it so the UI never shows
+    // "nothing to import" on a real failure. (cross-review #45.)
+    if (page.results.length > 0 && items.length === 0) {
+      throw Object.assign(new Error('Failed to load any ML item detail'), { code: 'ML_FETCH_FAILED' })
+    }
+    return { items, paging: page.paging, skipped }
   }
 }
 

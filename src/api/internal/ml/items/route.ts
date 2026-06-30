@@ -49,8 +49,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   const ml: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
   try {
-    const { items, paging } = await ml.listActiveImportItems(seller.id, { offset, limit })
-    return res.status(200).json({ items, paging })
+    const { items, paging, skipped } = await ml.listActiveImportItems(seller.id, { offset, limit })
+    return res.status(200).json({ items, paging, skipped })
   } catch (e) {
     const err = e as { code?: string; message?: string }
     if (err.code === 'ML_NOT_CONNECTED') {
