@@ -165,6 +165,146 @@ export type MlImportItem = {
   already_linked: boolean
 }
 
+// ── Item write (Sprint 3 · publish) ───────────────────────────────────────────
+// The reference client only PUBLISHED (create); Sprint 3 adds the write verbs the
+// linkage needs to keep an ML item in step with Miyagi: update, status (close /
+// pause / reactivate), relist, and the category predictor publish validation needs.
+// All backend-only (uses the seller's access token); never logs the token.
+
+/** The free/default ML listing type used when none is configured. */
+export const ML_DEFAULT_LISTING_TYPE = process.env.ML_DEFAULT_LISTING_TYPE ?? 'bronze'
+
+/** The payload POST /items accepts (ported from the despachobonsai reference). */
+export type MlItemPayload = {
+  title: string
+  category_id: string
+  price: number
+  currency_id: string
+  available_quantity: number
+  buying_mode: 'buy_it_now'
+  condition: 'new' | 'used'
+  listing_type_id: string
+  description?: { plain_text: string }
+  pictures?: { source: string }[]
+}
+
+/** The fields of an ML item the publish/sync flow reads back + persists. */
+export type MlItem = {
+  id: string
+  title?: string
+  permalink?: string
+  status?: string
+  price?: number
+  currency_id?: string
+}
+
+/** A ranked ML category candidate from the domain-discovery predictor (US-9). */
+export type MlCategoryCandidate = {
+  category_id: string
+  category_name: string
+  /** 0..1 prediction confidence; ML calls it `prediction_probability`. */
+  score: number
+}
+
+/** Create an ML item. POST /items. (Ported from the reference `publishItem`.) */
+export async function publishItem(accessToken: string, item: MlItemPayload): Promise<MlItem> {
+  const res = await fetch(`${ML_API}/items`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(item),
+  })
+  if (!res.ok) throw new Error(`ML publish failed: ${res.status}`)
+  return res.json()
+}
+
+/** Update mutable fields of an existing ML item. PUT /items/{id}. */
+export async function updateMlItem(
+  accessToken: string,
+  itemId: string,
+  partial: Partial<Pick<MlItemPayload, 'title' | 'price' | 'available_quantity' | 'pictures'>>,
+): Promise<MlItem> {
+  const res = await fetch(`${ML_API}/items/${encodeURIComponent(itemId)}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(partial),
+  })
+  if (!res.ok) throw new Error(`ML item update failed: ${res.status}`)
+  return res.json()
+}
+
+/** Update an ML item's long description. PUT /items/{id}/description. Best-effort. */
+export async function updateMlItemDescription(
+  accessToken: string,
+  itemId: string,
+  plainText: string,
+): Promise<void> {
+  await fetch(`${ML_API}/items/${encodeURIComponent(itemId)}/description`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plain_text: plainText }),
+  }).catch(() => {})
+}
+
+/** Set an ML item's status (close on archive, pause, or reactivate). PUT /items/{id}. */
+export async function setMlItemStatus(
+  accessToken: string,
+  itemId: string,
+  status: 'active' | 'paused' | 'closed',
+): Promise<MlItem> {
+  const res = await fetch(`${ML_API}/items/${encodeURIComponent(itemId)}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  })
+  if (!res.ok) throw new Error(`ML item status change failed: ${res.status}`)
+  return res.json()
+}
+
+/**
+ * Relist a previously-closed ML item. The modern path is to reactivate via the
+ * status verb (`closed` → `active`); a closed item can be reopened while it has
+ * stock. We reuse `setMlItemStatus` so there is one code path for the verb.
+ */
+export async function relistMlItem(accessToken: string, itemId: string): Promise<MlItem> {
+  return setMlItemStatus(accessToken, itemId, 'active')
+}
+
+/**
+ * Predict valid ML categories for a title (US-9). GET
+ * /sites/{site}/domain_discovery/search?q=... returns ranked candidates with a
+ * `prediction_probability`. Returns [] on any failure so publish can fall back to
+ * the safe default rather than hard-failing.
+ */
+export async function predictCategory(
+  accessToken: string,
+  siteId: string,
+  query: string,
+  limit = 8,
+): Promise<MlCategoryCandidate[]> {
+  const q = query.trim()
+  if (!q) return []
+  const url = `${ML_API}/sites/${encodeURIComponent(siteId)}/domain_discovery/search?limit=${limit}&q=${encodeURIComponent(q)}`
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    if (!res.ok) return []
+    const data = (await res.json()) as Array<{
+      category_id?: string
+      category_name?: string
+      prediction_probability?: number
+    }>
+    if (!Array.isArray(data)) return []
+    return data
+      .filter((c) => typeof c.category_id === 'string' && c.category_id.length > 0)
+      .map((c) => ({
+        category_id: c.category_id as string,
+        category_name: c.category_name ?? '',
+        score: typeof c.prediction_probability === 'number' ? c.prediction_probability : 0,
+      }))
+  } catch {
+    return []
+  }
+}
+
 /** Narrow a raw ML item detail (+ description, link flag) to the wire shape. */
 export function toMlImportItem(
   detail: MlItemDetail,
