@@ -150,6 +150,11 @@ module.exports = defineConfig({
       resolve: './src/modules/subscriptions',
     },
 
+    // ── Mercado Libre module (connect + product↔ML-item linkage + sync) ───────
+    {
+      resolve: './src/modules/mercadolibre',
+    },
+
     // ── Auth providers ─────────────────────────────────────────────────────────
     {
       resolve: '@medusajs/medusa/auth',
