@@ -76,7 +76,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         .status(400)
         .json({ message: 'Seed the yearly ML-sync plan first (interval=year), then the monthly one.' })
     }
-    const [plan] = await (subs as any).updateSubscriptionPlans({
+    const updatedMonthly = await (subs as any).updateSubscriptionPlans({
       id: existing.id,
       metadata: {
         ...prevMeta,
@@ -85,6 +85,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         monthly_price_cents: body.price_cents ?? DEFAULT_MONTHLY_CENTS,
       },
     })
+    // `updateSubscriptionPlans` returns a SINGLE object for a by-id update (not an
+    // array) — array-destructuring it throws "object is not iterable". Normalize
+    // either shape (the connect path uses the same Array.isArray guard).
+    const plan = Array.isArray(updatedMonthly) ? updatedMonthly[0] : updatedMonthly
     return res.status(200).json({ plan, created: false })
   }
 
@@ -103,10 +107,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   let plan
   if (existing) {
-    ;[plan] = await (subs as any).updateSubscriptionPlans({
+    // Normalize the single-object return (see the monthly branch above).
+    const updated = await (subs as any).updateSubscriptionPlans({
       id: existing.id,
       ...fields,
     })
+    plan = Array.isArray(updated) ? updated[0] : updated
   } else {
     plan = await (subs as any).createSubscriptionPlans({
       seller_id: PLATFORM_SELLER_ID,
