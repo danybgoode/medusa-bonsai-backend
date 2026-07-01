@@ -16,7 +16,11 @@ import {
   isStockableListingType,
   resolveStockLocationId,
   setVariantAvailableQuantity,
+  getProductAvailableQuantity,
 } from './inventory'
+import { isEnabled } from '../../../lib/flags'
+import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
+import MercadolibreModuleService from '../../../modules/mercadolibre/service'
 
 export interface SellerProductUpdateBody {
   title?: string
@@ -206,6 +210,20 @@ export async function updateSellerProduct(
           await (productService as any).updateProductVariants(variant.id, { manage_inventory: true })
         }
         await setVariantAvailableQuantity(scope, variant, locationId, body.quantity)
+        // Propagate a manual stock edit to a linked ML item (US-10) so ML never
+        // oversells. Push the product's *summed* available (across variants), not
+        // the single edited variant's quantity, so a multi-variant product doesn't
+        // understate ML stock. Best-effort + flag-gated; the per-seller enable +
+        // linkage + idempotency + rate-limit deferral all live inside pushStockToMl.
+        try {
+          if (await isEnabled('ml.sync_enabled')) {
+            const ml = scope.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
+            const available = await getProductAvailableQuantity(scope, id)
+            if (available != null) await ml.pushStockToMl({ productId: id, availableQuantity: available })
+          }
+        } catch (e) {
+          console.error('[updateSellerProduct] ML stock push failed', id, e)
+        }
       } else {
         console.error('[updateSellerProduct] no stock location for quantity update', { id })
       }

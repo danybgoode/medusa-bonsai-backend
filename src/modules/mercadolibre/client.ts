@@ -135,6 +135,77 @@ export async function getItemDetail(accessToken: string, itemId: string): Promis
   return res.json()
 }
 
+/**
+ * The order shape the stock sync reads: which ML items a sale touched, and **how
+ * many units** of each (the delta we apply to Medusa). `id` is the exactly-once
+ * key.
+ */
+export type MlOrder = {
+  id: string | number
+  status?: string
+  date_created?: string
+  order_items?: { item?: { id?: string }; quantity?: number }[]
+}
+
+/**
+ * Fetch one ML order (Sprint 4 · inbound stock webhook). An `orders_v2`
+ * notification carries `/orders/{id}`; we read its line items to learn which ML
+ * items sold and how many. GET /orders/{id}.
+ */
+export async function getMlOrder(accessToken: string, orderId: string): Promise<MlOrder> {
+  const res = await fetch(`${ML_API}/orders/${encodeURIComponent(orderId)}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!res.ok) throw new Error(`ML /orders/${orderId} failed: ${res.status}`)
+  return res.json()
+}
+
+/**
+ * Aggregate an ML order into per-item sold quantities (summing multiple line
+ * items for the same item). Pure — the delta the inbound sync applies to Medusa.
+ */
+export function normalizeOrderItems(order: MlOrder): { mlItemId: string; quantity: number }[] {
+  const byItem = new Map<string, number>()
+  for (const oi of order.order_items ?? []) {
+    const id = oi?.item?.id
+    if (typeof id !== 'string' || !id) continue
+    const qty = typeof oi.quantity === 'number' && Number.isFinite(oi.quantity) ? Math.max(0, Math.trunc(oi.quantity)) : 0
+    byItem.set(id, (byItem.get(id) ?? 0) + qty)
+  }
+  return [...byItem.entries()].map(([mlItemId, quantity]) => ({ mlItemId, quantity }))
+}
+
+/**
+ * Search a seller's recent ML orders (Sprint 4 · reconcile job — the missed-
+ * webhook recovery). Returns paid/confirmed orders created since `sinceIso`, most
+ * recent first, so the reconcile job can apply any sale whose webhook never
+ * arrived (idempotent per order id). GET /orders/search.
+ */
+export async function searchSellerOrders(
+  accessToken: string,
+  mlUserId: string,
+  sinceIso: string,
+  pageLimit = 50,
+  maxPages = 10,
+): Promise<{ orders: MlOrder[]; truncated: boolean }> {
+  const orders: MlOrder[] = []
+  let truncated = false
+  for (let page = 0; page < maxPages; page++) {
+    const url =
+      `${ML_API}/orders/search?seller=${encodeURIComponent(mlUserId)}` +
+      `&order.date_created.from=${encodeURIComponent(sinceIso)}&sort=date_asc` +
+      `&limit=${pageLimit}&offset=${page * pageLimit}`
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    if (!res.ok) throw new Error(`ML orders/search failed: ${res.status}`)
+    const data = (await res.json()) as { results?: MlOrder[] }
+    const results = Array.isArray(data.results) ? data.results : []
+    orders.push(...results)
+    if (results.length < pageLimit) return { orders, truncated: false }
+    if (page === maxPages - 1) truncated = true // more orders exist than we paged
+  }
+  return { orders, truncated }
+}
+
 /** Fetch one item's long description (plain text). GET /items/{id}/description. */
 export async function getItemDescription(accessToken: string, itemId: string): Promise<string> {
   const res = await fetch(`${ML_API}/items/${encodeURIComponent(itemId)}/description`, {
