@@ -28,8 +28,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
-import { applySale, isOrderApplied, type AppliedOrder } from '../../../modules/mercadolibre/sync-utils'
-import { getProductAvailableQuantity, setProductAvailableQuantity } from '../../store/_utils/inventory'
+import { applyMlOrderToLink } from '../../../lib/ml-sync-apply'
 
 const ACK = { received: true }
 
@@ -61,18 +60,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       try {
         const link = await ml.getLinkByMlItem(mlItemId)
         if (!link || link.seller_id !== conn.seller_id) continue // unlinked → clean ignore
-        const meta = (link.metadata ?? {}) as Record<string, unknown>
-        if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, orderId)) continue // already applied
-        if (quantity <= 0) {
-          await ml.markOrderAppliedForLink(link.id, orderId, 0) // record so we don't re-poll it; no stock change
-          continue
-        }
-        const current = await getProductAvailableQuantity(req.scope, link.product_id)
-        if (current == null) continue // no managed inventory to decrement
-        const next = applySale(current, quantity)
-        await setProductAvailableQuantity(req.scope, link.product_id, link.variant_id, next)
-        await ml.markOrderAppliedForLink(link.id, orderId, next)
-        applied.push(mlItemId)
+        // Atomic, exactly-once decrement (serialized per link; re-checks inside the lock).
+        const result = await applyMlOrderToLink(req.scope, ml, link, orderId, quantity)
+        if (result === 'applied') applied.push(mlItemId)
       } catch (e) {
         console.error('[ml-webhook] apply failed', mlItemId, orderId, e)
         // leave unapplied → the reconcile job's order poll recovers it

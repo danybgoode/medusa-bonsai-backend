@@ -413,21 +413,38 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   async searchSellerOrdersSince(
     sellerId: string,
     sinceIso: string,
-  ): Promise<{ id: string; items: { mlItemId: string; quantity: number }[] }[]> {
+  ): Promise<{ orders: { id: string; items: { mlItemId: string; quantity: number }[] }[]; truncated: boolean }> {
     const conn = await this.getConnection(sellerId)
-    if (!conn || conn.status !== 'connected') return []
+    if (!conn || conn.status !== 'connected') return { orders: [], truncated: false }
     const token = await this.getAccessTokenForSeller(sellerId)
-    const orders = await searchSellerOrders(token, conn.ml_user_id, sinceIso)
-    return orders
-      .map((o) => ({ id: String(o.id), items: normalizeOrderItems(o) }))
-      .filter((o) => o.id && o.items.length > 0)
+    const { orders, truncated } = await searchSellerOrders(token, conn.ml_user_id, sinceIso)
+    return {
+      orders: orders
+        .map((o) => ({ id: String(o.id), items: normalizeOrderItems(o) }))
+        .filter((o) => o.id && o.items.length > 0),
+      truncated,
+    }
   }
 
   /**
-   * Mark an ML order as applied to a link's inventory (exactly-once) AND record
-   * the resulting available as the mirror baseline. Recording `last_pushed_available`
+   * Record an ML order as applied to a link's dedupe ring WITHOUT touching the
+   * mirror baseline — for a zero-quantity order line (no stock change), so a later
+   * real available of 0 isn't mistaken for "already pushed".
+   */
+  async markOrderApplied(linkId: string, orderId: string): Promise<void> {
+    if (!orderId) return
+    const link = await this.getLink(linkId)
+    if (!link) return
+    const meta = (link.metadata ?? {}) as Record<string, unknown>
+    const ring = recordAppliedOrder(meta.ml_applied_orders as { id: string; ts: string }[] | undefined, orderId)
+    await this.updateProductMlLinks({ id: linkId, metadata: { ...meta, ml_applied_orders: ring } })
+  }
+
+  /**
+   * Mark an ML order as applied to a link's inventory (exactly-once) AND record the
+   * resulting available as the mirror baseline. Recording `last_pushed_available`
    * here (ML already reflects its own sale) stops a later equal-value outbound push
-   * from redundantly firing — and prevents the stale-skip bug where a decrement was
+   * from redundantly firing — and fixes the stale-skip bug where a decrement was
    * never reflected in the push marker.
    */
   async markOrderAppliedForLink(linkId: string, orderId: string, newAvailable: number): Promise<void> {

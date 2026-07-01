@@ -184,15 +184,25 @@ export async function searchSellerOrders(
   accessToken: string,
   mlUserId: string,
   sinceIso: string,
-  limit = 50,
-): Promise<MlOrder[]> {
-  const url =
-    `${ML_API}/orders/search?seller=${encodeURIComponent(mlUserId)}` +
-    `&order.date_created.from=${encodeURIComponent(sinceIso)}&sort=date_desc&limit=${limit}`
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
-  if (!res.ok) throw new Error(`ML orders/search failed: ${res.status}`)
-  const data = (await res.json()) as { results?: MlOrder[] }
-  return Array.isArray(data.results) ? data.results : []
+  pageLimit = 50,
+  maxPages = 10,
+): Promise<{ orders: MlOrder[]; truncated: boolean }> {
+  const orders: MlOrder[] = []
+  let truncated = false
+  for (let page = 0; page < maxPages; page++) {
+    const url =
+      `${ML_API}/orders/search?seller=${encodeURIComponent(mlUserId)}` +
+      `&order.date_created.from=${encodeURIComponent(sinceIso)}&sort=date_asc` +
+      `&limit=${pageLimit}&offset=${page * pageLimit}`
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+    if (!res.ok) throw new Error(`ML orders/search failed: ${res.status}`)
+    const data = (await res.json()) as { results?: MlOrder[] }
+    const results = Array.isArray(data.results) ? data.results : []
+    orders.push(...results)
+    if (results.length < pageLimit) return { orders, truncated: false }
+    if (page === maxPages - 1) truncated = true // more orders exist than we paged
+  }
+  return { orders, truncated }
 }
 
 /** Fetch one item's long description (plain text). GET /items/{id}/description. */

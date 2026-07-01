@@ -22,11 +22,8 @@ import { isEnabled } from '../lib/flags'
 import { tgNotifyAdmin, esc } from '../lib/telegram'
 import { MERCADOLIBRE_MODULE } from '../modules/mercadolibre'
 import MercadolibreModuleService from '../modules/mercadolibre/service'
-import { applySale, isOrderApplied, type AppliedOrder } from '../modules/mercadolibre/sync-utils'
-import {
-  getProductAvailableQuantity,
-  setProductAvailableQuantity,
-} from '../api/store/_utils/inventory'
+import { applyMlOrderToLink } from '../lib/ml-sync-apply'
+import { getProductAvailableQuantity } from '../api/store/_utils/inventory'
 
 const MAX_LINKS_PER_RUN = 2000
 const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000 // no marker yet → scan the last 24h
@@ -77,27 +74,22 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
       const since = new Date(
         (marker ? new Date(marker).getTime() : Date.now() - FIRST_RUN_LOOKBACK_MS) - OVERLAP_MS,
       ).toISOString()
-      const orders = await ml.searchSellerOrdersSince(sellerId, since)
+      const { orders, truncated } = await ml.searchSellerOrdersSince(sellerId, since)
       for (const order of orders) {
         for (const { mlItemId, quantity } of order.items) {
           const link = linkByItem.get(mlItemId)
           if (!link) continue
-          const meta = (link.metadata ?? {}) as Record<string, unknown>
-          if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, order.id)) continue
-          if (quantity <= 0) {
-            await ml.markOrderAppliedForLink(link.id, order.id, 0)
-            continue
+          const result = await applyMlOrderToLink(container as never, ml, link, order.id, quantity)
+          if (result === 'applied') {
+            recovered++
+            logger.info(`[reconcile-ml-inventory] recovered ML order ${order.id} on ${mlItemId}`)
           }
-          const current = await getProductAvailableQuantity(container as never, link.product_id)
-          if (current == null) continue
-          const next = applySale(current, quantity)
-          await setProductAvailableQuantity(container as never, link.product_id, link.variant_id, next)
-          await ml.markOrderAppliedForLink(link.id, order.id, next)
-          recovered++
-          logger.info(`[reconcile-ml-inventory] recovered ML order ${order.id} on ${mlItemId} → ${next}`)
         }
       }
-      await ml.setSellerSyncMarker(sellerId, nowIso)
+      // Only advance the marker when we drained the window; if the page was
+      // truncated (more orders than we paged), keep the old marker so the next run
+      // re-scans — no missed order is ever skipped (application is idempotent).
+      if (!truncated) await ml.setSellerSyncMarker(sellerId, nowIso)
     } catch (e) {
       alerts.push(`• seller ${esc(sellerId)}: ML order poll failed — ${esc(e instanceof Error ? e.message : String(e))}`)
     }
