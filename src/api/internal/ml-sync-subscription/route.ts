@@ -100,9 +100,18 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     .listSubscriptions({ stripe_subscription_id: body.stripe_subscription_id }, { take: 50 })
     .catch(() => [])
 
+  // Count only rows that actually updated — so `updated: 0` is HONEST (no matching
+  // row, or every update failed) rather than reporting the lookup count. The FE lapse
+  // caller checks this to catch a silent failure on a money-path status change.
+  let updated = 0
   for (const r of rows) {
-    await (subs as any).updateSubscriptions(r.id, { status: body.status }).catch(() => {})
+    try {
+      await (subs as any).updateSubscriptions(r.id, { status: body.status })
+      updated++
+    } catch (e) {
+      console.error(`[ml-sync-subscription] status update failed for ${r.id}:`, e)
+    }
   }
 
-  return res.json({ updated: rows.length })
+  return res.json({ updated })
 }
