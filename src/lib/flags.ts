@@ -67,9 +67,12 @@ let inflight: Promise<void> | null = null
 
 /**
  * Read every flag row from Supabase, bounded to ~2 s (no retries) so a hung read can't
- * stall checkout. Returns null on timeout / error / empty — the caller then fails open.
- * Uses Promise.race (not .abortSignal) so the missing-config stub — which has no
- * abortSignal — is handled uniformly (its error → null → defaults).
+ * stall checkout. Returns null on timeout / error (an EMPTY table returns [] →
+ * resolveFlag then falls open per-flag) — either way the caller fails open. Uses
+ * Promise.race (not .abortSignal) so the missing-config stub — which has no abortSignal
+ * — is handled uniformly. Note: Promise.race bounds CALLER latency, not the underlying
+ * request; a hung read is abandoned (GC'd when it settles), and the 60 s inflight
+ * de-dup caps abandoned reads to ~1/min.
  */
 async function fetchRows(): Promise<FlagRow[] | null> {
   try {
@@ -78,11 +81,17 @@ async function fetchRows(): Promise<FlagRow[] | null> {
       setTimeout(() => reject(new Error('platform_flags fetch timeout')), FLAG_FETCH_TIMEOUT_MS),
     )
     const { data, error } = (await Promise.race([query, timeout])) as {
-      data: FlagRow[] | null
+      data: Array<{ key: unknown; enabled: unknown }> | null
       error: unknown
     }
     if (error || !data) return null
-    return data.map((r) => ({ key: String(r.key), enabled: Boolean(r.enabled) }))
+    // Preserve the raw `enabled` — do NOT Boolean()-coerce. resolveFlag's
+    // `typeof === 'boolean'` guard is the SINGLE validation point, so a malformed row
+    // (e.g. the string 'false', which Boolean() would flip to true) fails OPEN to
+    // DEFAULT_FLAGS instead of coercing to a wrong definite state — critical here,
+    // where a wrong value silently enables/disables a commerce rail. `enabled` is
+    // `boolean NOT NULL` in Postgres, so this is defense-in-depth, not an expected path.
+    return data.map((r) => ({ key: String(r.key), enabled: r.enabled as boolean }))
   } catch {
     return null
   }
