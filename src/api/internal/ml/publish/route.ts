@@ -52,9 +52,23 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (action === 'close') {
     try {
       const result = await ml.closeProductMl(seller.id, product_id)
+      await ml.recordSyncEvent({
+        sellerId: seller.id,
+        kind: 'close',
+        outcome: 'ok',
+        productId: product_id,
+        mlItemId: result.ml_item_id,
+        code: result.action,
+        message: result.action === 'noop' ? 'Sin cambios (ya cerrado / sin vínculo)' : 'Publicación cerrada en Mercado Libre',
+      })
       return res.status(200).json(result)
     } catch (e) {
       const err = e as { code?: string; message?: string }
+      await ml.recordSyncEvent({
+        sellerId: seller.id, kind: 'close', outcome: 'fail', productId: product_id,
+        code: err.code ?? null, message: err.message,
+      })
+      if (err.code === 'ML_REAUTH_REQUIRED') return res.status(409).json({ message: 'MercadoLibre re-authorization required', code: 'ML_REAUTH_REQUIRED' })
       if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
       return res.status(502).json({ message: err.message ?? 'Failed to close ML item' })
     }
@@ -108,9 +122,24 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       productPublished: (product as any).status === 'published',
       categoryId: category_id ?? null,
     })
+    await ml.recordSyncEvent({
+      sellerId: seller.id,
+      kind: 'publish',
+      outcome: 'ok',
+      productId: product_id,
+      mlItemId: result.ml_item_id,
+      code: result.action,
+      message: `Mercado Libre: ${result.action} (${result.status ?? 'ok'})`,
+      metadata: { action: result.action, created: result.created },
+    })
     return res.status(200).json(result)
   } catch (e) {
     const err = e as { code?: string; message?: string }
+    await ml.recordSyncEvent({
+      sellerId: seller.id, kind: 'publish', outcome: 'fail', productId: product_id,
+      code: err.code ?? null, message: err.message,
+    })
+    if (err.code === 'ML_REAUTH_REQUIRED') return res.status(409).json({ message: 'MercadoLibre re-authorization required', code: 'ML_REAUTH_REQUIRED' })
     if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
     if (err.code === 'ML_NO_CATEGORY') return res.status(422).json({ message: 'A category is required to publish', code: 'ML_NO_CATEGORY' })
     if (err.code === 'ML_INVALID_PRODUCT') return res.status(422).json({ message: 'Product needs a title and a price to publish', code: 'ML_INVALID_PRODUCT' })

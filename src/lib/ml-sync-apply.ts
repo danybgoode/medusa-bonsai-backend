@@ -84,24 +84,46 @@ export async function applyMlOrderToLink(
   quantity: number,
 ): Promise<ApplyResult> {
   const locking = scope.resolve(Modules.LOCKING)
-  return locking.execute(
+  // The critical section holds ONLY the correctness writes (decrement + markApplied);
+  // the observability event is emitted AFTER the lock releases so a slow log insert
+  // can never extend the lock hold (cross-review: keep side effects out of the lock).
+  const applied = await locking.execute(
     `ml-sync:${link.id}`,
-    async () => {
+    async (): Promise<{ decremented: number; sellerId: string; mlItemId: string | null } | null> => {
       // Re-read the link INSIDE the lock so the applied-order check reflects any
       // concurrent apply that already committed.
       const fresh = await ml.getLink(link.id)
       const meta = (fresh?.metadata ?? {}) as Record<string, unknown>
-      if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, orderId)) return 'skipped'
+      if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, orderId)) return null
 
       if (quantity > 0) {
         const decremented = await decrementProductStock(scope, link.product_id, link.variant_id, quantity)
-        if (decremented == null) return 'skipped' // couldn't resolve inventory → retry, do NOT mark
+        if (decremented == null) return null // couldn't resolve inventory → retry, do NOT mark
         await ml.markOrderApplied(link.id, orderId)
-        return 'applied'
+        return {
+          decremented,
+          sellerId: (fresh as { seller_id?: string } | null)?.seller_id ?? '',
+          mlItemId: (fresh as { ml_item_id?: string } | null)?.ml_item_id ?? null,
+        }
       }
       await ml.markOrderApplied(link.id, orderId) // zero-qty line: record exactly-once, no stock change
-      return 'skipped'
+      return null
     },
     { timeout: 5 },
   )
+
+  if (!applied) return 'skipped'
+
+  // Best-effort activity-log write, outside the lock. Never affects correctness.
+  await ml.recordSyncEvent({
+    sellerId: applied.sellerId,
+    kind: 'sale_applied',
+    outcome: 'ok',
+    productId: link.product_id,
+    mlItemId: applied.mlItemId,
+    code: orderId,
+    message: `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId})`,
+    metadata: { sold: quantity, decremented: applied.decremented },
+  })
+  return 'applied'
 }
