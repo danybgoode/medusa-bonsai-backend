@@ -2,7 +2,7 @@
  * src/lib/flags.ts
  *
  * Backend (Medusa) half of the platform feature-flag / kill-switch layer, now backed
- * by an OWNED Supabase table (`platform_flags`) — replaces Flagsmith (epic 09 ·
+ * by an OWNED Supabase table (`platform_flags`), the in-house flag store (epic 09 ·
  * feature-flags-inhouse). Reads the SAME rows the frontend reads, so a single flip
  * governs BOTH apps. See the scope: Roadmap/09-platform-infra/feature-flags-inhouse/.
  *
@@ -10,7 +10,7 @@
  * agents/UCP and stale in-flight checkout pages hit the backend directly — so the
  * real kill must live here (checkout-options catalog + start-checkout guard).
  *
- * Design rules (non-negotiable — carried over from the Flagsmith spike):
+ * Design rules (non-negotiable — carried over from the original kill-switch spike):
  *  1. FAIL-OPEN. Every read falls back to DEFAULT_FLAGS. Supabase being unreachable,
  *     slow, or the table empty/missing must NEVER break checkout. A kill-switch
  *     defaults to ENABLED (the feature stays on if the read fails).

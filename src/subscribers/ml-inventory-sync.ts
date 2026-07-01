@@ -27,7 +27,7 @@ export default async function mlInventorySync({
   event: { data },
   container,
 }: SubscriberArgs<{ id: string }>) {
-  // Global kill-switch (fail-closed): a Flagsmith outage halts sync.
+  // Global kill-switch (fail-closed): a flag-store outage halts sync.
   if (!(await isEnabled('ml.sync_enabled'))) return
 
   const orderService = container.resolve(Modules.ORDER) as IOrderModuleService

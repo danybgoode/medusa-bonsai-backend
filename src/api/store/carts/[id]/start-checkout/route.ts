@@ -595,7 +595,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // Platform kill-switch: this is the real enforcement point. The frontend
     // hides Stripe when `checkout.stripe_enabled` is OFF, but agents/UCP and
     // stale in-flight pages POST here directly — so reject before charging.
-    // Fail-open: isEnabled → true if Flagsmith is unreachable.
+    // Fail-open: isEnabled → true if the flag store is unreachable.
     if (!(await isEnabled('checkout.stripe_enabled'))) {
       return res.status(422).json({
         message: 'El pago con tarjeta no está disponible en este momento. Usa otro método de pago.',

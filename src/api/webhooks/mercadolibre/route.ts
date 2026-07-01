@@ -38,7 +38,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { topic, user_id, resource } = body
 
   try {
-    // Global kill-switch (fail-closed) — a Flagsmith outage halts inbound sync too.
+    // Global kill-switch (fail-closed) — a flag-store outage halts inbound sync too.
     if (!(await isEnabled('ml.sync_enabled'))) return res.status(200).json({ ...ACK, ignored: 'sync_disabled' })
     // Only a sale (orders_v2) mutates stock. `items` (price/status/manual ML stock)
     // is not a delta we can apply safely → ignore for stock this sprint.

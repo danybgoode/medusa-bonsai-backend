@@ -5,10 +5,10 @@ import {
 } from '../envia-killswitch'
 
 /**
- * Envía Flagsmith kill-switch · Sprint 1 (backend enforcement).
+ * Envía kill-switch · Sprint 1 (backend enforcement).
  * The `shipping.envia_enabled` flag (enablement polarity / default OFF), applied
  * at the single decision seam shared by the quote route and the ship/label route.
- * Pure function — no Flagsmith, no DB. The flag *value* is resolved by
+ * Pure function — no flag store, no DB. The flag *value* is resolved by
  * src/lib/flags.ts (fail-open); this proves the gate decision.
  */
 
