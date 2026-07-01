@@ -17,6 +17,16 @@
  * from the custom-domain plan, so the two SKUs never collide on the shared
  * subscription_plan table (no schema migration: pure metadata discriminator).
  *
+ * Cadence (epic 07 · Sprint 3): the SAME plan carries BOTH the yearly and monthly
+ * recurring prices — one plan so the entitlement read + the proration-based
+ * monthly↔yearly switch stay trivially correct.
+ *   - `interval: 'year'` (default) — the plan's `stripe_price_id` column ($199/yr).
+ *   - `interval: 'month'` — the $25/mo price, stored in `metadata.monthly_stripe_price_id`
+ *     + `metadata.monthly_price_cents` (the column holds the yearly one). Seed the
+ *     yearly plan first; the monthly POST then merges onto it.
+ * Both POSTs merge (never clobber) the other cadence's fields, so re-seeding either
+ * one is idempotent.
+ *
  * Auth: x-internal-secret header must match MEDUSA_INTERNAL_SECRET.
  */
 
@@ -29,6 +39,7 @@ import { PLATFORM_SELLER_ID } from '../setup-custom-domain-plan/route'
 // (lib/subdomain-subscription.ts / lib/subdomain-pricing.ts).
 export const SUBDOMAIN_PLAN_KIND = 'subdomain_plan'
 const DEFAULT_PRICE_CENTS = 19900 // $199 MXN / year
+const DEFAULT_MONTHLY_CENTS = 2500 // $25 MXN / month
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const secret = req.headers['x-internal-secret']
@@ -40,11 +51,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     stripe_price_id?: string
     price_cents?: number
     label?: string
+    interval?: string
   }
 
   if (!body.stripe_price_id) {
     return res.status(400).json({ message: 'stripe_price_id is required' })
   }
+  const interval = body.interval === 'month' ? 'month' : 'year'
 
   const subs = req.scope.resolve(SUBSCRIPTIONS_MODULE) as SubscriptionsModuleService
 
@@ -56,7 +69,31 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const existing = platformPlans.find(
     (p) => (p?.metadata as Record<string, unknown> | null)?.kind === SUBDOMAIN_PLAN_KIND,
   )
+  const prevMeta = (existing?.metadata ?? {}) as Record<string, unknown>
 
+  // ── Monthly cadence (Sprint 3): a second recurring price on the SAME plan, held
+  // in metadata (the column stays the yearly one). Requires the yearly plan to
+  // exist first (the seed order guarantees it).
+  if (interval === 'month') {
+    if (!existing) {
+      return res
+        .status(400)
+        .json({ message: 'Seed the yearly subdomain plan first (interval=year), then the monthly one.' })
+    }
+    const [plan] = await (subs as any).updateSubscriptionPlans({
+      id: existing.id,
+      metadata: {
+        ...prevMeta,
+        kind: SUBDOMAIN_PLAN_KIND,
+        monthly_stripe_price_id: body.stripe_price_id,
+        monthly_price_cents: body.price_cents ?? DEFAULT_MONTHLY_CENTS,
+      },
+    })
+    return res.status(200).json({ plan, created: false })
+  }
+
+  // ── Yearly cadence (default) — the plan's stripe_price_id column. Merge the
+  // existing metadata so a re-seed never drops the monthly fields.
   const fields = {
     label: body.label ?? 'Subdominio propio',
     description: 'Tu tienda en tu-tienda.miyagisanchez.com (sitio independiente). $199 MXN/año.',
@@ -65,7 +102,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     interval: 'year' as const,
     stripe_price_id: body.stripe_price_id,
     is_active: true,
-    metadata: { kind: SUBDOMAIN_PLAN_KIND },
+    metadata: { ...prevMeta, kind: SUBDOMAIN_PLAN_KIND },
   }
 
   let plan
