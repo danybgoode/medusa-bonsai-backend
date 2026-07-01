@@ -59,6 +59,77 @@ export async function getVariantInventoryItemId(
 }
 
 /**
+ * The buyable (available) quantity for a product = Σ(stocked − reserved) across
+ * its variants' inventory levels, clamped ≥ 0. This is the number the ML stock
+ * sync pushes outward (it reflects Medusa reservations, so a placed-but-unpaid
+ * order already reduces it). Returns null when the product has no managed
+ * inventory to read (caller treats null as "nothing to sync"). Used by the
+ * inventory-sync subscriber, the reconcile job, and the seller-edit hook.
+ */
+export async function getProductAvailableQuantity(
+  scope: Scope,
+  productId: string
+): Promise<number | null> {
+  const query = scope.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: 'product',
+    fields: [
+      'id',
+      'variants.inventory_items.inventory.location_levels.stocked_quantity',
+      'variants.inventory_items.inventory.location_levels.reserved_quantity',
+    ],
+    filters: { id: productId },
+  })
+  const variants = ((data?.[0] as any)?.variants ?? []) as any[]
+  let sawLevel = false
+  let available = 0
+  for (const v of variants) {
+    for (const ii of (v?.inventory_items ?? []) as any[]) {
+      for (const lvl of (ii?.inventory?.location_levels ?? []) as any[]) {
+        sawLevel = true
+        const stocked = Number(lvl?.stocked_quantity ?? 0)
+        const reserved = Number(lvl?.reserved_quantity ?? 0)
+        available += stocked - reserved
+      }
+    }
+  }
+  if (!sawLevel) return null
+  return Math.max(0, Math.floor(available))
+}
+
+/**
+ * Set a product's available quantity (resolving its variant + stock location),
+ * clamped ≥ 0 with reservations preserved via `setVariantAvailableQuantity`. The
+ * inbound half of the ML stock sync (webhook + reconcile job) — the oversell-safe
+ * way to make Medusa reflect an external truth. Returns false when the product has
+ * no variant / no stock location to write to.
+ */
+export async function setProductAvailableQuantity(
+  scope: Scope,
+  productId: string,
+  variantId: string | null | undefined,
+  availableQuantity: number
+): Promise<boolean> {
+  const query = scope.resolve(ContainerRegistrationKeys.QUERY)
+  const { data } = await query.graph({
+    entity: 'product',
+    fields: ['id', 'variants.id', 'variants.sku', 'variants.title'],
+    filters: { id: productId },
+  })
+  const variants = ((data?.[0] as any)?.variants ?? []) as {
+    id: string
+    sku?: string | null
+    title?: string | null
+  }[]
+  const variant = variantId ? variants.find((v) => v.id === variantId) ?? variants[0] : variants[0]
+  if (!variant) return false
+  const locationId = await resolveStockLocationId(scope)
+  if (!locationId) return false
+  await setVariantAvailableQuantity(scope, variant, locationId, availableQuantity)
+  return true
+}
+
+/**
  * Ensure a variant has a linked inventory item, creating one if missing. Unlike
  * variant *creation*, flipping `manage_inventory` false→true on an existing variant
  * does NOT auto-create an inventory item, so backfill must do it here. Returns the

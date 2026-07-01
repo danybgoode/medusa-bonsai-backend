@@ -135,6 +135,22 @@ export async function getItemDetail(accessToken: string, itemId: string): Promis
   return res.json()
 }
 
+/** The order shape the stock webhook reads: which ML items a sale touched. */
+export type MlOrder = { id: string | number; order_items?: { item?: { id?: string } }[] }
+
+/**
+ * Fetch one ML order (Sprint 4 · inbound stock webhook). An `orders_v2`
+ * notification carries `/orders/{id}`; we read its line items to learn which ML
+ * item ids to reconcile against Medusa. GET /orders/{id}.
+ */
+export async function getMlOrder(accessToken: string, orderId: string): Promise<MlOrder> {
+  const res = await fetch(`${ML_API}/orders/${encodeURIComponent(orderId)}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!res.ok) throw new Error(`ML /orders/${orderId} failed: ${res.status}`)
+  return res.json()
+}
+
 /** Fetch one item's long description (plain text). GET /items/{id}/description. */
 export async function getItemDescription(accessToken: string, itemId: string): Promise<string> {
   const res = await fetch(`${ML_API}/items/${encodeURIComponent(itemId)}/description`, {
