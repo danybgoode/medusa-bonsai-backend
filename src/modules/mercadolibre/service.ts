@@ -398,29 +398,35 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     return conn ?? null
   }
 
-  /** Per-item sold quantities for one ML order (inbound webhook · orders_v2). */
-  async getMlOrderItems(sellerId: string, orderId: string): Promise<{ mlItemId: string; quantity: number }[]> {
+  /** An ML order's status + per-item sold quantities (inbound webhook · orders_v2). */
+  async getMlOrderItems(
+    sellerId: string,
+    orderId: string,
+  ): Promise<{ status: string | null; items: { mlItemId: string; quantity: number }[] }> {
     const token = await this.getAccessTokenForSeller(sellerId)
     const order = await getMlOrder(token, orderId)
-    return normalizeOrderItems(order)
+    return { status: order.status ?? null, items: normalizeOrderItems(order) }
   }
 
   /**
-   * A seller's recent ML orders since `sinceIso`, each with per-item sold
-   * quantities (reconcile job · missed-webhook recovery — US-12). Idempotency is
-   * the caller's job (per order id).
+   * A seller's recent ML orders since `sinceIso`, each with status + per-item sold
+   * quantities (reconcile job · missed-webhook recovery — US-12). Idempotency +
+   * the paid-status filter are the caller's job.
    */
   async searchSellerOrdersSince(
     sellerId: string,
     sinceIso: string,
-  ): Promise<{ orders: { id: string; items: { mlItemId: string; quantity: number }[] }[]; truncated: boolean }> {
+  ): Promise<{
+    orders: { id: string; status: string | null; items: { mlItemId: string; quantity: number }[] }[]
+    truncated: boolean
+  }> {
     const conn = await this.getConnection(sellerId)
     if (!conn || conn.status !== 'connected') return { orders: [], truncated: false }
     const token = await this.getAccessTokenForSeller(sellerId)
     const { orders, truncated } = await searchSellerOrders(token, conn.ml_user_id, sinceIso)
     return {
       orders: orders
-        .map((o) => ({ id: String(o.id), items: normalizeOrderItems(o) }))
+        .map((o) => ({ id: String(o.id), status: o.status ?? null, items: normalizeOrderItems(o) }))
         .filter((o) => o.id && o.items.length > 0),
       truncated,
     }
@@ -438,30 +444,6 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     const meta = (link.metadata ?? {}) as Record<string, unknown>
     const ring = recordAppliedOrder(meta.ml_applied_orders as { id: string; ts: string }[] | undefined, orderId)
     await this.updateProductMlLinks({ id: linkId, metadata: { ...meta, ml_applied_orders: ring } })
-  }
-
-  /**
-   * Mark an ML order as applied to a link's inventory (exactly-once) AND record the
-   * resulting available as the mirror baseline. Recording `last_pushed_available`
-   * here (ML already reflects its own sale) stops a later equal-value outbound push
-   * from redundantly firing — and fixes the stale-skip bug where a decrement was
-   * never reflected in the push marker.
-   */
-  async markOrderAppliedForLink(linkId: string, orderId: string, newAvailable: number): Promise<void> {
-    if (!orderId) return
-    const link = await this.getLink(linkId)
-    if (!link) return
-    const meta = (link.metadata ?? {}) as Record<string, unknown>
-    const ring = recordAppliedOrder(meta.ml_applied_orders as { id: string; ts: string }[] | undefined, orderId)
-    await this.updateProductMlLinks({
-      id: linkId,
-      metadata: {
-        ...meta,
-        ml_applied_orders: ring,
-        last_pushed_available: clampAvailable(newAvailable),
-        last_synced_at: new Date().toISOString(),
-      },
-    })
   }
 
   /** Read the reconcile poll marker (ISO) for a seller, or null. */

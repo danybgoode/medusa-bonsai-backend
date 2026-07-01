@@ -1,9 +1,10 @@
 import {
   clampAvailable,
-  applySale,
+  safeDecrement,
   shouldPushStock,
   isOrderApplied,
   recordAppliedOrder,
+  isSoldOrderStatus,
   APPLIED_ORDERS_CAP,
   type AppliedOrder,
 } from '../sync-utils'
@@ -28,28 +29,39 @@ describe('clampAvailable', () => {
   })
 })
 
-describe('applySale — the delta model (no oversell, no negative)', () => {
-  it('decrements available by the sold quantity', () => {
-    expect(applySale(5, 2)).toBe(3)
-    expect(applySale(5, 5)).toBe(0)
+describe('safeDecrement — the relative, reservation-safe decrement (no oversell)', () => {
+  it('removes the sold quantity from available (stocked − reserved)', () => {
+    expect(safeDecrement(5, 0, 2)).toBe(2) // available 5, sell 2 → remove 2
+    expect(safeDecrement(5, 1, 2)).toBe(2) // available 4, sell 2 → remove 2 (reservation preserved)
   })
-  it('never goes negative (a sale larger than stock floors at 0)', () => {
-    expect(applySale(2, 3)).toBe(0)
-    expect(applySale(0, 1)).toBe(0)
+  it('caps the decrement at available so available never goes negative / reservations are honored', () => {
+    expect(safeDecrement(5, 1, 6)).toBe(4) // available 4, sell 6 → remove only 4 (leaves reserved intact)
+    expect(safeDecrement(3, 3, 2)).toBe(0) // available 0 (all reserved) → remove nothing
+    expect(safeDecrement(0, 0, 1)).toBe(0)
   })
-  it('CONCURRENT CASE: an ML sale applied to a Medusa already reduced by a Miyagi sale resolves correctly', () => {
-    // baseline 5; Miyagi sold 3 → Medusa 2; then the ML sale of 2 applies as a delta.
-    // min(2,3) would wrongly leave 2 (a 2-unit oversell); the delta yields the true 0.
-    expect(applySale(2, 2)).toBe(0)
-  })
-  it('INVARIANT: over a grid, applySale(a,b) ≤ a and ≥ 0', () => {
-    for (let a = -2; a <= 15; a++) {
-      for (let b = -2; b <= 15; b++) {
-        const out = applySale(a, b)
-        expect(out).toBeLessThanOrEqual(clampAvailable(a))
-        expect(out).toBeGreaterThanOrEqual(0)
+  it('INVARIANT: over a grid, 0 ≤ decrement ≤ available and ≤ soldQty (never over-removes)', () => {
+    for (let s = -2; s <= 12; s++) {
+      for (let r = -2; r <= 12; r++) {
+        for (let q = -2; q <= 12; q++) {
+          const d = safeDecrement(s, r, q)
+          const available = Math.max(0, clampAvailable(s) - clampAvailable(r))
+          expect(d).toBeGreaterThanOrEqual(0)
+          expect(d).toBeLessThanOrEqual(available)
+          expect(d).toBeLessThanOrEqual(clampAvailable(q))
+        }
       }
     }
+  })
+})
+
+describe('isSoldOrderStatus — only a paid order consumes stock', () => {
+  it('paid → true; everything else → false', () => {
+    expect(isSoldOrderStatus('paid')).toBe(true)
+    expect(isSoldOrderStatus('payment_required')).toBe(false)
+    expect(isSoldOrderStatus('cancelled')).toBe(false)
+    expect(isSoldOrderStatus('confirmed')).toBe(false)
+    expect(isSoldOrderStatus(null)).toBe(false)
+    expect(isSoldOrderStatus(undefined)).toBe(false)
   })
 })
 

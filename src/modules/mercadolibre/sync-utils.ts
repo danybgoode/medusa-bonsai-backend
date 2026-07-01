@@ -20,14 +20,17 @@ export function clampAvailable(n: number | null | undefined): number {
 }
 
 /**
- * Apply a sale of `soldQty` units to a current available quantity (US-11). The
- * result is `available − soldQty`, clamped ≥ 0 — a sale can never drive stock
- * negative, and because it is a **delta** it composes correctly with sales on the
- * other channel and with Medusa's own reservations (unlike setting an absolute
- * from the other system, which would double-count or clobber local state).
+ * How many units to actually remove from `stocked` for an ML sale of `soldQty`,
+ * given the current `stocked`/`reserved` (US-11). It's the sold qty, capped at the
+ * current **available** (`stocked − reserved`) so the relative decrement never
+ * drives available below 0 and always honors Medusa's own reservations. This is
+ * the exact clamp `decrementProductStock` applies — proving it here proves the
+ * runtime primitive (not just a mirror). Under-decrement (sold > available) is the
+ * safe direction; the drift alert surfaces the residual cross-channel oversell.
  */
-export function applySale(available: number, soldQty: number): number {
-  return clampAvailable(clampAvailable(available) - clampAvailable(soldQty))
+export function safeDecrement(stocked: number, reserved: number, soldQty: number): number {
+  const available = Math.max(0, clampAvailable(stocked) - clampAvailable(reserved))
+  return Math.min(clampAvailable(soldQty), available)
 }
 
 /**
@@ -53,7 +56,17 @@ export function shouldPushStock(args: {
 // to the `resource` path — unsafe: distinct sales of the same item share a
 // resource and would be dropped as replays.)
 export type AppliedOrder = { id: string; ts: string }
-export const APPLIED_ORDERS_CAP = 100
+export const APPLIED_ORDERS_CAP = 500
+
+/**
+ * Only a **paid** ML order has consumed stock. Applying every order id (incl.
+ * `payment_required` / `cancelled` / `invalid`) would wrongly, permanently reduce
+ * Medusa inventory. A later `paid` notification for the same order applies then
+ * (idempotent per order id). ML cancellation/refund restock is out of S4 scope.
+ */
+export function isSoldOrderStatus(status: string | null | undefined): boolean {
+  return status === 'paid'
+}
 
 export function isOrderApplied(applied: AppliedOrder[] | null | undefined, orderId: string): boolean {
   if (!orderId) return false

@@ -29,6 +29,7 @@ import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
 import { applyMlOrderToLink } from '../../../lib/ml-sync-apply'
+import { isSoldOrderStatus } from '../../../modules/mercadolibre/sync-utils'
 
 const ACK = { received: true }
 
@@ -54,7 +55,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       return res.status(200).json({ ...ACK, ignored: 'seller_disabled' })
     }
 
-    const soldItems = await ml.getMlOrderItems(conn.seller_id, orderId)
+    const { status, items: soldItems } = await ml.getMlOrderItems(conn.seller_id, orderId)
+    // Only a paid order consumed stock — a payment_required/cancelled order must not
+    // decrement (a later `paid` notification applies then, idempotent per order id).
+    if (!isSoldOrderStatus(status)) return res.status(200).json({ ...ACK, ignored: 'not_paid' })
+
     const applied: string[] = []
     for (const { mlItemId, quantity } of soldItems) {
       try {

@@ -23,6 +23,7 @@ import { tgNotifyAdmin, esc } from '../lib/telegram'
 import { MERCADOLIBRE_MODULE } from '../modules/mercadolibre'
 import MercadolibreModuleService from '../modules/mercadolibre/service'
 import { applyMlOrderToLink } from '../lib/ml-sync-apply'
+import { isSoldOrderStatus } from '../modules/mercadolibre/sync-utils'
 import { getProductAvailableQuantity } from '../api/store/_utils/inventory'
 
 const MAX_LINKS_PER_RUN = 2000
@@ -76,6 +77,7 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
       ).toISOString()
       const { orders, truncated } = await ml.searchSellerOrdersSince(sellerId, since)
       for (const order of orders) {
+        if (!isSoldOrderStatus(order.status)) continue // only paid orders decrement
         for (const { mlItemId, quantity } of order.items) {
           const link = linkByItem.get(mlItemId)
           if (!link) continue
