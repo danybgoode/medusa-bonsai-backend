@@ -23,10 +23,11 @@
  */
 import { Flagsmith, DefaultFlag } from 'flagsmith-nodejs'
 
-export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled'
+export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled' | 'ml.sync_enabled'
 
 /**
- * Fail-open defaults. Two polarities live here — both fail-open, to opposite values:
+ * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
+ * that can't cause harm on a Flagsmith outage:
  *  - KILL-SWITCH (`checkout.stripe_enabled`): default `true`. The feature keeps
  *    working if Flagsmith is down (disabling is the deliberate action).
  *  - ENABLEMENT (`shipping.envia_enabled`): default `false`. The Envia.com
@@ -34,10 +35,18 @@ export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled'
  *    push checkout/fulfillment at an unfunded carrier; OFF ⇒ arranged-delivery /
  *    manual-carrier fallback. Enabling is the deliberate action (flip ON in
  *    Flagsmith the instant the platform Envía account is funded).
+ *  - KILL-SWITCH, FAIL-CLOSED (`ml.sync_enabled`): default `false`. This is a
+ *    kill-switch by function (flip OFF to instantly halt the two-way ML stock
+ *    sync) but deliberately defaults to `false` — UNLIKE the usual kill-switch
+ *    default-`true`. The blast radius of sync running unsupervised (overselling
+ *    on ML or in Miyagi) is worse than the feature being off, so a Flagsmith
+ *    outage must HALT sync, not run it uncontrolled. Enabling is the deliberate
+ *    action, and a per-seller enable (on the ML connection) must ALSO be on.
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
   'shipping.envia_enabled': false,
+  'ml.sync_enabled': false,
 }
 
 const ENV_KEY = process.env.FLAGSMITH_ENVIRONMENT_KEY
