@@ -53,8 +53,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return res.status(200).json({ items, paging, skipped })
   } catch (e) {
     const err = e as { code?: string; message?: string }
+    if (err.code === 'ML_REAUTH_REQUIRED') {
+      return res.status(409).json({ message: 'MercadoLibre re-authorization required', code: 'ML_REAUTH_REQUIRED' })
+    }
     if (err.code === 'ML_NOT_CONNECTED') {
-      return res.status(409).json({ message: 'No active MercadoLibre connection' })
+      return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
     }
     return res.status(502).json({ message: err.message ?? 'Failed to fetch ML items' })
   }

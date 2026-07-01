@@ -72,6 +72,9 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
 
   for (const [sellerId, links] of bySeller) {
     const linkByItem = new Map(links.map((l) => [l.ml_item_id, l]))
+    let sRecovered = 0
+    let sMirrored = 0
+    let sAlerts = 0
 
     // ── 1. Recover missed ML sales (delta, idempotent per order id) ──────────────
     const nowIso = new Date().toISOString()
@@ -91,6 +94,7 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
           const result = await applyMlOrderToLink(container as never, ml, link, order.id, quantity)
           if (result === 'applied') {
             recovered++
+            sRecovered++
             logger.info(`[reconcile-ml-inventory] recovered ML order ${order.id} on ${mlItemId}`)
           }
         }
@@ -104,6 +108,7 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
       await ml.setSellerSyncMarker(sellerId, nextMarker)
     } catch (e) {
       alerts.push(`• seller ${esc(sellerId)}: ML order poll failed — ${esc(e instanceof Error ? e.message : String(e))}`)
+      sAlerts++
     }
 
     // ── 2. Mirror Medusa → ML (ML never advertises more than Medusa's truth) ─────
@@ -112,13 +117,27 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
         const current = await getProductAvailableQuantity(container as never, link.product_id)
         if (current == null) continue
         const r = await ml.pushStockToMl({ productId: link.product_id, availableQuantity: current, force: true })
-        if (r.action === 'push') mirrored++
+        if (r.action === 'push') { mirrored++; sMirrored++ }
         if (r.action === 'deferred') {
           alerts.push(`• ${esc(link.ml_item_id)}: ML push deferred (rate-limit / error)`)
+          sAlerts++
         }
       } catch (e) {
         alerts.push(`• ${esc(link.ml_item_id)}: mirror push failed — ${esc(e instanceof Error ? e.message : String(e))}`)
+        sAlerts++
       }
+    }
+
+    // Per-seller reconcile summary for the activity log (only when something
+    // happened — an idle pass shouldn't spam the log). Best-effort.
+    if (sRecovered > 0 || sMirrored > 0 || sAlerts > 0) {
+      await ml.recordSyncEvent({
+        sellerId,
+        kind: 'reconcile',
+        outcome: sAlerts > 0 ? 'fail' : 'ok',
+        message: `Reconciliación: ${sRecovered} recuperadas, ${sMirrored} sincronizadas${sAlerts > 0 ? `, ${sAlerts} con problemas` : ''}`,
+        metadata: { recovered: sRecovered, mirrored: sMirrored, alerts: sAlerts },
+      })
     }
   }
 

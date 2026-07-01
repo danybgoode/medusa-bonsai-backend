@@ -97,6 +97,16 @@ export async function applyMlOrderToLink(
         const decremented = await decrementProductStock(scope, link.product_id, link.variant_id, quantity)
         if (decremented == null) return 'skipped' // couldn't resolve inventory → retry, do NOT mark
         await ml.markOrderApplied(link.id, orderId)
+        await ml.recordSyncEvent({
+          sellerId: (fresh as { seller_id?: string } | null)?.seller_id ?? '',
+          kind: 'sale_applied',
+          outcome: 'ok',
+          productId: link.product_id,
+          mlItemId: (fresh as { ml_item_id?: string } | null)?.ml_item_id ?? null,
+          code: orderId,
+          message: `Venta de Mercado Libre aplicada: -${decremented} (orden ${orderId})`,
+          metadata: { sold: quantity, decremented },
+        })
         return 'applied'
       }
       await ml.markOrderApplied(link.id, orderId) // zero-qty line: record exactly-once, no stock change

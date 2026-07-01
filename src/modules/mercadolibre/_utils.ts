@@ -66,15 +66,35 @@ export function shouldRefresh(
 }
 
 // ── Connection health (for the seller status surface) ──────────────────────────
-export type MlHealthState = 'connected' | 'stale' | 'expired' | 'disconnected'
+// `needs_reauth` is the Sprint-5 addition: a token refresh actually FAILED (the
+// refresh token was revoked/expired), so the seller must reconnect. It outranks
+// every time-derived state — a `connected`-looking `expires_at` is meaningless
+// once the refresh token is dead, and this is exactly the silent-failure this
+// sprint fixes.
+export type MlHealthState = 'connected' | 'stale' | 'expired' | 'needs_reauth' | 'disconnected'
 export type MlHealth = { state: MlHealthState; label_es: string }
 
+/** True when the connection metadata flags a failed refresh (needs re-auth). */
+export function connectionNeedsReauth(
+  metadata: Record<string, unknown> | null | undefined,
+): boolean {
+  return !!metadata && (metadata as Record<string, unknown>).needs_reauth === true
+}
+
 export function deriveConnectionHealth(
-  conn: { status?: string | null; expires_at?: Date | string | number | null } | null | undefined,
+  conn:
+    | { status?: string | null; expires_at?: Date | string | number | null; metadata?: Record<string, unknown> | null }
+    | null
+    | undefined,
   now: number = Date.now(),
 ): MlHealth {
   if (!conn || conn.status === 'disconnected' || conn.expires_at == null) {
     return { state: 'disconnected', label_es: 'No conectado' }
+  }
+  // A failed refresh outranks the time-derived states: the tokens look valid but
+  // aren't, and only a reconnect fixes it.
+  if (connectionNeedsReauth(conn.metadata)) {
+    return { state: 'needs_reauth', label_es: 'Reconecta tu cuenta de Mercado Libre' }
   }
   const exp = toMillis(conn.expires_at)
   if (Number.isNaN(exp) || exp <= now) {
@@ -213,4 +233,86 @@ export function isDuplicateLink(existing: LinkPair[], candidate: LinkPair): bool
   return existing.some(
     (l) => l.product_id === candidate.product_id || l.ml_item_id === candidate.ml_item_id,
   )
+}
+
+// ── Sync activity log — event shaping (Sprint 5 · US-13) ────────────────────────
+// Pure, framework-free: validate + normalise + REDACT a sync event before it is
+// appended. Observability only — never read to make a sync decision.
+
+export const SYNC_EVENT_KINDS = [
+  'token_refresh',
+  'publish',
+  'close',
+  'stock_push',
+  'sale_applied',
+  'reconcile',
+  'import',
+] as const
+export type SyncEventKind = (typeof SYNC_EVENT_KINDS)[number]
+export type SyncEventOutcome = 'ok' | 'fail'
+
+export const MAX_SYNC_MESSAGE_LEN = 300
+
+export type SyncEventInput = {
+  sellerId: string
+  kind: string
+  outcome: string
+  productId?: string | null
+  mlItemId?: string | null
+  code?: string | null
+  message?: unknown
+  metadata?: Record<string, unknown> | null
+}
+
+export type ShapedSyncEvent = {
+  seller_id: string
+  product_id: string | null
+  ml_item_id: string | null
+  kind: SyncEventKind
+  outcome: SyncEventOutcome
+  code: string | null
+  message: string | null
+  metadata: Record<string, unknown> | null
+}
+
+/**
+ * Strip anything token-shaped out of a free-text message. ML access/refresh tokens
+ * are `APP_USR-…` / `TG-…` / `APP-…` strings; a bearer header or a raw JWT could
+ * also leak into an error string. Belt-and-suspenders: even though we never log the
+ * token, an upstream error body could echo it.
+ */
+export function redactSyncMessage(raw: unknown): string | null {
+  if (raw == null) return null
+  let s = typeof raw === 'string' ? raw : String(raw)
+  s = s
+    .replace(/\bAPP[_-]USR-[\w-]+/gi, '[redacted]')
+    .replace(/\bTG-[\w-]+/gi, '[redacted]')
+    .replace(/\bBearer\s+[\w.\-]+/gi, 'Bearer [redacted]')
+    .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[redacted]') // JWT
+    .trim()
+  if (!s) return null
+  return s.length > MAX_SYNC_MESSAGE_LEN ? `${s.slice(0, MAX_SYNC_MESSAGE_LEN - 1)}…` : s
+}
+
+/**
+ * Validate + normalise a sync event for append. Returns null when the input is
+ * unusable (missing seller, unknown kind) so the caller silently drops it rather
+ * than writing garbage — the log must never itself throw into a sync path.
+ */
+export function summarizeSyncEvent(input: SyncEventInput): ShapedSyncEvent | null {
+  const sellerId = (input.sellerId ?? '').trim()
+  if (!sellerId) return null
+  if (!SYNC_EVENT_KINDS.includes(input.kind as SyncEventKind)) return null
+  const outcome: SyncEventOutcome = input.outcome === 'fail' ? 'fail' : 'ok'
+  const code = input.code ? String(input.code).slice(0, 80) : null
+  return {
+    seller_id: sellerId,
+    product_id: input.productId ? String(input.productId) : null,
+    ml_item_id: input.mlItemId ? String(input.mlItemId) : null,
+    kind: input.kind as SyncEventKind,
+    outcome,
+    code,
+    message: redactSyncMessage(input.message),
+    metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : null,
+  }
 }

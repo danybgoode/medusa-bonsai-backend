@@ -1,6 +1,7 @@
 import { MedusaService } from '@medusajs/framework/utils'
 import MlConnection from './models/ml-connection'
 import ProductMlLink from './models/product-ml-link'
+import MlSyncEvent from './models/ml-sync-event'
 import {
   exchangeCode,
   refreshMlToken,
@@ -30,9 +31,11 @@ import {
   buildMlItemPayload,
   decidePublishAction,
   mlSiteForCountry,
+  summarizeSyncEvent,
   type SanitizedMlConnection,
   type MlPublishInput,
   type MlPublishAction,
+  type SyncEventInput,
 } from './_utils'
 import { clampAvailable, shouldPushStock, recordAppliedOrder } from './sync-utils'
 
@@ -42,7 +45,31 @@ import { clampAvailable, shouldPushStock, recordAppliedOrder } from './sync-util
  * access token is only ever materialised in-memory by `getAccessTokenForSeller`,
  * never logged, never returned over the wire.
  */
-class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlLink }) {
+class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlLink, MlSyncEvent }) {
+  // ── Sprint 5 · US-13: sync activity log (append-only, best-effort) ──────────────
+
+  /**
+   * Append one activity-log row. **Best-effort by contract**: a failed log write
+   * is swallowed (logged to stderr) and MUST never propagate — the log is pure
+   * observability and can never be allowed to break a sync action. Shapes +
+   * redacts via the pure `summarizeSyncEvent`.
+   */
+  async recordSyncEvent(input: SyncEventInput): Promise<void> {
+    try {
+      const shaped = summarizeSyncEvent(input)
+      if (!shaped) return
+      await this.createMlSyncEvents(shaped)
+    } catch (e) {
+      console.error('[ml] recordSyncEvent failed (non-fatal):', e instanceof Error ? e.message : e)
+    }
+  }
+
+  /** Recent activity-log rows for a seller, newest first (the seller status surface). */
+  async listSyncEvents(sellerId: string, opts: { limit?: number } = {}) {
+    const take = Math.min(Math.max(opts.limit ?? 50, 1), 200)
+    return this.listMlSyncEvents({ seller_id: sellerId }, { take, order: { created_at: 'DESC' } })
+  }
+
   // ── US-1: connection ──────────────────────────────────────────────────────────
 
   /** Exchange an OAuth code and upsert the encrypted connection keyed to the seller. */
@@ -64,9 +91,13 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     }
 
     const existing = await this.getConnection(sellerId)
+    // On reconnect, clear any needs-reauth/last-error flag but PRESERVE the rest of
+    // the connection metadata (per-seller sync enable, reconcile marker).
+    const existingMeta = (existing?.metadata ?? {}) as Record<string, unknown>
+    const { needs_reauth: _nr, last_error: _le, last_error_at: _lea, ...keepMeta } = existingMeta
     const row = existing
-      ? await this.updateMlConnections({ id: existing.id, ...fields })
-      : await this.createMlConnections(fields)
+      ? await this.updateMlConnections({ id: existing.id, ...fields, metadata: keepMeta })
+      : await this.createMlConnections({ ...fields, metadata: null })
     return sanitizeConnection(Array.isArray(row) ? row[0] : row)
   }
 
@@ -89,14 +120,28 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
 
     if (shouldRefresh(conn.expires_at)) {
       const refresh = decryptToken(conn.refresh_token_enc)
-      if (!refresh) throw new Error('ML refresh token unavailable')
-      const tokens = await refreshMlToken(refresh)
+      if (!refresh) throw await this.flagReauth(conn, 'refresh token unavailable')
+      let tokens
+      try {
+        tokens = await refreshMlToken(refresh)
+      } catch (e) {
+        // A revoked/expired refresh token throws here. BEFORE Sprint 5 this
+        // propagated uncaught → a generic 502 while the connection still read
+        // `connected`, so the seller never learned they must reconnect. Now we
+        // persist a `needs_reauth` flag (surfaced by `deriveConnectionHealth`) and
+        // rethrow a tagged code the routes map to a distinct re-auth response.
+        throw await this.flagReauth(conn, e instanceof Error ? e.message : String(e))
+      }
+      const meta = (conn.metadata ?? {}) as Record<string, unknown>
+      // Clear any stale reauth flag on a successful refresh (preserve the rest).
+      const { needs_reauth: _nr, last_error: _le, last_error_at: _lea, ...keepMeta } = meta
       await this.updateMlConnections({
         id: conn.id,
         access_token_enc: encryptToken(tokens.access_token),
         refresh_token_enc: encryptToken(tokens.refresh_token),
         expires_at: new Date(Date.now() + tokens.expires_in * 1000),
         last_refreshed_at: new Date(),
+        metadata: keepMeta,
       })
       return tokens.access_token
     }
@@ -104,6 +149,35 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     const token = decryptToken(conn.access_token_enc)
     if (!token) throw new Error('ML access token unavailable')
     return token
+  }
+
+  /**
+   * Mark a connection as needing re-auth (a failed token refresh), record the
+   * activity-log event, and RETURN a tagged `ML_REAUTH_REQUIRED` error for the
+   * caller to throw. Persisting the flag is best-effort — even if it fails we still
+   * surface the tagged error so the request doesn't silently 502.
+   */
+  private async flagReauth(
+    conn: { id: string; seller_id: string; metadata?: Record<string, unknown> | null },
+    reason: string,
+  ): Promise<Error & { code: string }> {
+    try {
+      const meta = (conn.metadata ?? {}) as Record<string, unknown>
+      await this.updateMlConnections({
+        id: conn.id,
+        metadata: { ...meta, needs_reauth: true, last_error: 'ML_REAUTH_REQUIRED', last_error_at: new Date().toISOString() },
+      })
+    } catch (e) {
+      console.error('[ml] flagReauth persist failed (non-fatal):', e instanceof Error ? e.message : e)
+    }
+    await this.recordSyncEvent({
+      sellerId: conn.seller_id,
+      kind: 'token_refresh',
+      outcome: 'fail',
+      code: 'ML_REAUTH_REQUIRED',
+      message: `Token refresh failed — reconnect required (${reason})`,
+    })
+    return Object.assign(new Error('MercadoLibre re-authorization required'), { code: 'ML_REAUTH_REQUIRED' })
   }
 
   /** Clear the connection: mark disconnected and wipe the encrypted token fields. */
@@ -527,6 +601,16 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
         id: link.id,
         metadata: { ...meta, sync_pending: true, last_sync_error: msg, last_synced_at: new Date().toISOString() },
       })
+      await this.recordSyncEvent({
+        sellerId: link.seller_id,
+        kind: 'stock_push',
+        outcome: 'fail',
+        code: 'deferred',
+        productId: args.productId,
+        mlItemId: link.ml_item_id,
+        message: `Stock push deferred (rate-limit / error): ${msg}`,
+        metadata: { available },
+      })
       return { action: 'deferred', ml_item_id: link.ml_item_id, available }
     }
 
@@ -539,6 +623,15 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
         last_sync_error: null,
         last_synced_at: new Date().toISOString(),
       },
+    })
+    await this.recordSyncEvent({
+      sellerId: link.seller_id,
+      kind: 'stock_push',
+      outcome: 'ok',
+      productId: args.productId,
+      mlItemId: link.ml_item_id,
+      message: `Existencia sincronizada a Mercado Libre: ${available}`,
+      metadata: { available },
     })
     return { action: 'push', ml_item_id: link.ml_item_id, available }
   }
