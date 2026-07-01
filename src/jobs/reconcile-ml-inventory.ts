@@ -1,15 +1,19 @@
 /**
  * Scheduled job: reconcile-ml-inventory (Sprint 4 · US-12)
  *
- * The safety net + drift-healer for the two-way ML stock sync. Every 30 min, for
- * each linked + sync-enabled item, it compares Medusa's available quantity with
- * ML's and corrects any drift toward the **conservative minimum** (`reconcileStock`
- * — never exceeds either side, never negative → no oversell). It also retries any
- * outbound push that a live subscriber deferred on an ML rate-limit, and raises a
- * **drift alert** (Telegram) when it can't read/reconcile a linked item.
+ * The safety net for the two-way ML stock sync, in the delta / source-of-truth
+ * model. Every 30 min, for each linked + sync-enabled seller it:
+ *   1. **Recovers missed ML sales** — polls the seller's ML orders since the last
+ *      marker and applies any not-yet-applied order as a delta (idempotent per ML
+ *      order id), exactly as the webhook would. This is what makes the sync robust
+ *      against a dropped/never-delivered webhook.
+ *   2. **Mirrors Medusa → ML** — pushes each linked item's current Medusa available
+ *      (the source of truth, after all reservations + applied ML sales) out to ML,
+ *      so ML never advertises more than truly exists.
+ * Raises a **drift alert** (Telegram) when it can't reach ML for a seller/item.
  *
  * Gated by the global `ml.sync_enabled` kill-switch: flip it OFF and this job (and
- * all live sync) halts immediately. Ships with the live sync, not after it.
+ * all live sync) halts immediately.
  */
 
 import { MedusaContainer } from '@medusajs/framework/types'
@@ -18,86 +22,107 @@ import { isEnabled } from '../lib/flags'
 import { tgNotifyAdmin, esc } from '../lib/telegram'
 import { MERCADOLIBRE_MODULE } from '../modules/mercadolibre'
 import MercadolibreModuleService from '../modules/mercadolibre/service'
-import { reconcileStock } from '../modules/mercadolibre/sync-utils'
+import { applySale, isOrderApplied, type AppliedOrder } from '../modules/mercadolibre/sync-utils'
 import {
   getProductAvailableQuantity,
   setProductAvailableQuantity,
 } from '../api/store/_utils/inventory'
 
 const MAX_LINKS_PER_RUN = 2000
+const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000 // no marker yet → scan the last 24h
+const OVERLAP_MS = 5 * 60 * 1000 // re-scan a small window each run (idempotent) to cover boundaries
+
+type Link = {
+  id: string
+  seller_id: string
+  product_id: string
+  variant_id?: string | null
+  ml_item_id: string
+  metadata?: Record<string, unknown> | null
+}
 
 export default async function reconcileMlInventoryJob(container: MedusaContainer) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
-
-  // Global kill-switch (fail-closed): OFF halts all reconciliation.
-  if (!(await isEnabled('ml.sync_enabled'))) return
+  if (!(await isEnabled('ml.sync_enabled'))) return // global kill-switch (fail-closed)
 
   const ml = container.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
-  const links = await ml.listProductMlLinks({}, { take: MAX_LINKS_PER_RUN })
+  const allLinks = (await ml.listProductMlLinks({}, { take: MAX_LINKS_PER_RUN })) as Link[]
 
-  // Cache the per-seller enable so we resolve each connection at most once.
-  const syncEnabled = new Map<string, boolean>()
-  const isSellerOn = async (sellerId: string): Promise<boolean> => {
-    if (!syncEnabled.has(sellerId)) syncEnabled.set(sellerId, await ml.isSellerSyncEnabled(sellerId))
-    return syncEnabled.get(sellerId)!
+  // Active links grouped by sync-enabled seller.
+  const bySeller = new Map<string, Link[]>()
+  const enabledCache = new Map<string, boolean>()
+  for (const link of allLinks) {
+    const meta = (link.metadata ?? {}) as Record<string, unknown>
+    if (meta.ml_status && meta.ml_status !== 'active') continue
+    if (!enabledCache.has(link.seller_id)) {
+      enabledCache.set(link.seller_id, await ml.isSellerSyncEnabled(link.seller_id))
+    }
+    if (!enabledCache.get(link.seller_id)) continue
+    const list = bySeller.get(link.seller_id) ?? []
+    list.push(link)
+    bySeller.set(link.seller_id, list)
   }
 
-  let checked = 0
-  let corrected = 0
-  const driftAlerts: string[] = []
+  let recovered = 0
+  let mirrored = 0
+  const alerts: string[] = []
 
-  for (const link of links as {
-    id: string
-    seller_id: string
-    product_id: string
-    variant_id?: string | null
-    ml_item_id: string
-    metadata?: Record<string, unknown> | null
-  }[]) {
-    const meta = (link.metadata ?? {}) as Record<string, unknown>
-    // Only reconcile an ACTIVE linked item for a sync-enabled seller.
-    if (meta.ml_status && meta.ml_status !== 'active') continue
-    if (!(await isSellerOn(link.seller_id))) continue
+  for (const [sellerId, links] of bySeller) {
+    const linkByItem = new Map(links.map((l) => [l.ml_item_id, l]))
 
+    // ── 1. Recover missed ML sales (delta, idempotent per order id) ──────────────
+    const nowIso = new Date().toISOString()
     try {
-      const medusaAvailable = await getProductAvailableQuantity(container as never, link.product_id)
-      if (medusaAvailable == null) continue // no managed inventory to reconcile
-
-      const mlAvailable = await ml.getMlItemAvailable(link.seller_id, link.ml_item_id)
-      if (mlAvailable == null) {
-        driftAlerts.push(`• ${esc(link.ml_item_id)}: no ML quantity readable (Medusa=${medusaAvailable})`)
-        continue
+      const marker = await ml.getSellerSyncMarker(sellerId)
+      const since = new Date(
+        (marker ? new Date(marker).getTime() : Date.now() - FIRST_RUN_LOOKBACK_MS) - OVERLAP_MS,
+      ).toISOString()
+      const orders = await ml.searchSellerOrdersSince(sellerId, since)
+      for (const order of orders) {
+        for (const { mlItemId, quantity } of order.items) {
+          const link = linkByItem.get(mlItemId)
+          if (!link) continue
+          const meta = (link.metadata ?? {}) as Record<string, unknown>
+          if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, order.id)) continue
+          if (quantity <= 0) {
+            await ml.markOrderAppliedForLink(link.id, order.id, 0)
+            continue
+          }
+          const current = await getProductAvailableQuantity(container as never, link.product_id)
+          if (current == null) continue
+          const next = applySale(current, quantity)
+          await setProductAvailableQuantity(container as never, link.product_id, link.variant_id, next)
+          await ml.markOrderAppliedForLink(link.id, order.id, next)
+          recovered++
+          logger.info(`[reconcile-ml-inventory] recovered ML order ${order.id} on ${mlItemId} → ${next}`)
+        }
       }
-
-      checked++
-      const { target, drift } = reconcileStock({ medusaAvailable, mlAvailable })
-      if (drift === 0) continue
-
-      // Correct the side(s) that sit above the conservative target. Never raises a
-      // side (that could oversell) — only lowers toward the safe minimum.
-      if (target < medusaAvailable) {
-        await setProductAvailableQuantity(container as never, link.product_id, link.variant_id, target)
-      }
-      if (target < mlAvailable) {
-        await ml.pushStockToMl({ productId: link.product_id, availableQuantity: target, force: true })
-      }
-      corrected++
-      logger.info(
-        `[reconcile-ml-inventory] healed ${link.ml_item_id}: Medusa=${medusaAvailable} ML=${mlAvailable} → ${target}`,
-      )
+      await ml.setSellerSyncMarker(sellerId, nowIso)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      driftAlerts.push(`• ${esc(link.ml_item_id)}: reconcile failed — ${esc(msg)}`)
+      alerts.push(`• seller ${esc(sellerId)}: ML order poll failed — ${esc(e instanceof Error ? e.message : String(e))}`)
+    }
+
+    // ── 2. Mirror Medusa → ML (ML never advertises more than Medusa's truth) ─────
+    for (const link of links) {
+      try {
+        const current = await getProductAvailableQuantity(container as never, link.product_id)
+        if (current == null) continue
+        const r = await ml.pushStockToMl({ productId: link.product_id, availableQuantity: current, force: true })
+        if (r.action === 'push') mirrored++
+        if (r.action === 'deferred') {
+          alerts.push(`• ${esc(link.ml_item_id)}: ML push deferred (rate-limit / error)`)
+        }
+      } catch (e) {
+        alerts.push(`• ${esc(link.ml_item_id)}: mirror push failed — ${esc(e instanceof Error ? e.message : String(e))}`)
+      }
     }
   }
 
-  if (corrected > 0 || driftAlerts.length > 0) {
-    logger.info(`[reconcile-ml-inventory] checked=${checked} corrected=${corrected} alerts=${driftAlerts.length}`)
+  if (recovered > 0 || mirrored > 0 || alerts.length > 0) {
+    logger.info(`[reconcile-ml-inventory] recovered=${recovered} mirrored=${mirrored} alerts=${alerts.length}`)
   }
-  if (driftAlerts.length > 0) {
-    await tgNotifyAdmin(
-      `⚠️ <b>ML stock drift</b> — ${driftAlerts.length} item(s) could not be reconciled:\n${driftAlerts.slice(0, 20).join('\n')}`,
-    )
+  if (alerts.length > 0) {
+    await tgNotifyAdmin(`⚠️ <b>ML stock sync</b> — ${alerts.length} issue(s):\n${alerts.slice(0, 20).join('\n')}`)
   }
 }
 

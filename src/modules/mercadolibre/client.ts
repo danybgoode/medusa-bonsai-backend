@@ -135,13 +135,21 @@ export async function getItemDetail(accessToken: string, itemId: string): Promis
   return res.json()
 }
 
-/** The order shape the stock webhook reads: which ML items a sale touched. */
-export type MlOrder = { id: string | number; order_items?: { item?: { id?: string } }[] }
+/**
+ * The order shape the stock sync reads: which ML items a sale touched, and **how
+ * many units** of each (the delta we apply to Medusa). `id` is the exactly-once
+ * key.
+ */
+export type MlOrder = {
+  id: string | number
+  status?: string
+  order_items?: { item?: { id?: string }; quantity?: number }[]
+}
 
 /**
  * Fetch one ML order (Sprint 4 · inbound stock webhook). An `orders_v2`
  * notification carries `/orders/{id}`; we read its line items to learn which ML
- * item ids to reconcile against Medusa. GET /orders/{id}.
+ * items sold and how many. GET /orders/{id}.
  */
 export async function getMlOrder(accessToken: string, orderId: string): Promise<MlOrder> {
   const res = await fetch(`${ML_API}/orders/${encodeURIComponent(orderId)}`, {
@@ -149,6 +157,42 @@ export async function getMlOrder(accessToken: string, orderId: string): Promise<
   })
   if (!res.ok) throw new Error(`ML /orders/${orderId} failed: ${res.status}`)
   return res.json()
+}
+
+/**
+ * Aggregate an ML order into per-item sold quantities (summing multiple line
+ * items for the same item). Pure — the delta the inbound sync applies to Medusa.
+ */
+export function normalizeOrderItems(order: MlOrder): { mlItemId: string; quantity: number }[] {
+  const byItem = new Map<string, number>()
+  for (const oi of order.order_items ?? []) {
+    const id = oi?.item?.id
+    if (typeof id !== 'string' || !id) continue
+    const qty = typeof oi.quantity === 'number' && Number.isFinite(oi.quantity) ? Math.max(0, Math.trunc(oi.quantity)) : 0
+    byItem.set(id, (byItem.get(id) ?? 0) + qty)
+  }
+  return [...byItem.entries()].map(([mlItemId, quantity]) => ({ mlItemId, quantity }))
+}
+
+/**
+ * Search a seller's recent ML orders (Sprint 4 · reconcile job — the missed-
+ * webhook recovery). Returns paid/confirmed orders created since `sinceIso`, most
+ * recent first, so the reconcile job can apply any sale whose webhook never
+ * arrived (idempotent per order id). GET /orders/search.
+ */
+export async function searchSellerOrders(
+  accessToken: string,
+  mlUserId: string,
+  sinceIso: string,
+  limit = 50,
+): Promise<MlOrder[]> {
+  const url =
+    `${ML_API}/orders/search?seller=${encodeURIComponent(mlUserId)}` +
+    `&order.date_created.from=${encodeURIComponent(sinceIso)}&sort=date_desc&limit=${limit}`
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+  if (!res.ok) throw new Error(`ML orders/search failed: ${res.status}`)
+  const data = (await res.json()) as { results?: MlOrder[] }
+  return Array.isArray(data.results) ? data.results : []
 }
 
 /** Fetch one item's long description (plain text). GET /items/{id}/description. */

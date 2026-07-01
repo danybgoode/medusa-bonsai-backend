@@ -1,53 +1,40 @@
 /**
  * Mercado Libre module · Sprint 4 pure stock-sync helpers (the deterministic
- * backend gate — no DB, no network). These are the correctness core of the
- * two-way stock sync: the oversell-safe reconcile decision, the outbound
- * idempotency predicate, and the replay-safe inbound dedupe ring.
+ * backend gate — no DB, no network). The correctness core of the two-way stock
+ * sync, built on the only model that is provably oversell-safe: **event/delta
+ * application against a single source of truth (Medusa).**
  *
- * The one invariant everything protects: **no path can oversell.** A reconciled
- * quantity never exceeds either observed side and is never negative, so neither
- * channel can ever sell stock the other already sold.
+ * Why delta, not absolute-reconcile: comparing the two channels' absolute
+ * available quantities cannot recover the truth when both sold independently
+ * (baseline 5, ML sells 2 → 3, Miyagi sells 3 → 2; the true remaining is 0, but
+ * `min(3,2)=2` — a 2-unit oversell). Instead each channel's **sale** is applied
+ * to Medusa as a delta **exactly once** (idempotent per ML order id), and ML is
+ * mirrored from Medusa. Applying the ML sale (−2) to a Medusa already at 2 yields
+ * 0 — correct, and it composes with Medusa's own reservations.
  */
 
-/**
- * Clamp any quantity to a safe non-negative integer. The last line of defense:
- * a negative/NaN/fractional value must never reach a Medusa inventory write or an
- * ML `available_quantity`.
- */
+/** Clamp any quantity to a safe non-negative integer (the last line of defense). */
 export function clampAvailable(n: number | null | undefined): number {
   if (n == null || !Number.isFinite(n)) return 0
   return Math.max(0, Math.trunc(n))
 }
 
 /**
- * The oversell-safe reconcile decision (US-12). Given the two observed available
- * quantities (Medusa vs ML), the reconciled remaining is the **conservative
- * minimum** — it never exceeds either side and is never negative. So when both
- * sides moved near-simultaneously (each recorded a sale the other hasn't yet),
- * reconciling to the minimum guarantees neither channel oversells.
- *
- *  - equal          → no change, drift 0
- *  - ML lower       → an ML sale Medusa hasn't recorded → pull Medusa down to ML
- *  - Medusa lower   → a Miyagi sale ML hasn't reflected → push Medusa down to ML
- *  - both moved     → target = min(both); neither can sell what the other sold
- *
- * `drift` is how far apart the two sides were (for the drift alert / logging).
+ * Apply a sale of `soldQty` units to a current available quantity (US-11). The
+ * result is `available − soldQty`, clamped ≥ 0 — a sale can never drive stock
+ * negative, and because it is a **delta** it composes correctly with sales on the
+ * other channel and with Medusa's own reservations (unlike setting an absolute
+ * from the other system, which would double-count or clobber local state).
  */
-export function reconcileStock(args: { medusaAvailable: number; mlAvailable: number }): {
-  target: number
-  drift: number
-} {
-  const m = clampAvailable(args.medusaAvailable)
-  const l = clampAvailable(args.mlAvailable)
-  return { target: Math.min(m, l), drift: Math.abs(m - l) }
+export function applySale(available: number, soldQty: number): number {
+  return clampAvailable(clampAvailable(available) - clampAvailable(soldQty))
 }
 
 /**
- * Outbound idempotency (US-10): only push to ML when the available quantity
- * actually changed since the last successful push. Pushing the *current absolute*
- * value means a burst of N changes collapses to the latest value, and a
- * retried/duplicated trigger with an unchanged value is a no-op — so the same
- * stock state is never written to ML twice.
+ * Outbound idempotency (US-10): only mirror Medusa's available to ML when the
+ * value changed since the last successful push. Pushing the current absolute
+ * value means a burst collapses to the latest value and a retried trigger is a
+ * no-op — so the same stock state is never written to ML twice.
  */
 export function shouldPushStock(args: {
   currentAvailable: number
@@ -58,34 +45,34 @@ export function shouldPushStock(args: {
   return cur !== clampAvailable(args.lastPushedAvailable)
 }
 
-// ── Replay-safe inbound dedupe (US-11) ──────────────────────────────────────────
-// ML can redeliver a webhook notification; each carries a notification id. We keep
-// a bounded ring of processed ids on the linkage metadata so a redelivery is a
-// no-op (the events-ticketing reconcileOrderTickets pattern).
-export type ProcessedEvent = { id: string; ts: string }
-export const PROCESSED_EVENTS_CAP = 50
+// ── Exactly-once sale application (US-11) ────────────────────────────────────────
+// The dedupe key is the ML **order id** — the natural exactly-once key for a sale.
+// A bounded ring of applied order ids rides the linkage metadata, so the same ML
+// order decrements Medusa once no matter how many notifications (or reconcile
+// polls) surface it. (Earlier drafts keyed on the notification `_id` and fell back
+// to the `resource` path — unsafe: distinct sales of the same item share a
+// resource and would be dropped as replays.)
+export type AppliedOrder = { id: string; ts: string }
+export const APPLIED_ORDERS_CAP = 100
 
-export function isProcessedNotification(
-  processed: ProcessedEvent[] | null | undefined,
-  id: string,
-): boolean {
-  if (!id) return false
-  return Array.isArray(processed) && processed.some((e) => e.id === id)
+export function isOrderApplied(applied: AppliedOrder[] | null | undefined, orderId: string): boolean {
+  if (!orderId) return false
+  return Array.isArray(applied) && applied.some((o) => o.id === orderId)
 }
 
 /**
- * Append a processed-notification id to the bounded ring (drops the oldest past
- * the cap). A blank id or an already-present id returns the list unchanged, so
- * the ring only ever grows on a genuinely new notification.
+ * Append an applied ML order id to the bounded ring (drops the oldest past the
+ * cap). A blank or already-present id returns the list unchanged, so the ring
+ * only grows on a genuinely new order.
  */
-export function recordProcessedNotification(
-  processed: ProcessedEvent[] | null | undefined,
-  id: string,
+export function recordAppliedOrder(
+  applied: AppliedOrder[] | null | undefined,
+  orderId: string,
   now: string = new Date().toISOString(),
-  cap: number = PROCESSED_EVENTS_CAP,
-): ProcessedEvent[] {
-  const base = Array.isArray(processed) ? processed : []
-  if (!id || base.some((e) => e.id === id)) return base
-  const next = [...base, { id, ts: now }]
+  cap: number = APPLIED_ORDERS_CAP,
+): AppliedOrder[] {
+  const base = Array.isArray(applied) ? applied : []
+  if (!orderId || base.some((o) => o.id === orderId)) return base
+  const next = [...base, { id: orderId, ts: now }]
   return next.length > cap ? next.slice(next.length - cap) : next
 }

@@ -9,6 +9,8 @@ import {
   getItemDetail,
   getItemDescription,
   getMlOrder,
+  searchSellerOrders,
+  normalizeOrderItems,
   toMlImportItem,
   publishItem,
   updateMlItem,
@@ -32,7 +34,7 @@ import {
   type MlPublishInput,
   type MlPublishAction,
 } from './_utils'
-import { clampAvailable, shouldPushStock, recordProcessedNotification } from './sync-utils'
+import { clampAvailable, shouldPushStock, recordAppliedOrder } from './sync-utils'
 
 /**
  * Mercado Libre module service. Owns the OAuth connection (US-1) and the
@@ -396,38 +398,68 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     return conn ?? null
   }
 
-  /**
-   * The authoritative available_quantity of a seller's ML item (inbound reconcile
-   * — US-11). We re-fetch from ML rather than trusting the webhook body's numbers.
-   * Returns null when ML doesn't report a quantity. Clamped ≥ 0.
-   */
-  async getMlItemAvailable(sellerId: string, mlItemId: string): Promise<number | null> {
-    const token = await this.getAccessTokenForSeller(sellerId)
-    const detail = await getItemDetail(token, mlItemId)
-    return typeof detail.available_quantity === 'number' ? clampAvailable(detail.available_quantity) : null
-  }
-
-  /** The ML item ids a given ML order touched (inbound webhook · orders_v2 topic). */
-  async getMlOrderItemIds(sellerId: string, orderId: string): Promise<string[]> {
+  /** Per-item sold quantities for one ML order (inbound webhook · orders_v2). */
+  async getMlOrderItems(sellerId: string, orderId: string): Promise<{ mlItemId: string; quantity: number }[]> {
     const token = await this.getAccessTokenForSeller(sellerId)
     const order = await getMlOrder(token, orderId)
-    const ids = (order.order_items ?? [])
-      .map((oi) => oi?.item?.id)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0)
-    return [...new Set(ids)]
+    return normalizeOrderItems(order)
   }
 
-  /** Append a processed ML notification id to a link's replay-safe dedupe ring. */
-  async markLinkNotificationProcessed(linkId: string, notifId: string): Promise<void> {
-    if (!notifId) return
+  /**
+   * A seller's recent ML orders since `sinceIso`, each with per-item sold
+   * quantities (reconcile job · missed-webhook recovery — US-12). Idempotency is
+   * the caller's job (per order id).
+   */
+  async searchSellerOrdersSince(
+    sellerId: string,
+    sinceIso: string,
+  ): Promise<{ id: string; items: { mlItemId: string; quantity: number }[] }[]> {
+    const conn = await this.getConnection(sellerId)
+    if (!conn || conn.status !== 'connected') return []
+    const token = await this.getAccessTokenForSeller(sellerId)
+    const orders = await searchSellerOrders(token, conn.ml_user_id, sinceIso)
+    return orders
+      .map((o) => ({ id: String(o.id), items: normalizeOrderItems(o) }))
+      .filter((o) => o.id && o.items.length > 0)
+  }
+
+  /**
+   * Mark an ML order as applied to a link's inventory (exactly-once) AND record
+   * the resulting available as the mirror baseline. Recording `last_pushed_available`
+   * here (ML already reflects its own sale) stops a later equal-value outbound push
+   * from redundantly firing — and prevents the stale-skip bug where a decrement was
+   * never reflected in the push marker.
+   */
+  async markOrderAppliedForLink(linkId: string, orderId: string, newAvailable: number): Promise<void> {
+    if (!orderId) return
     const link = await this.getLink(linkId)
     if (!link) return
     const meta = (link.metadata ?? {}) as Record<string, unknown>
-    const ring = recordProcessedNotification(
-      meta.ml_processed_events as { id: string; ts: string }[] | undefined,
-      notifId,
-    )
-    await this.updateProductMlLinks({ id: linkId, metadata: { ...meta, ml_processed_events: ring } })
+    const ring = recordAppliedOrder(meta.ml_applied_orders as { id: string; ts: string }[] | undefined, orderId)
+    await this.updateProductMlLinks({
+      id: linkId,
+      metadata: {
+        ...meta,
+        ml_applied_orders: ring,
+        last_pushed_available: clampAvailable(newAvailable),
+        last_synced_at: new Date().toISOString(),
+      },
+    })
+  }
+
+  /** Read the reconcile poll marker (ISO) for a seller, or null. */
+  async getSellerSyncMarker(sellerId: string): Promise<string | null> {
+    const conn = await this.getConnection(sellerId)
+    const meta = (conn?.metadata ?? {}) as Record<string, unknown>
+    return typeof meta.orders_synced_at === 'string' ? meta.orders_synced_at : null
+  }
+
+  /** Advance the reconcile poll marker (ISO) for a seller. */
+  async setSellerSyncMarker(sellerId: string, iso: string): Promise<void> {
+    const conn = await this.getConnection(sellerId)
+    if (!conn) return
+    const meta = (conn.metadata ?? {}) as Record<string, unknown>
+    await this.updateMlConnections({ id: conn.id, metadata: { ...meta, orders_synced_at: iso } })
   }
 
   /** Set the per-seller stock-sync enable. No connection ⇒ ML_NOT_CONNECTED. */

@@ -1,54 +1,52 @@
 /**
  * Public webhook — inbound Mercado Libre stock sync (Sprint 4 · US-11). ML calls
- * this URL on each order/item change; we adjust the linked Medusa product's
- * inventory so Miyagi reflects ML sales and never oversells.
+ * this URL on each order/item change; an ML **sale** decrements the linked Medusa
+ * product's inventory so Miyagi reflects it and never oversells.
  *
- *   POST /webhooks/mercadolibre   body: { topic, user_id, resource, _id? }
+ *   POST /webhooks/mercadolibre   body: { topic, user_id, resource }
  *
- * Design (mirrors the despachobonsai reference shape, made Medusa-native +
- * oversell-safe):
- *  - Trust nothing in the body's numbers — we re-fetch the item's authoritative
- *    `available_quantity` from ML via the seller's token.
- *  - Apply via `setVariantAvailableQuantity` (available = stocked − reserved,
- *    clamped ≥ 0) so a Medusa reservation is never clobbered and stock never goes
- *    negative.
- *  - Replay-safe: a redelivered notification id is a no-op (per-link dedupe ring).
+ * Design — **delta, exactly-once, Medusa as source of truth** (NOT absolute
+ * reconcile, which can't recover concurrent independent sales):
+ *  - Act on the `orders_v2` topic (a sale). Read the order's per-item sold
+ *    quantities and **decrement** Medusa available by that many units
+ *    (`applySale` → clamped ≥ 0, preserves Medusa reservations). A delta composes
+ *    correctly with a simultaneous Miyagi sale; an absolute set would double-count.
+ *  - **Idempotent per ML order id** (a bounded ring of applied order ids on the
+ *    linkage): a redelivered notification, or the reconcile poll surfacing the
+ *    same order, applies once. (The order id — not the notification `_id` — is the
+ *    exactly-once key; distinct sales of one item must not collapse to a replay.)
  *  - Gated by the global `ml.sync_enabled` kill-switch + the per-seller enable;
- *    an unknown user / unlinked item / disabled seller is ignored cleanly.
- *  - Always ACK 200 (except a malformed body → 400) so ML stops retrying; any
- *    processing gap is healed by the reconcile job.
+ *    unknown user / unlinked item / disabled seller → clean 200 ignore.
+ *  - Always ACK 200 (except a malformed body); the reconcile job recovers any gap.
  *
  * Public by design (ML has no shared secret): validated by mapping `user_id` to a
- * connected seller and re-reading state from ML. The seller's token never leaves
- * the module.
+ * connected seller and reading the order from ML with that seller's token. The
+ * token never leaves the module.
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
-import { isProcessedNotification, type ProcessedEvent } from '../../../modules/mercadolibre/sync-utils'
-import { setProductAvailableQuantity } from '../../store/_utils/inventory'
+import { applySale, isOrderApplied, type AppliedOrder } from '../../../modules/mercadolibre/sync-utils'
+import { getProductAvailableQuantity, setProductAvailableQuantity } from '../../store/_utils/inventory'
 
 const ACK = { received: true }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const body = (req.body ?? {}) as {
-    topic?: string
-    user_id?: string | number
-    resource?: string
-    _id?: string
-    id?: string
-  }
+  const body = (req.body ?? {}) as { topic?: string; user_id?: string | number; resource?: string }
   const { topic, user_id, resource } = body
-  const notifId = String(body._id ?? body.id ?? resource ?? '')
 
   try {
     // Global kill-switch (fail-closed) — a Flagsmith outage halts inbound sync too.
     if (!(await isEnabled('ml.sync_enabled'))) return res.status(200).json({ ...ACK, ignored: 'sync_disabled' })
-    if (!user_id || (topic !== 'orders_v2' && topic !== 'items')) {
-      return res.status(200).json({ ...ACK, ignored: 'topic' })
-    }
+    // Only a sale (orders_v2) mutates stock. `items` (price/status/manual ML stock)
+    // is not a delta we can apply safely → ignore for stock this sprint.
+    if (!user_id || topic !== 'orders_v2') return res.status(200).json({ ...ACK, ignored: 'topic' })
+
+    const orderMatch = /\/orders\/([^/?]+)/.exec(resource ?? '')
+    if (!orderMatch) return res.status(200).json({ ...ACK, ignored: 'no_order' })
+    const orderId = orderMatch[1]
 
     const ml = req.scope.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
     const conn = await ml.getConnectionByMlUser(String(user_id))
@@ -57,43 +55,33 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       return res.status(200).json({ ...ACK, ignored: 'seller_disabled' })
     }
 
-    // Which ML item(s) did this notification touch?
-    let itemIds: string[] = []
-    if (topic === 'items') {
-      const m = /\/items\/([^/?]+)/.exec(resource ?? '')
-      if (m) itemIds = [m[1]]
-    } else {
-      const m = /\/orders\/([^/?]+)/.exec(resource ?? '')
-      if (m) itemIds = await ml.getMlOrderItemIds(conn.seller_id, m[1])
-    }
-
+    const soldItems = await ml.getMlOrderItems(conn.seller_id, orderId)
     const applied: string[] = []
-    for (const itemId of itemIds) {
+    for (const { mlItemId, quantity } of soldItems) {
       try {
-        const link = await ml.getLinkByMlItem(itemId)
+        const link = await ml.getLinkByMlItem(mlItemId)
         if (!link || link.seller_id !== conn.seller_id) continue // unlinked → clean ignore
         const meta = (link.metadata ?? {}) as Record<string, unknown>
-        if (isProcessedNotification(meta.ml_processed_events as ProcessedEvent[] | undefined, notifId)) {
-          continue // redelivery → no-op
+        if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, orderId)) continue // already applied
+        if (quantity <= 0) {
+          await ml.markOrderAppliedForLink(link.id, orderId, 0) // record so we don't re-poll it; no stock change
+          continue
         }
-        const mlAvailable = await ml.getMlItemAvailable(conn.seller_id, itemId)
-        if (mlAvailable != null) {
-          await setProductAvailableQuantity(req.scope, link.product_id, link.variant_id, mlAvailable)
-          applied.push(itemId)
-        }
-        // Only mark processed once the fetch+apply succeeded, so a transient ML
-        // failure is retried (or healed by the reconcile job), not silently eaten.
-        await ml.markLinkNotificationProcessed(link.id, notifId)
+        const current = await getProductAvailableQuantity(req.scope, link.product_id)
+        if (current == null) continue // no managed inventory to decrement
+        const next = applySale(current, quantity)
+        await setProductAvailableQuantity(req.scope, link.product_id, link.variant_id, next)
+        await ml.markOrderAppliedForLink(link.id, orderId, next)
+        applied.push(mlItemId)
       } catch (e) {
-        console.error('[ml-webhook] item apply failed', itemId, e)
-        // leave unprocessed → reconcile job heals it
+        console.error('[ml-webhook] apply failed', mlItemId, orderId, e)
+        // leave unapplied → the reconcile job's order poll recovers it
       }
     }
 
     return res.status(200).json({ ...ACK, applied })
   } catch (e) {
     console.error('[ml-webhook] error', e)
-    // ACK anyway (ML would otherwise hammer retries); the reconcile job is the net.
     return res.status(200).json({ ...ACK, error: true })
   }
 }

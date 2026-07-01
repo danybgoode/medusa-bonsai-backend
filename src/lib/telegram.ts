@@ -29,12 +29,15 @@ export function esc(s: string): string {
 export async function tgNotifyAdmin(text: string): Promise<void> {
   if (!BOT_TOKEN || !CHAT_ID) return
   try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: 'HTML' }),
       signal: AbortSignal.timeout(5000),
     })
+    // A bad bot token / chat id returns 4xx with a 200-shaped fetch — log a bounded
+    // warning so a silently-broken alert channel is diagnosable (never throws).
+    if (!res.ok) console.warn(`[telegram] sendMessage failed: ${res.status}`)
   } catch {
     // observability only — never surface to the caller
   }
