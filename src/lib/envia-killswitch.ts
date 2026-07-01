@@ -3,7 +3,7 @@
  *
  * Pure decision seam for the platform Envía kill-switch (`shipping.envia_enabled`,
  * enablement polarity / default OFF — see lib/flags.ts). Kept free of Medusa /
- * Flagsmith imports so it is directly unit-testable (mirrors the frontend
+ * flag-store imports so it is directly unit-testable (mirrors the frontend
  * lib/checkout-killswitch.ts pattern).
  *
  * The flag is the REAL enforcement: the routes resolve `isEnabled(...)` once, hand

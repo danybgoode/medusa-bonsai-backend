@@ -3,7 +3,7 @@ import { resolveSellerPaymentMethods } from '../payment-methods'
 /**
  * Feature flags & kill-switches · Sprint 2 (backend enforcement).
  * The `checkout.stripe_enabled` kill-switch, applied at the single source of
- * truth for the payment catalog. Pure function — no Flagsmith, no DB. The flag
+ * truth for the payment catalog. Pure function — no flag store, no DB. The flag
  * *value* is resolved by src/lib/flags.ts (fail-open); this proves the filter.
  */
 
