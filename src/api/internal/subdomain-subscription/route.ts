@@ -7,11 +7,15 @@
  * The frontend bridge (lib/subdomain-subscription.ts) calls this to derive
  * `hasActiveSubscription` for the subdomain entitlement seam.
  *
- * Returns `{ active, plan_id, stripe_price_id, price_cents }` — `active` is true
- * iff a Subscription row exists for that seller against the platform subdomain plan
- * with status in LIVE_STATUSES. The plan fields let the frontend's buy route build
- * the Stripe checkout in the same call. Fails closed to `{ active: false }` on any
- * lookup error (the paywall simply stays gated — never wrongly grants).
+ * Returns `{ active, plan_id, stripe_price_id, price_cents, monthly_stripe_price_id,
+ * monthly_price_cents, subscription_id }` — `active` is true iff a Subscription row
+ * exists for that seller against the platform subdomain plan with status in
+ * LIVE_STATUSES. The plan fields (yearly column + the Sprint-3 monthly price held in
+ * plan metadata) let the frontend's buy route build the Stripe checkout in either
+ * cadence in the same call; `subscription_id` is the LIVE row's Stripe subscription
+ * id, which the monthly↔yearly switch route prorates. Fails closed to
+ * `{ active: false }` on any lookup error (the paywall simply stays gated — never
+ * wrongly grants).
  *
  * PATCH /internal/subdomain-subscription  { stripe_subscription_id, status }
  *   — flips the Medusa Subscription status by its Stripe id (lapse path: the
@@ -66,11 +70,20 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       .catch(() => [])
 
     const active = rows.some((r) => LIVE_STATUSES.has(r?.status))
+    const liveRow = rows.find((r) => LIVE_STATUSES.has(r?.status))
+    const meta = (plan.metadata ?? {}) as Record<string, unknown>
     return res.json({
       active,
       plan_id: plan.id,
       stripe_price_id: plan.stripe_price_id ?? null,
       price_cents: plan.price_cents ?? null,
+      // Sprint 3 — the monthly recurring price ($25/mo) lives on the same plan's
+      // metadata (the column stays the yearly one); null until the monthly seed runs.
+      monthly_stripe_price_id: (meta.monthly_stripe_price_id as string | undefined) ?? null,
+      monthly_price_cents: (meta.monthly_price_cents as number | undefined) ?? null,
+      // The LIVE Stripe subscription id — the switch route retrieves it to prorate
+      // the price swap on the same subscription (no gap, no double charge).
+      subscription_id: liveRow?.stripe_subscription_id ?? null,
     })
   } catch (e) {
     console.error('[subdomain-subscription] lookup failed:', e)
