@@ -295,6 +295,26 @@ export function redactSyncMessage(raw: unknown): string | null {
 }
 
 /**
+ * Redact any string VALUE inside a (shallow) metadata object — so a caller-provided
+ * metadata field (the POST /internal/ml/events path accepts arbitrary metadata) can
+ * never bypass the "no tokens" guarantee that `redactSyncMessage` enforces for the
+ * message. Non-string values (numbers/booleans — the only shape our own callers use)
+ * pass through untouched; nested objects are dropped (kept flat + safe).
+ */
+export function redactSyncMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (!metadata || typeof metadata !== 'object') return null
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(metadata)) {
+    if (typeof v === 'string') out[k] = redactSyncMessage(v)
+    else if (typeof v === 'number' || typeof v === 'boolean' || v === null) out[k] = v
+    // objects/arrays/functions are dropped — metadata stays a flat scalar bag
+  }
+  return out
+}
+
+/**
  * Validate + normalise a sync event for append. Returns null when the input is
  * unusable (missing seller, unknown kind) so the caller silently drops it rather
  * than writing garbage — the log must never itself throw into a sync path.
@@ -313,6 +333,6 @@ export function summarizeSyncEvent(input: SyncEventInput): ShapedSyncEvent | nul
     outcome,
     code,
     message: redactSyncMessage(input.message),
-    metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : null,
+    metadata: redactSyncMetadata(input.metadata),
   }
 }

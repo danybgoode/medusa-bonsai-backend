@@ -5,6 +5,7 @@ import {
   connectionNeedsReauth,
   summarizeSyncEvent,
   redactSyncMessage,
+  redactSyncMetadata,
   MAX_SYNC_MESSAGE_LEN,
   SYNC_EVENT_KINDS,
 } from '../_utils'
@@ -97,5 +98,23 @@ describe('redactSyncMessage — never leak a token (S5)', () => {
   it('returns null for empty / nullish', () => {
     expect(redactSyncMessage(null)).toBeNull()
     expect(redactSyncMessage('   ')).toBeNull()
+  })
+})
+
+describe('redactSyncMetadata — caller-provided metadata cannot leak a token (S5)', () => {
+  it('redacts a token in a string value but keeps scalars', () => {
+    const out = redactSyncMetadata({ note: 'token APP_USR-999-secret', available: 5, ok: true, none: null })
+    expect(out).toEqual({ note: expect.stringContaining('[redacted]'), available: 5, ok: true, none: null })
+    expect(JSON.stringify(out)).not.toMatch(/APP_USR-999/)
+  })
+
+  it('drops nested objects/arrays (stays a flat scalar bag)', () => {
+    const out = redactSyncMetadata({ good: 1, nested: { token: 'APP_USR-1-x' }, arr: ['APP_USR-2-y'] })
+    expect(out).toEqual({ good: 1 })
+  })
+
+  it('returns null for nullish', () => {
+    expect(redactSyncMetadata(null)).toBeNull()
+    expect(redactSyncMetadata(undefined)).toBeNull()
   })
 })
