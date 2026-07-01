@@ -45,6 +45,11 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
 
   const ml = container.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
   const allLinks = (await ml.listProductMlLinks({}, { take: MAX_LINKS_PER_RUN })) as Link[]
+  if (allLinks.length === MAX_LINKS_PER_RUN) {
+    // Links beyond the cap are silently unreconciled this run — surface it so the
+    // cap can be raised / paginated before it bites (well above current volume).
+    logger.warn(`[reconcile-ml-inventory] link cap ${MAX_LINKS_PER_RUN} reached — some links may be skipped`)
+  }
 
   // Active links grouped by sync-enabled seller.
   const bySeller = new Map<string, Link[]>()
@@ -76,7 +81,9 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
         (marker ? new Date(marker).getTime() : Date.now() - FIRST_RUN_LOOKBACK_MS) - OVERLAP_MS,
       ).toISOString()
       const { orders, truncated } = await ml.searchSellerOrdersSince(sellerId, since)
+      let newestDate = ''
       for (const order of orders) {
+        if (order.date_created && order.date_created > newestDate) newestDate = order.date_created
         if (!isSoldOrderStatus(order.status)) continue // only paid orders decrement
         for (const { mlItemId, quantity } of order.items) {
           const link = linkByItem.get(mlItemId)
@@ -88,10 +95,13 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
           }
         }
       }
-      // Only advance the marker when we drained the window; if the page was
-      // truncated (more orders than we paged), keep the old marker so the next run
-      // re-scans — no missed order is ever skipped (application is idempotent).
-      if (!truncated) await ml.setSellerSyncMarker(sellerId, nowIso)
+      // Advance the marker so the next run makes progress. When the page was
+      // truncated (more orders than we paged, sorted date_asc), advance only to the
+      // NEWEST order we actually processed — so the next run continues from there
+      // instead of re-fetching the same first page forever (idempotent re-scan of
+      // the overlap). Otherwise advance to now.
+      const nextMarker = truncated ? newestDate || since : nowIso
+      await ml.setSellerSyncMarker(sellerId, nextMarker)
     } catch (e) {
       alerts.push(`• seller ${esc(sellerId)}: ML order poll failed — ${esc(e instanceof Error ? e.message : String(e))}`)
     }

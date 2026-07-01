@@ -30,13 +30,19 @@ type LinkRef = { id: string; product_id: string; variant_id?: string | null }
 
 export type ApplyResult = 'applied' | 'skipped'
 
-/** Decrement a linked product's physical stock by an ML sale (relative, reservation-safe). */
+/**
+ * Decrement a linked product's physical stock by an ML sale (relative,
+ * reservation-safe). Returns the units decremented, or **null** when the inventory
+ * item / stock location couldn't be resolved (a transient/config gap) — the caller
+ * must NOT mark the order applied in that case, so the reconcile poll retries it
+ * rather than permanently losing the decrement (which would overstate stock).
+ */
 async function decrementProductStock(
   scope: Scope,
   productId: string,
   variantId: string | null | undefined,
   soldQty: number,
-): Promise<number> {
+): Promise<number | null> {
   const qty = Math.max(0, Math.floor(soldQty))
   if (qty === 0) return 0
   const query = scope.resolve(ContainerRegistrationKeys.QUERY)
@@ -45,20 +51,22 @@ async function decrementProductStock(
     const { data } = await query.graph({ entity: 'product', fields: ['variants.id'], filters: { id: productId } })
     vId = ((data?.[0] as any)?.variants?.[0] as { id?: string } | undefined)?.id
   }
-  if (!vId) return 0
+  if (!vId) return null // unresolved → retry, don't mark applied
   const inventoryItemId = await getVariantInventoryItemId(scope, vId)
-  if (!inventoryItemId) return 0
+  if (!inventoryItemId) return null
   const locationId = await resolveStockLocationId(scope)
-  if (!locationId) return 0
+  if (!locationId) return null
 
   const inventoryService = scope.resolve(Modules.INVENTORY)
   const [level] = await inventoryService.listInventoryLevels({
     inventory_item_id: inventoryItemId,
     location_id: locationId,
   })
+  // Resolved: a decrement capped at available (0 if already sold out on our side) is
+  // still "done" — the shortfall vs soldQty is a real cross-channel discrepancy, not
+  // something a retry can fix — so we return a number (≥ 0) and the caller marks it.
   const decrement = safeDecrement(Number(level?.stocked_quantity ?? 0), Number(level?.reserved_quantity ?? 0), qty)
-  if (decrement <= 0) return 0
-  await inventoryService.adjustInventory(inventoryItemId, locationId, -decrement)
+  if (decrement > 0) await inventoryService.adjustInventory(inventoryItemId, locationId, -decrement)
   return decrement
 }
 
@@ -85,9 +93,14 @@ export async function applyMlOrderToLink(
       const meta = (fresh?.metadata ?? {}) as Record<string, unknown>
       if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, orderId)) return 'skipped'
 
-      if (quantity > 0) await decrementProductStock(scope, link.product_id, link.variant_id, quantity)
-      await ml.markOrderApplied(link.id, orderId) // exactly-once; no baseline write
-      return quantity > 0 ? 'applied' : 'skipped'
+      if (quantity > 0) {
+        const decremented = await decrementProductStock(scope, link.product_id, link.variant_id, quantity)
+        if (decremented == null) return 'skipped' // couldn't resolve inventory → retry, do NOT mark
+        await ml.markOrderApplied(link.id, orderId)
+        return 'applied'
+      }
+      await ml.markOrderApplied(link.id, orderId) // zero-qty line: record exactly-once, no stock change
+      return 'skipped'
     },
     { timeout: 5 },
   )

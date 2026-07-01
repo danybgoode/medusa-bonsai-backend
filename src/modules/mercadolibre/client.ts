@@ -143,6 +143,7 @@ export async function getItemDetail(accessToken: string, itemId: string): Promis
 export type MlOrder = {
   id: string | number
   status?: string
+  date_created?: string
   order_items?: { item?: { id?: string }; quantity?: number }[]
 }
 

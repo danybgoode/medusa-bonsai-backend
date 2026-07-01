@@ -417,7 +417,12 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     sellerId: string,
     sinceIso: string,
   ): Promise<{
-    orders: { id: string; status: string | null; items: { mlItemId: string; quantity: number }[] }[]
+    orders: {
+      id: string
+      status: string | null
+      date_created: string | null
+      items: { mlItemId: string; quantity: number }[]
+    }[]
     truncated: boolean
   }> {
     const conn = await this.getConnection(sellerId)
@@ -426,7 +431,12 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     const { orders, truncated } = await searchSellerOrders(token, conn.ml_user_id, sinceIso)
     return {
       orders: orders
-        .map((o) => ({ id: String(o.id), status: o.status ?? null, items: normalizeOrderItems(o) }))
+        .map((o) => ({
+          id: String(o.id),
+          status: o.status ?? null,
+          date_created: o.date_created ?? null,
+          items: normalizeOrderItems(o),
+        }))
         .filter((o) => o.id && o.items.length > 0),
       truncated,
     }
