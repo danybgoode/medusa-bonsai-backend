@@ -67,10 +67,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   let plan
   if (existing) {
-    ;[plan] = await (subs as any).updateSubscriptionPlans({
+    // `updateSubscriptionPlans` returns a SINGLE object for a by-id update (not an
+    // array) — array-destructuring it throws "object is not iterable" on a re-seed
+    // (create returns a single object used directly, so it worked; the result is
+    // `subs as any`, invisible to tsc). Mirror the ml-sync fix (#54).
+    const updated = await (subs as any).updateSubscriptionPlans({
       id: existing.id,
       ...fields,
     })
+    plan = Array.isArray(updated) ? updated[0] : updated
   } else {
     plan = await (subs as any).createSubscriptionPlans({
       seller_id: PLATFORM_SELLER_ID,
