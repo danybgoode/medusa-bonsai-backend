@@ -9,8 +9,11 @@
  *    write against the durable `ml_applied_order` table (`unique(link_id,
  *    ml_order_id)`), so concurrent deliveries (two webhooks, or a webhook racing
  *    the reconcile poll) are serialized per link with the Redis-backed **locking**
- *    module and re-checked inside the lock. The table's unique index is
- *    defense-in-depth against a lock-service outage.
+ *    module and re-checked inside the lock. The unique index is a SECOND layer,
+ *    not a substitute for the lock: it stops a racing insert from creating a
+ *    duplicate row/order, but only the lock actually holding prevents two
+ *    concurrent callers from both decrementing stock before either inserts (see
+ *    `isUniqueViolationError`'s doc comment in `sync-utils.ts`).
  *  - **Oversell-safe decrement** — an ML sale is a **relative** reduction of
  *    `stocked_quantity` (`adjustInventory(-n)`), NOT an absolute set of available.
  *    A relative stocked decrement composes with a concurrent Miyagi reservation
@@ -109,6 +112,24 @@ export async function applyMlOrderToLink(
       const decision = decideMlOrderApply(existing, ordersEnabled)
       if (decision.kind === 'skip') return null
 
+      const sellerId = (fresh as { seller_id?: string } | null)?.seller_id ?? ''
+      const mlItemId = (fresh as { ml_item_id?: string } | null)?.ml_item_id ?? null
+
+      // Stock was already decremented on a prior pass (a row exists) — this pass
+      // ONLY retries materialization (never a second decrement). Cross-review
+      // caught a version of this function that had no recovery path here: a
+      // transient/config failure on the FIRST materialization attempt would
+      // otherwise permanently strand the sale order-less, forever, since the row
+      // already existed and `decideMlOrderApply` used to treat any existing row
+      // as a flat skip.
+      if (decision.kind === 'retry-materialize') {
+        if (!mlOrder || !sellerAccessToken) return null // can't retry without them → try again next pass
+        const materialized = await materializeMlOrder(scope, link, sellerAccessToken, mlOrder)
+        if (!materialized) return null // still failing → try again next pass, no write
+        await ml.setAppliedOrderMedusaId(decision.appliedOrderId, materialized.medusaOrderId)
+        return { decremented: 0, sellerId, mlItemId, medusaOrderId: materialized.medusaOrderId }
+      }
+
       const decremented =
         quantity > 0 ? await decrementProductStock(scope, link.product_id, link.variant_id, quantity) : 0
       if (decremented == null) return null // couldn't resolve inventory → retry, do NOT mark
@@ -117,8 +138,8 @@ export async function applyMlOrderToLink(
       // we MUST record the row no matter what, or a retry would decrement again
       // (the exact double-apply bug this table exists to prevent). Materialization
       // failure (an unresolved product/config gap) degrades to `medusaOrderId:
-      // null` rather than aborting; the order is left un-materialized for this
-      // sale — a stated, honest gap for Sprint 1 — never a second stock decrement.
+      // null` rather than aborting the write — the NEXT pass then takes the
+      // `retry-materialize` branch above instead of losing the order forever.
       let medusaOrderId: string | null = null
       if (decision.materializeOrder && mlOrder && sellerAccessToken) {
         const materialized = await materializeMlOrder(scope, link, sellerAccessToken, mlOrder)
@@ -126,12 +147,7 @@ export async function applyMlOrderToLink(
       }
 
       await ml.recordAppliedOrder(link.id, orderId, { inventoryDelta: decremented, medusaOrderId })
-      return {
-        decremented,
-        sellerId: (fresh as { seller_id?: string } | null)?.seller_id ?? '',
-        mlItemId: (fresh as { ml_item_id?: string } | null)?.ml_item_id ?? null,
-        medusaOrderId,
-      }
+      return { decremented, sellerId, mlItemId, medusaOrderId }
     },
     // Order materialization adds a shipment fetch + a DB write inside the lock —
     // give it more headroom than the stock-only path.

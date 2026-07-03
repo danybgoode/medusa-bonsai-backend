@@ -82,6 +82,14 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
         const token = await ml.getAccessTokenForSeller(sellerId)
         const shipment = await getShipmentDetail(token, shippingId)
         shipmentStatus = (shipment as { status?: string } | null)?.status ?? null
+        // `getShipmentDetail` swallows its own errors (best-effort by contract) —
+        // ML told us a shipment exists (`shippingId` present) but we couldn't read
+        // it, which is a REAL fetch failure, not "no shipment yet." Surface it so a
+        // persistent auth/API problem pages someone instead of silently stalling
+        // this order's status forever (cross-review should-fix).
+        if (shipment == null) {
+          alerts.push(`• order ${esc(candidate.id)} (ML ${esc(mlOrderId)}): shipment ${esc(String(shippingId))} fetch failed`)
+        }
       }
 
       const target = mapMlOrderStatusToFulfillment(mlOrderStatus, shipmentStatus)

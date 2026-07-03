@@ -74,8 +74,8 @@ describe('shouldPushStock — outbound mirror idempotency (US-10)', () => {
 })
 
 describe('decideMlOrderApply — the durable exactly-once + "one inventory effect" decision (US-0)', () => {
-  it('an existing row always skips, regardless of the flag value', () => {
-    const existing = { id: 'mlao_1', medusa_order_id: null }
+  it('a fully-applied row (has a medusa_order_id) always skips, regardless of the flag', () => {
+    const existing = { id: 'mlao_1', medusa_order_id: 'order_1' }
     expect(decideMlOrderApply(existing, false)).toEqual({ kind: 'skip' })
     expect(decideMlOrderApply(existing, true)).toEqual({ kind: 'skip' })
   })
@@ -83,6 +83,14 @@ describe('decideMlOrderApply — the durable exactly-once + "one inventory effec
     expect(decideMlOrderApply(null, false)).toEqual({ kind: 'apply', materializeOrder: false })
     expect(decideMlOrderApply(null, true)).toEqual({ kind: 'apply', materializeOrder: true })
     expect(decideMlOrderApply(undefined, true)).toEqual({ kind: 'apply', materializeOrder: true })
+  })
+  it('stock already applied but materialization never landed (medusa_order_id null) → retry ONLY materialization when the flag is on', () => {
+    const stranded = { id: 'mlao_2', medusa_order_id: null }
+    expect(decideMlOrderApply(stranded, true)).toEqual({ kind: 'retry-materialize', appliedOrderId: 'mlao_2' })
+  })
+  it('the same stranded row skips (not retry) when the flag is off — nothing to materialize', () => {
+    const stranded = { id: 'mlao_2', medusa_order_id: null }
+    expect(decideMlOrderApply(stranded, false)).toEqual({ kind: 'skip' })
   })
 })
 

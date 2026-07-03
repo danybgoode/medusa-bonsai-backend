@@ -154,8 +154,15 @@ export async function materializeMlOrder(
   const items = buildMlOrderLineItems(link, mlOrder, variant, product?.title ?? null)
   if (items.length === 0) return null // this link had no matching sold line in this order
 
+  // A blank token means the caller (e.g. the debug/backfill internal route) chose
+  // not to supply one — skip the fetch rather than making a doomed unauthorized
+  // ML call (cross-review caught this: it wasted a request and, worse, made the
+  // internal route's optional `seller_access_token` silently degrade in a way
+  // that wasn't obvious from its own contract).
   const rawShipment =
-    mlOrder.shipping?.id != null ? await getShipmentDetail(sellerAccessToken, mlOrder.shipping.id) : null
+    mlOrder.shipping?.id != null && sellerAccessToken
+      ? await getShipmentDetail(sellerAccessToken, mlOrder.shipping.id)
+      : null
 
   const email =
     mlOrder.buyer?.email?.trim().toLowerCase() ||

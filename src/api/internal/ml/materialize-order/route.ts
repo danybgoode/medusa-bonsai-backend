@@ -7,6 +7,12 @@
  *   POST /internal/ml/materialize-order   body: { link_id, ml_order, seller_access_token? }
  *   → 200 { medusa_order_id: string | null }
  *
+ * `seller_access_token` is optional but SHAPES the result, not just an
+ * auth nicety: omitting it means `materializeMlOrder` skips the ML shipment-
+ * detail fetch entirely (no token, no call) and the resulting order's
+ * `ml_raw_shipment` metadata is `null`, even if `ml_order.shipping.id` is set.
+ * Supply a real token to test/backfill with the shipment payload captured.
+ *
  * NOT idempotent by itself — the production path is always
  * `applyMlOrderToLink` (webhook + reconcile), which owns the exactly-once
  * guarantee via the `ml_applied_order` table + the per-link lock. Calling this

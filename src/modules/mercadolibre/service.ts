@@ -568,6 +568,15 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     }
   }
 
+  /**
+   * Stamp a Medusa order id onto an already-applied row whose materialization
+   * failed on a prior pass (US-0's `retry-materialize` decision) — the stock
+   * decrement was already recorded; this only fills in the missing order side.
+   */
+  async setAppliedOrderMedusaId(appliedOrderId: string, medusaOrderId: string): Promise<void> {
+    await this.updateMlAppliedOrders({ id: appliedOrderId, medusa_order_id: medusaOrderId })
+  }
+
   /** Read the reconcile poll marker (ISO) for a seller, or null. */
   async getSellerSyncMarker(sellerId: string): Promise<string | null> {
     const conn = await this.getConnection(sellerId)

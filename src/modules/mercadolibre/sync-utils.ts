@@ -70,19 +70,33 @@ export function isSoldOrderStatus(status: string | null | undefined): boolean {
 export type AppliedOrderRow = { id: string; medusa_order_id: string | null } | null | undefined
 
 export type ApplyDecision =
-  | { kind: 'skip' } // a row already exists for (link, orderId) — already applied, no matter what
+  | { kind: 'skip' } // a row exists AND already has a Medusa order (or the flag is off) — nothing left to do
   | { kind: 'apply'; materializeOrder: boolean } // fresh — stock decrement always runs; order creation only if the flag is on
+  | { kind: 'retry-materialize'; appliedOrderId: string } // stock already applied, order still missing — retry ONLY materialization
 
 /**
  * The exactly-once + "one inventory effect, flag on or off" decision (US-0/US-1).
- * An existing row always wins (idempotent replay, regardless of the current flag
- * value — flipping the flag mid-flight must never re-materialize an already-applied
- * sale). A fresh order always gets the stock decrement; it additionally gets a
- * Medusa order only when `ordersEnabled` is true — so the inventory effect count
- * never depends on the flag, only the order-creation side effect does.
+ * A fresh order always gets the stock decrement; it additionally gets a Medusa
+ * order only when `ordersEnabled` is true — so the inventory effect count never
+ * depends on the flag, only the order-creation side effect does.
+ *
+ * An existing row with `medusa_order_id` already set is a genuine replay → skip,
+ * unconditionally. An existing row with `medusa_order_id: null` means a PRIOR
+ * apply decremented stock but materialization failed or wasn't requested at the
+ * time (cross-review caught an earlier version of this function that treated
+ * this case as a permanent skip — silently and permanently losing the order for
+ * any sale whose first materialization attempt hit a transient failure, with no
+ * recovery path). If the flag is on, retry ONLY materialization (never a second
+ * decrement, since the stock effect already happened and is recorded); if the
+ * flag is off, skip (today's behavior — nothing to materialize).
  */
 export function decideMlOrderApply(existing: AppliedOrderRow, ordersEnabled: boolean): ApplyDecision {
-  if (existing) return { kind: 'skip' }
+  if (existing) {
+    if (ordersEnabled && !existing.medusa_order_id) {
+      return { kind: 'retry-materialize', appliedOrderId: existing.id }
+    }
+    return { kind: 'skip' }
+  }
   return { kind: 'apply', materializeOrder: ordersEnabled }
 }
 
@@ -91,6 +105,13 @@ export function decideMlOrderApply(existing: AppliedOrderRow, ordersEnabled: boo
  * `23505`, or MikroORM's own exception name) — the defense-in-depth path when two
  * writers race the insert despite the per-link lock (e.g. a lock-service outage).
  * A caller that sees this should treat the row as already-applied, not throw.
+ *
+ * NOTE on what this actually defends against: it prevents a duplicate `ml_applied_order`
+ * ROW (and therefore a duplicate Medusa ORDER) if the insert races. It does NOT by
+ * itself prevent a duplicate STOCK DECREMENT — that guarantee comes from the Redis
+ * lock actually holding; if the lock service itself is down, two callers can both
+ * read "no existing row" and both decrement before either inserts. This constraint
+ * is the second layer, not a substitute for the lock.
  */
 export function isUniqueViolationError(e: unknown): boolean {
   const code = (e as { code?: string } | null)?.code
