@@ -88,11 +88,20 @@ const materializeMlOrderWorkflow = createWorkflow(
 )
 
 /**
- * This link's contribution to `mlOrder` as a Medusa order line item — filters to
+ * This link's contribution to `mlOrder` as Medusa order line item(s) — filters to
  * ONLY the sold lines matching `link.ml_item_id` (a multi-item ML order's other
- * items belong to a different link/materialization, see the scope note above),
- * summing multiple lines for the same item the way `normalizeOrderItems`
- * aggregates for the stock delta. Pure — no I/O.
+ * items belong to a different link/materialization, see the scope note above).
+ *
+ * Emits ONE Medusa line item PER matching ML `order_items` entry, preserving
+ * each entry's own `unit_price` — it does NOT aggregate multiple lines into one
+ * combined quantity at a single blended price. Cross-review (second pass) caught
+ * an earlier version that summed quantities but kept only the LAST line's price,
+ * silently misstating the order total whenever ML splits the same item across
+ * lines at different prices (a promotion applied to only some units, a listing
+ * price change mid-cart). Medusa sums the order total across all line items
+ * regardless of how many there are, so multiple lines for "the same" ML item is
+ * exactly as correct as one — and is the only representation that keeps the
+ * total accurate. Pure — no I/O.
  */
 export function buildMlOrderLineItems(
   link: LinkRef,
@@ -100,27 +109,21 @@ export function buildMlOrderLineItems(
   variant: { id: string; title?: string | null },
   productTitle: string | null,
 ): { title: string; quantity: number; unit_price: number; variant_id: string; product_id: string }[] {
-  let quantity = 0
-  let unitPrice = 0
-  let itemTitle: string | null = null
+  const lines: { title: string; quantity: number; unit_price: number; variant_id: string; product_id: string }[] = []
   for (const oi of mlOrder.order_items ?? []) {
     if (oi?.item?.id !== link.ml_item_id) continue
     const qty =
       typeof oi.quantity === 'number' && Number.isFinite(oi.quantity) ? Math.max(0, Math.trunc(oi.quantity)) : 0
-    quantity += qty
-    if (typeof oi.unit_price === 'number') unitPrice = oi.unit_price
-    if (!itemTitle && oi.item?.title) itemTitle = oi.item.title
-  }
-  if (quantity <= 0) return []
-  return [
-    {
-      title: itemTitle || variant.title || productTitle || 'Producto de Mercado Libre',
-      quantity,
-      unit_price: unitPrice,
+    if (qty <= 0) continue
+    lines.push({
+      title: oi.item?.title || variant.title || productTitle || 'Producto de Mercado Libre',
+      quantity: qty,
+      unit_price: typeof oi.unit_price === 'number' ? oi.unit_price : 0,
       variant_id: variant.id,
       product_id: link.product_id,
-    },
-  ]
+    })
+  }
+  return lines
 }
 
 /**

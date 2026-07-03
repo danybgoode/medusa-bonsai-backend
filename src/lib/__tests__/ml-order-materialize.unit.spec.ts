@@ -4,9 +4,10 @@ import type { MlOrder } from '../../modules/mercadolibre/client'
 /**
  * ml-orders-native S1 · US-1 — the pure line-item construction seam. No DB, no
  * network: proves the "this link's contribution only" filter (a multi-item ML
- * order's other lines belong to a different link/materialization) and the
- * same-item-line aggregation `normalizeOrderItems` already established for the
- * stock delta.
+ * order's other lines belong to a different link/materialization) and that
+ * multiple ML lines for the same item stay SEPARATE Medusa line items, each
+ * with its own price — never blended into one combined-quantity/last-price
+ * line (cross-review caught that as a real order-total bug).
  */
 
 const link = { id: 'mll_1', seller_id: 'sel_1', product_id: 'prod_1', ml_item_id: 'MLM1' }
@@ -36,15 +37,23 @@ describe('buildMlOrderLineItems', () => {
     expect(items[0].quantity).toBe(1)
   })
 
-  it('sums multiple lines for the same ML item (mirrors normalizeOrderItems)', () => {
+  it('emits SEPARATE line items for multiple ML lines of the same item — never a blended quantity/price', () => {
     const order: MlOrder = {
       id: 'ord_3',
       order_items: [
         { item: { id: 'MLM1' }, quantity: 1, unit_price: 100 },
-        { item: { id: 'MLM1' }, quantity: 2, unit_price: 100 },
+        { item: { id: 'MLM1' }, quantity: 2, unit_price: 80 }, // e.g. a promo on the second line
       ],
     }
-    expect(buildMlOrderLineItems(link, order, variant, null)[0].quantity).toBe(3)
+    const items = buildMlOrderLineItems(link, order, variant, null)
+    expect(items).toEqual([
+      { title: 'Talla M', quantity: 1, unit_price: 100, variant_id: 'variant_1', product_id: 'prod_1' },
+      { title: 'Talla M', quantity: 2, unit_price: 80, variant_id: 'variant_1', product_id: 'prod_1' },
+    ])
+    // The total Medusa will compute (Σ quantity × unit_price) matches the real
+    // ML total exactly — a blended single line could not represent this.
+    const total = items.reduce((sum, i) => sum + i.quantity * i.unit_price, 0)
+    expect(total).toBe(1 * 100 + 2 * 80)
   })
 
   it('falls back title → variant title → product title → a generic default', () => {

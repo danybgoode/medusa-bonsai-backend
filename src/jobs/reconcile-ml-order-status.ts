@@ -66,6 +66,17 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
 
   let advanced = 0
   const alerts: string[] = []
+  // Multiple candidates commonly share a seller — cache the access token per run
+  // instead of re-fetching (and potentially re-refreshing) it once per order.
+  const tokenCache = new Map<string, Promise<string>>()
+  function tokenForSeller(sellerId: string): Promise<string> {
+    let cached = tokenCache.get(sellerId)
+    if (!cached) {
+      cached = ml.getAccessTokenForSeller(sellerId)
+      tokenCache.set(sellerId, cached)
+    }
+    return cached
+  }
 
   for (const candidate of candidates) {
     if (candidate.fulfillment_status && TERMINAL_STATUSES.has(candidate.fulfillment_status)) continue
@@ -79,7 +90,7 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
       const shippingId = raw?.shipping?.id
       let shipmentStatus: string | null = null
       if (shippingId != null) {
-        const token = await ml.getAccessTokenForSeller(sellerId)
+        const token = await tokenForSeller(sellerId)
         const shipment = await getShipmentDetail(token, shippingId)
         shipmentStatus = (shipment as { status?: string } | null)?.status ?? null
         // `getShipmentDetail` swallows its own errors (best-effort by contract) —
