@@ -128,7 +128,9 @@ export async function applyMlOrderToLink(
   // effects out of the lock).
   const applied = await locking.execute(
     `ml-sync:${link.id}`,
-    async (): Promise<{ decremented: number; sellerId: string; mlItemId: string | null; medusaOrderId: string | null } | null> => {
+    async (): Promise<
+      { decremented: number; sellerId: string; mlItemId: string | null; medusaOrderId: string | null; retried: boolean } | null
+    > => {
       // Re-read INSIDE the lock so the applied-order check reflects any concurrent
       // apply that already committed (US-0: durable table, not the metadata ring).
       const [fresh, existing] = await Promise.all([ml.getLink(link.id), ml.getAppliedOrder(link.id, orderId)])
@@ -150,7 +152,7 @@ export async function applyMlOrderToLink(
         const materialized = await safeMaterialize(scope, link, sellerAccessToken, mlOrder)
         if (!materialized) return null // still failing → try again next pass, no write
         await ml.setAppliedOrderMedusaId(decision.appliedOrderId, materialized.medusaOrderId)
-        return { decremented: 0, sellerId, mlItemId, medusaOrderId: materialized.medusaOrderId }
+        return { decremented: 0, sellerId, mlItemId, medusaOrderId: materialized.medusaOrderId, retried: true }
       }
 
       const decremented =
@@ -173,7 +175,7 @@ export async function applyMlOrderToLink(
       }
 
       await ml.recordAppliedOrder(link.id, orderId, { inventoryDelta: decremented, medusaOrderId })
-      return { decremented, sellerId, mlItemId, medusaOrderId }
+      return { decremented, sellerId, mlItemId, medusaOrderId, retried: false }
     },
     // Order materialization adds a shipment fetch + a DB write inside the lock —
     // give it more headroom than the stock-only path.
@@ -190,10 +192,15 @@ export async function applyMlOrderToLink(
     productId: link.product_id,
     mlItemId: applied.mlItemId,
     code: orderId,
-    message: applied.medusaOrderId
-      ? `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId}, pedido ${applied.medusaOrderId})`
-      : `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId})`,
-    metadata: { sold: quantity, decremented: applied.decremented, medusa_order_id: applied.medusaOrderId },
+    // `retried` = stock was already decremented on a prior pass; this pass only
+    // materialized the order, so the message must not imply a fresh -N decrement
+    // (cross-review nit — "-0" on a retry misleadingly read as "nothing moved").
+    message: applied.retried
+      ? `Pedido de Mercado Libre materializado (venta ya aplicada previamente): orden ${orderId}, pedido ${applied.medusaOrderId}`
+      : applied.medusaOrderId
+        ? `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId}, pedido ${applied.medusaOrderId})`
+        : `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId})`,
+    metadata: { sold: quantity, decremented: applied.decremented, medusa_order_id: applied.medusaOrderId, retried: applied.retried },
   })
   return 'applied'
 }
