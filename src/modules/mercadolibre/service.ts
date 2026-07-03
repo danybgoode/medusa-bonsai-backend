@@ -2,6 +2,7 @@ import { MedusaService } from '@medusajs/framework/utils'
 import MlConnection from './models/ml-connection'
 import ProductMlLink from './models/product-ml-link'
 import MlSyncEvent from './models/ml-sync-event'
+import MlAppliedOrder from './models/ml-applied-order'
 import {
   exchangeCode,
   refreshMlToken,
@@ -21,6 +22,7 @@ import {
   predictCategory,
   type MlImportItem,
   type MlCategoryCandidate,
+  type MlOrder,
 } from './client'
 import {
   encryptToken,
@@ -37,7 +39,7 @@ import {
   type MlPublishAction,
   type SyncEventInput,
 } from './_utils'
-import { clampAvailable, shouldPushStock, recordAppliedOrder } from './sync-utils'
+import { clampAvailable, shouldPushStock, isUniqueViolationError } from './sync-utils'
 
 /**
  * Mercado Libre module service. Owns the OAuth connection (US-1) and the
@@ -45,7 +47,7 @@ import { clampAvailable, shouldPushStock, recordAppliedOrder } from './sync-util
  * access token is only ever materialised in-memory by `getAccessTokenForSeller`,
  * never logged, never returned over the wire.
  */
-class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlLink, MlSyncEvent }) {
+class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlLink, MlSyncEvent, MlAppliedOrder }) {
   // ── Sprint 5 · US-13: sync activity log (append-only, best-effort) ──────────────
 
   /**
@@ -472,20 +474,27 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     return conn ?? null
   }
 
-  /** An ML order's status + per-item sold quantities (inbound webhook · orders_v2). */
+  /**
+   * An ML order's status + per-item sold quantities (inbound webhook · orders_v2).
+   * `raw` is the FULL order response (ml-orders-native S1 · US-1) — needed by
+   * order materialization, which persists it verbatim (see the plan's fee/
+   * shipping capture decision).
+   */
   async getMlOrderItems(
     sellerId: string,
     orderId: string,
-  ): Promise<{ status: string | null; items: { mlItemId: string; quantity: number }[] }> {
+  ): Promise<{ status: string | null; items: { mlItemId: string; quantity: number }[]; raw: MlOrder }> {
     const token = await this.getAccessTokenForSeller(sellerId)
     const order = await getMlOrder(token, orderId)
-    return { status: order.status ?? null, items: normalizeOrderItems(order) }
+    return { status: order.status ?? null, items: normalizeOrderItems(order), raw: order }
   }
 
   /**
    * A seller's recent ML orders since `sinceIso`, each with status + per-item sold
-   * quantities (reconcile job · missed-webhook recovery — US-12). Idempotency +
-   * the paid-status filter are the caller's job.
+   * quantities (reconcile job · missed-webhook recovery — US-12). `raw` is the
+   * FULL order object `/orders/search` already returns (ml-orders-native S1 ·
+   * US-1) — reused for materialization with no extra fetch. Idempotency + the
+   * paid-status filter are the caller's job.
    */
   async searchSellerOrdersSince(
     sellerId: string,
@@ -496,6 +505,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       status: string | null
       date_created: string | null
       items: { mlItemId: string; quantity: number }[]
+      raw: MlOrder
     }[]
     truncated: boolean
   }> {
@@ -510,6 +520,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
           status: o.status ?? null,
           date_created: o.date_created ?? null,
           items: normalizeOrderItems(o),
+          raw: o,
         }))
         .filter((o) => o.id && o.items.length > 0),
       truncated,
@@ -517,17 +528,53 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   }
 
   /**
-   * Record an ML order as applied to a link's dedupe ring WITHOUT touching the
-   * mirror baseline — for a zero-quantity order line (no stock change), so a later
-   * real available of 0 isn't mistaken for "already pushed".
+   * The durable exactly-once row for (linkId, mlOrderId), or null if this ML order
+   * has never been applied to this link (US-0, ml-orders-native S1 — supersedes
+   * the capped `ml_applied_orders` metadata ring).
    */
-  async markOrderApplied(linkId: string, orderId: string): Promise<void> {
-    if (!orderId) return
-    const link = await this.getLink(linkId)
-    if (!link) return
-    const meta = (link.metadata ?? {}) as Record<string, unknown>
-    const ring = recordAppliedOrder(meta.ml_applied_orders as { id: string; ts: string }[] | undefined, orderId)
-    await this.updateProductMlLinks({ id: linkId, metadata: { ...meta, ml_applied_orders: ring } })
+  async getAppliedOrder(linkId: string, mlOrderId: string) {
+    if (!mlOrderId) return null
+    const [row] = await this.listMlAppliedOrders({ link_id: linkId, ml_order_id: mlOrderId }, { take: 1 })
+    return row ?? null
+  }
+
+  /**
+   * Record an ML order as durably applied, exactly once (US-0). The caller must
+   * already hold the per-link Redis lock and have confirmed via `getAppliedOrder`
+   * that no row exists yet — this write, plus the stock decrement and (when
+   * `ml.orders_enabled`) the Medusa order creation, all happen inside that same
+   * lock. The table's `unique(link_id, ml_order_id)` index is defense-in-depth
+   * against a lock-service outage: a unique-violation here means a concurrent
+   * writer already won the race, so it's read back and returned rather than
+   * thrown — never a double-apply, never a hard failure on a benign race.
+   */
+  async recordAppliedOrder(
+    linkId: string,
+    mlOrderId: string,
+    input: { inventoryDelta: number; medusaOrderId?: string | null },
+  ) {
+    try {
+      const row = await this.createMlAppliedOrders({
+        link_id: linkId,
+        ml_order_id: mlOrderId,
+        medusa_order_id: input.medusaOrderId ?? null,
+        inventory_delta: input.inventoryDelta,
+        applied_at: new Date(),
+      })
+      return Array.isArray(row) ? row[0] : row
+    } catch (e) {
+      if (isUniqueViolationError(e)) return this.getAppliedOrder(linkId, mlOrderId)
+      throw e
+    }
+  }
+
+  /**
+   * Stamp a Medusa order id onto an already-applied row whose materialization
+   * failed on a prior pass (US-0's `retry-materialize` decision) — the stock
+   * decrement was already recorded; this only fills in the missing order side.
+   */
+  async setAppliedOrderMedusaId(appliedOrderId: string, medusaOrderId: string): Promise<void> {
+    await this.updateMlAppliedOrders({ id: appliedOrderId, medusa_order_id: medusaOrderId })
   }
 
   /** Read the reconcile poll marker (ISO) for a seller, or null. */

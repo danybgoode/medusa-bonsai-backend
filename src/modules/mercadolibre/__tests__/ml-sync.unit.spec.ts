@@ -2,11 +2,11 @@ import {
   clampAvailable,
   safeDecrement,
   shouldPushStock,
-  isOrderApplied,
-  recordAppliedOrder,
   isSoldOrderStatus,
-  APPLIED_ORDERS_CAP,
-  type AppliedOrder,
+  decideMlOrderApply,
+  isUniqueViolationError,
+  mapMlOrderStatusToFulfillment,
+  shouldApplyFulfillmentTransition,
 } from '../sync-utils'
 import { normalizeOrderItems } from '../client'
 
@@ -73,25 +73,76 @@ describe('shouldPushStock — outbound mirror idempotency (US-10)', () => {
   })
 })
 
-describe('applied-order ring — exactly-once per ML order id (US-11/12)', () => {
-  const now = '2026-06-30T00:00:00.000Z'
-
-  it('a re-seen order id is detected as applied → no double-decrement', () => {
-    const ring: AppliedOrder[] = [{ id: 'ord_1', ts: now }]
-    expect(isOrderApplied(ring, 'ord_1')).toBe(true)
-    expect(isOrderApplied(ring, 'ord_2')).toBe(false)
-    expect(isOrderApplied(null, 'ord_1')).toBe(false)
-    expect(isOrderApplied(ring, '')).toBe(false)
+describe('decideMlOrderApply — the durable exactly-once + "one inventory effect" decision (US-0)', () => {
+  it('a fully-applied row (has a medusa_order_id) always skips, regardless of the flag', () => {
+    const existing = { id: 'mlao_1', medusa_order_id: 'order_1' }
+    expect(decideMlOrderApply(existing, false)).toEqual({ kind: 'skip' })
+    expect(decideMlOrderApply(existing, true)).toEqual({ kind: 'skip' })
   })
+  it('no row → apply; order materialization only when the flag is on', () => {
+    expect(decideMlOrderApply(null, false)).toEqual({ kind: 'apply', materializeOrder: false })
+    expect(decideMlOrderApply(null, true)).toEqual({ kind: 'apply', materializeOrder: true })
+    expect(decideMlOrderApply(undefined, true)).toEqual({ kind: 'apply', materializeOrder: true })
+  })
+  it('stock already applied but materialization never landed (medusa_order_id null) → retry ONLY materialization when the flag is on', () => {
+    const stranded = { id: 'mlao_2', medusa_order_id: null }
+    expect(decideMlOrderApply(stranded, true)).toEqual({ kind: 'retry-materialize', appliedOrderId: 'mlao_2' })
+  })
+  it('the same stranded row skips (not retry) when the flag is off — nothing to materialize', () => {
+    const stranded = { id: 'mlao_2', medusa_order_id: null }
+    expect(decideMlOrderApply(stranded, false)).toEqual({ kind: 'skip' })
+  })
+})
 
-  it('recording appends new ids, ignores duplicates/blanks, and stays bounded', () => {
-    let ring = recordAppliedOrder(null, 'ord_1', now)
-    expect(ring).toEqual([{ id: 'ord_1', ts: now }])
-    expect(recordAppliedOrder(ring, 'ord_1', now)).toBe(ring) // duplicate → unchanged ref
-    expect(recordAppliedOrder(ring, '', now)).toBe(ring)
-    for (let i = 0; i < APPLIED_ORDERS_CAP + 10; i++) ring = recordAppliedOrder(ring, `o_${i}`, now)
-    expect(ring.length).toBe(APPLIED_ORDERS_CAP)
-    expect(isOrderApplied(ring, `o_${APPLIED_ORDERS_CAP + 9}`)).toBe(true) // latest still remembered
+describe('isUniqueViolationError — defense-in-depth against a lock-service outage race', () => {
+  it('recognizes a Postgres 23505 or MikroORM UniqueConstraintViolationException', () => {
+    expect(isUniqueViolationError({ code: '23505' })).toBe(true)
+    expect(isUniqueViolationError({ name: 'UniqueConstraintViolationException' })).toBe(true)
+  })
+  it('rejects anything else (a real error must still propagate)', () => {
+    expect(isUniqueViolationError({ code: '23503' })).toBe(false)
+    expect(isUniqueViolationError(new Error('boom'))).toBe(false)
+    expect(isUniqueViolationError(null)).toBe(false)
+    expect(isUniqueViolationError(undefined)).toBe(false)
+  })
+})
+
+describe('mapMlOrderStatusToFulfillment — US-2 status mapping', () => {
+  it('paid + shipped/delivered → the matching transition', () => {
+    expect(mapMlOrderStatusToFulfillment('paid', 'shipped')).toBe('shipped')
+    expect(mapMlOrderStatusToFulfillment('paid', 'delivered')).toBe('delivered')
+  })
+  it('a non-paid order never transitions, regardless of shipment status', () => {
+    expect(mapMlOrderStatusToFulfillment('payment_required', 'shipped')).toBeNull()
+    expect(mapMlOrderStatusToFulfillment('cancelled', 'delivered')).toBeNull()
+    expect(mapMlOrderStatusToFulfillment(null, 'delivered')).toBeNull()
+  })
+  it('pre-ship / failed / unknown shipment statuses are a deliberate no-op', () => {
+    for (const s of ['pending', 'handling', 'ready_to_ship', 'not_delivered', 'cancelled', 'weird_status', null, undefined]) {
+      expect(mapMlOrderStatusToFulfillment('paid', s)).toBeNull()
+    }
+  })
+})
+
+describe('shouldApplyFulfillmentTransition — forward-only, replay-safe (US-2 acceptance)', () => {
+  it('applies a genuine forward move', () => {
+    expect(shouldApplyFulfillmentTransition('not_fulfilled', 'shipped')).toBe(true)
+    expect(shouldApplyFulfillmentTransition('shipped', 'delivered')).toBe(true)
+    expect(shouldApplyFulfillmentTransition(null, 'shipped')).toBe(true) // unset ⇒ treated as not-yet-fulfilled
+  })
+  it('a replay of the same state is a no-op', () => {
+    expect(shouldApplyFulfillmentTransition('shipped', 'shipped')).toBe(false)
+    expect(shouldApplyFulfillmentTransition('delivered', 'delivered')).toBe(false)
+  })
+  it('never regresses — a stale "shipped" after "delivered" is a no-op', () => {
+    expect(shouldApplyFulfillmentTransition('delivered', 'shipped')).toBe(false)
+  })
+  it('a canceled order never auto-advances', () => {
+    expect(shouldApplyFulfillmentTransition('canceled', 'shipped')).toBe(false)
+    expect(shouldApplyFulfillmentTransition('canceled', 'delivered')).toBe(false)
+  })
+  it('null target is always false', () => {
+    expect(shouldApplyFulfillmentTransition('not_fulfilled', null)).toBe(false)
   })
 })
 

@@ -48,16 +48,6 @@ export function shouldPushStock(args: {
   return cur !== clampAvailable(args.lastPushedAvailable)
 }
 
-// ── Exactly-once sale application (US-11) ────────────────────────────────────────
-// The dedupe key is the ML **order id** — the natural exactly-once key for a sale.
-// A bounded ring of applied order ids rides the linkage metadata, so the same ML
-// order decrements Medusa once no matter how many notifications (or reconcile
-// polls) surface it. (Earlier drafts keyed on the notification `_id` and fell back
-// to the `resource` path — unsafe: distinct sales of the same item share a
-// resource and would be dropped as replays.)
-export type AppliedOrder = { id: string; ts: string }
-export const APPLIED_ORDERS_CAP = 500
-
 /**
  * Only a **paid** ML order has consumed stock. Applying every order id (incl.
  * `payment_required` / `cancelled` / `invalid`) would wrongly, permanently reduce
@@ -68,24 +58,121 @@ export function isSoldOrderStatus(status: string | null | undefined): boolean {
   return status === 'paid'
 }
 
-export function isOrderApplied(applied: AppliedOrder[] | null | undefined, orderId: string): boolean {
-  if (!orderId) return false
-  return Array.isArray(applied) && applied.some((o) => o.id === orderId)
+// ── Exactly-once sale application (US-0, ml-orders-native S1) ────────────────────
+// The dedupe key is the ML **order id** — the natural exactly-once key for a sale.
+// Supersedes the capped 500-entry ring that used to ride the linkage metadata (a
+// ring evicts, so a very-delayed replay could theoretically outrun it) with a
+// durable `ml_applied_order` DB row, `unique(link_id, ml_order_id)`. (Earlier
+// drafts keyed on the notification `_id` and fell back to the `resource` path —
+// unsafe: distinct sales of the same item share a resource and would be dropped
+// as replays.)
+
+export type AppliedOrderRow = { id: string; medusa_order_id: string | null } | null | undefined
+
+export type ApplyDecision =
+  | { kind: 'skip' } // a row exists AND already has a Medusa order (or the flag is off) — nothing left to do
+  | { kind: 'apply'; materializeOrder: boolean } // fresh — stock decrement always runs; order creation only if the flag is on
+  | { kind: 'retry-materialize'; appliedOrderId: string } // stock already applied, order still missing — retry ONLY materialization
+
+/**
+ * The exactly-once + "one inventory effect, flag on or off" decision (US-0/US-1).
+ * A fresh order always gets the stock decrement; it additionally gets a Medusa
+ * order only when `ordersEnabled` is true — so the inventory effect count never
+ * depends on the flag, only the order-creation side effect does.
+ *
+ * An existing row with `medusa_order_id` already set is a genuine replay → skip,
+ * unconditionally. An existing row with `medusa_order_id: null` means a PRIOR
+ * apply decremented stock but materialization failed or wasn't requested at the
+ * time (cross-review caught an earlier version of this function that treated
+ * this case as a permanent skip — silently and permanently losing the order for
+ * any sale whose first materialization attempt hit a transient failure, with no
+ * recovery path). If the flag is on, retry ONLY materialization (never a second
+ * decrement, since the stock effect already happened and is recorded); if the
+ * flag is off, skip (today's behavior — nothing to materialize).
+ */
+export function decideMlOrderApply(existing: AppliedOrderRow, ordersEnabled: boolean): ApplyDecision {
+  if (existing) {
+    if (ordersEnabled && !existing.medusa_order_id) {
+      return { kind: 'retry-materialize', appliedOrderId: existing.id }
+    }
+    return { kind: 'skip' }
+  }
+  return { kind: 'apply', materializeOrder: ordersEnabled }
 }
 
 /**
- * Append an applied ML order id to the bounded ring (drops the oldest past the
- * cap). A blank or already-present id returns the list unchanged, so the ring
- * only grows on a genuinely new order.
+ * Classify a DB write error as a unique-constraint violation (Postgres code
+ * `23505`, or MikroORM's own exception name) — the defense-in-depth path when two
+ * writers race the insert despite the per-link lock (e.g. a lock-service outage).
+ * A caller that sees this should treat the row as already-applied, not throw.
+ *
+ * NOTE on what this actually defends against: it prevents a duplicate `ml_applied_order`
+ * ROW (and therefore a duplicate Medusa ORDER) if the insert races. It does NOT by
+ * itself prevent a duplicate STOCK DECREMENT — that guarantee comes from the Redis
+ * lock actually holding; if the lock service itself is down, two callers can both
+ * read "no existing row" and both decrement before either inserts. This constraint
+ * is the second layer, not a substitute for the lock.
  */
-export function recordAppliedOrder(
-  applied: AppliedOrder[] | null | undefined,
-  orderId: string,
-  now: string = new Date().toISOString(),
-  cap: number = APPLIED_ORDERS_CAP,
-): AppliedOrder[] {
-  const base = Array.isArray(applied) ? applied : []
-  if (!orderId || base.some((o) => o.id === orderId)) return base
-  const next = [...base, { id: orderId, ts: now }]
-  return next.length > cap ? next.slice(next.length - cap) : next
+export function isUniqueViolationError(e: unknown): boolean {
+  const code = (e as { code?: string } | null)?.code
+  const name = (e as { name?: string } | null)?.name
+  return code === '23505' || name === 'UniqueConstraintViolationException'
+}
+
+// ── ML → Medusa fulfillment-state mapping (US-2, ml-orders-native S1) ────────────
+// Real ML status vocabularies (confirmed against Mercado Libre's public API docs):
+// order.status ∈ {confirmed, payment_required, payment_in_process, partially_paid,
+// paid, cancelled, invalid}; shipment.status ∈ {pending, handling, ready_to_ship,
+// shipped, delivered, not_delivered, cancelled}. Only PAID orders' shipments are
+// ever mapped — everything else is a deliberate no-op (never guess a transition
+// on an unpaid/cancelled/unknown status).
+
+export type MlFulfillmentTransition = 'shipped' | 'delivered'
+
+/**
+ * Map an ML order + shipment status pair to the Medusa fulfillment transition to
+ * apply, or `null` for "no transition" (pre-payment states, `not_delivered`/
+ * `cancelled`, or an unrecognized value — the caller logs the no-op rather than
+ * guessing). Pure, no I/O.
+ */
+export function mapMlOrderStatusToFulfillment(
+  orderStatus: string | null | undefined,
+  shipmentStatus: string | null | undefined,
+): MlFulfillmentTransition | null {
+  if (orderStatus !== 'paid') return null
+  if (shipmentStatus === 'delivered') return 'delivered'
+  if (shipmentStatus === 'shipped') return 'shipped'
+  return null
+}
+
+/** Real Medusa `FulfillmentStatus` values, ranked so a transition only ever moves forward. */
+const FULFILLMENT_RANK: Record<string, number> = {
+  not_fulfilled: 0,
+  partially_fulfilled: 0,
+  fulfilled: 0,
+  partially_shipped: 1,
+  shipped: 1,
+  partially_delivered: 2,
+  delivered: 2,
+}
+
+/**
+ * Replay/out-of-order safety (US-2 acceptance: "replay changes nothing"): apply
+ * `target` only if it's a strictly FORWARD move from the order's current
+ * `fulfillment_status`. A stale "shipped" arriving after "delivered" was already
+ * recorded, or the exact same status replaying, is a no-op — never regresses or
+ * double-applies. A `canceled` order is terminal and never auto-advances,
+ * regardless of target (checked explicitly, not via the rank table — a
+ * cancellation isn't "behind" `not_fulfilled`, it's a different axis entirely).
+ * An unrecognized current status is treated as rank 0 (the safe "not yet
+ * fulfilled" assumption).
+ */
+export function shouldApplyFulfillmentTransition(
+  currentFulfillmentStatus: string | null | undefined,
+  target: MlFulfillmentTransition | null,
+): boolean {
+  if (!target) return false
+  if (currentFulfillmentStatus === 'canceled') return false
+  const currentRank = FULFILLMENT_RANK[currentFulfillmentStatus ?? ''] ?? 0
+  return FULFILLMENT_RANK[target] > currentRank
 }

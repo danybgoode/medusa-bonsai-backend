@@ -195,9 +195,19 @@ export function normalizeMedusaOrder(
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
     : null
 
+  // Which marketplace sold this (ml-orders-native S1 · US-3) — a DIFFERENT axis
+  // from any buyer-traffic `channel` concept: this is "Mercado Libre vs Miyagi",
+  // stamped by `materializeMlOrder` at order-creation time. `metadata` is already
+  // selected above, so no query change is needed — just surface it top-level
+  // (normalizeMedusaOrder curates; it never passes raw metadata through).
+  const source = metadata.source === 'mercadolibre' ? 'mercadolibre' : 'miyagi'
+
   return {
     id: order.id,
     status,
+    source,
+    ml_order_id: source === 'mercadolibre' ? ((metadata.ml_order_id as string) ?? null) : null,
+    ml_pack_id: source === 'mercadolibre' ? ((metadata.ml_pack_id as string) ?? null) : null,
     amount_cents: isSupportOrder ? (support.amount_cents ?? order.total ?? 0) : (order.total ?? 0),
     currency: ((order.currency_code as string) ?? 'mxn').toUpperCase(),
     shipping_method: isSupportOrder ? 'support' : selectedFulfillment,
