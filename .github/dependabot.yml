@@ -21,6 +21,15 @@ updates:
     commit-message:
       prefix: "deps"
       prefix-development: "deps-dev"
+    ignore:
+      # react-i18next >=17 requires i18next >=26.2.0 (its own peerDependencies), but @medusajs/dashboard
+      # — the admin UI bundled INTO this backend's own build ("Compiling frontend source") — hard-pins
+      # react-i18next to 13.5.0 + i18next to 23.7.11 as ITS OWN direct dependencies, even at the latest
+      # stable @medusajs/dashboard (2.17.2, checked 2026-07-03). Bumping react-i18next here alone breaks
+      # the admin build (`"keyFromSelector" is not exported by i18next`, confirmed live — PR #23).
+      # Un-ignore once @medusajs/dashboard itself moves off react-i18next 13.5.0/i18next 23.7.11.
+      - dependency-name: "react-i18next"
+        versions: [">=14.0.0"]
 
   # Keep the CI/CD GitHub Actions (notify-telegram.yml) patched too.
   - package-ecosystem: "github-actions"
