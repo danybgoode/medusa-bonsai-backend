@@ -79,6 +79,29 @@ async function decrementProductStock(
 }
 
 /**
+ * `materializeMlOrder`, but NEVER throws — any error (a Medusa workflow
+ * validation failure, a DB timeout, anything) degrades to `null`, exactly like
+ * a graceful "couldn't resolve product/region" return. Both call sites below
+ * are downstream of the stock decrement already having committed, so an
+ * uncaught exception here would skip `recordAppliedOrder` entirely — leaving
+ * NO row for a decrement that already happened, so the next retry would
+ * decrement AGAIN. 2nd-round cross-review caught this gap.
+ */
+async function safeMaterialize(
+  scope: Scope,
+  link: LinkRef,
+  sellerAccessToken: string,
+  mlOrder: MlOrder,
+): Promise<{ medusaOrderId: string } | null> {
+  try {
+    return await materializeMlOrder(scope, link, sellerAccessToken, mlOrder)
+  } catch (e) {
+    console.error('[ml-sync-apply] materializeMlOrder threw (non-fatal, degrading to null):', e)
+    return null
+  }
+}
+
+/**
  * Apply one ML order's sale of `quantity` units to `link`, exactly once,
  * atomically — the stock decrement always runs (S4); when `ordersEnabled` is
  * true AND this is a fresh apply (not a replay), it ALSO materializes a Medusa
@@ -124,7 +147,7 @@ export async function applyMlOrderToLink(
       // as a flat skip.
       if (decision.kind === 'retry-materialize') {
         if (!mlOrder || !sellerAccessToken) return null // can't retry without them → try again next pass
-        const materialized = await materializeMlOrder(scope, link, sellerAccessToken, mlOrder)
+        const materialized = await safeMaterialize(scope, link, sellerAccessToken, mlOrder)
         if (!materialized) return null // still failing → try again next pass, no write
         await ml.setAppliedOrderMedusaId(decision.appliedOrderId, materialized.medusaOrderId)
         return { decremented: 0, sellerId, mlItemId, medusaOrderId: materialized.medusaOrderId }
@@ -136,13 +159,16 @@ export async function applyMlOrderToLink(
 
       // The decrement is now a REAL, committed inventory mutation — from here on
       // we MUST record the row no matter what, or a retry would decrement again
-      // (the exact double-apply bug this table exists to prevent). Materialization
-      // failure (an unresolved product/config gap) degrades to `medusaOrderId:
-      // null` rather than aborting the write — the NEXT pass then takes the
-      // `retry-materialize` branch above instead of losing the order forever.
+      // (the exact double-apply bug this table exists to prevent). `safeMaterialize`
+      // never throws (2nd-round cross-review caught a version where an uncaught
+      // workflow exception here would skip `recordAppliedOrder` entirely, leaving
+      // NO row for a decrement that already happened — the next retry would
+      // decrement again) — any failure, thrown or graceful, degrades to
+      // `medusaOrderId: null` rather than aborting the write; the NEXT pass then
+      // takes the `retry-materialize` branch above instead of losing the order.
       let medusaOrderId: string | null = null
       if (decision.materializeOrder && mlOrder && sellerAccessToken) {
-        const materialized = await materializeMlOrder(scope, link, sellerAccessToken, mlOrder)
+        const materialized = await safeMaterialize(scope, link, sellerAccessToken, mlOrder)
         medusaOrderId = materialized?.medusaOrderId ?? null
       }
 
