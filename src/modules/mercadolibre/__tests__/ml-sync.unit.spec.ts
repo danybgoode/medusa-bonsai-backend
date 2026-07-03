@@ -5,6 +5,8 @@ import {
   isSoldOrderStatus,
   decideMlOrderApply,
   isUniqueViolationError,
+  mapMlOrderStatusToFulfillment,
+  shouldApplyFulfillmentTransition,
 } from '../sync-utils'
 import { normalizeOrderItems } from '../client'
 
@@ -94,6 +96,45 @@ describe('isUniqueViolationError — defense-in-depth against a lock-service out
     expect(isUniqueViolationError(new Error('boom'))).toBe(false)
     expect(isUniqueViolationError(null)).toBe(false)
     expect(isUniqueViolationError(undefined)).toBe(false)
+  })
+})
+
+describe('mapMlOrderStatusToFulfillment — US-2 status mapping', () => {
+  it('paid + shipped/delivered → the matching transition', () => {
+    expect(mapMlOrderStatusToFulfillment('paid', 'shipped')).toBe('shipped')
+    expect(mapMlOrderStatusToFulfillment('paid', 'delivered')).toBe('delivered')
+  })
+  it('a non-paid order never transitions, regardless of shipment status', () => {
+    expect(mapMlOrderStatusToFulfillment('payment_required', 'shipped')).toBeNull()
+    expect(mapMlOrderStatusToFulfillment('cancelled', 'delivered')).toBeNull()
+    expect(mapMlOrderStatusToFulfillment(null, 'delivered')).toBeNull()
+  })
+  it('pre-ship / failed / unknown shipment statuses are a deliberate no-op', () => {
+    for (const s of ['pending', 'handling', 'ready_to_ship', 'not_delivered', 'cancelled', 'weird_status', null, undefined]) {
+      expect(mapMlOrderStatusToFulfillment('paid', s)).toBeNull()
+    }
+  })
+})
+
+describe('shouldApplyFulfillmentTransition — forward-only, replay-safe (US-2 acceptance)', () => {
+  it('applies a genuine forward move', () => {
+    expect(shouldApplyFulfillmentTransition('not_fulfilled', 'shipped')).toBe(true)
+    expect(shouldApplyFulfillmentTransition('shipped', 'delivered')).toBe(true)
+    expect(shouldApplyFulfillmentTransition(null, 'shipped')).toBe(true) // unset ⇒ treated as not-yet-fulfilled
+  })
+  it('a replay of the same state is a no-op', () => {
+    expect(shouldApplyFulfillmentTransition('shipped', 'shipped')).toBe(false)
+    expect(shouldApplyFulfillmentTransition('delivered', 'delivered')).toBe(false)
+  })
+  it('never regresses — a stale "shipped" after "delivered" is a no-op', () => {
+    expect(shouldApplyFulfillmentTransition('delivered', 'shipped')).toBe(false)
+  })
+  it('a canceled order never auto-advances', () => {
+    expect(shouldApplyFulfillmentTransition('canceled', 'shipped')).toBe(false)
+    expect(shouldApplyFulfillmentTransition('canceled', 'delivered')).toBe(false)
+  })
+  it('null target is always false', () => {
+    expect(shouldApplyFulfillmentTransition('not_fulfilled', null)).toBe(false)
   })
 })
 

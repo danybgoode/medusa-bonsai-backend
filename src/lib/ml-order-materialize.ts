@@ -175,6 +175,10 @@ export async function materializeMlOrder(
           metadata: {
             source: 'mercadolibre',
             ml_order_id: String(mlOrder.id),
+            // The seller who owns this order — the reconcile-ml-order-status job
+            // (US-2) reads this to fetch the ML shipment with the right token
+            // without a second lookup.
+            ml_seller_id: link.seller_id,
             ml_pack_id: mlOrder.pack_id != null ? String(mlOrder.pack_id) : null,
             ml_buyer: mlOrder.buyer
               ? { id: mlOrder.buyer.id ?? null, nickname: mlOrder.buyer.nickname ?? null }

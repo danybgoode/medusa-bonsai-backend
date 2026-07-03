@@ -97,3 +97,61 @@ export function isUniqueViolationError(e: unknown): boolean {
   const name = (e as { name?: string } | null)?.name
   return code === '23505' || name === 'UniqueConstraintViolationException'
 }
+
+// ── ML → Medusa fulfillment-state mapping (US-2, ml-orders-native S1) ────────────
+// Real ML status vocabularies (confirmed against Mercado Libre's public API docs):
+// order.status ∈ {confirmed, payment_required, payment_in_process, partially_paid,
+// paid, cancelled, invalid}; shipment.status ∈ {pending, handling, ready_to_ship,
+// shipped, delivered, not_delivered, cancelled}. Only PAID orders' shipments are
+// ever mapped — everything else is a deliberate no-op (never guess a transition
+// on an unpaid/cancelled/unknown status).
+
+export type MlFulfillmentTransition = 'shipped' | 'delivered'
+
+/**
+ * Map an ML order + shipment status pair to the Medusa fulfillment transition to
+ * apply, or `null` for "no transition" (pre-payment states, `not_delivered`/
+ * `cancelled`, or an unrecognized value — the caller logs the no-op rather than
+ * guessing). Pure, no I/O.
+ */
+export function mapMlOrderStatusToFulfillment(
+  orderStatus: string | null | undefined,
+  shipmentStatus: string | null | undefined,
+): MlFulfillmentTransition | null {
+  if (orderStatus !== 'paid') return null
+  if (shipmentStatus === 'delivered') return 'delivered'
+  if (shipmentStatus === 'shipped') return 'shipped'
+  return null
+}
+
+/** Real Medusa `FulfillmentStatus` values, ranked so a transition only ever moves forward. */
+const FULFILLMENT_RANK: Record<string, number> = {
+  not_fulfilled: 0,
+  partially_fulfilled: 0,
+  fulfilled: 0,
+  partially_shipped: 1,
+  shipped: 1,
+  partially_delivered: 2,
+  delivered: 2,
+}
+
+/**
+ * Replay/out-of-order safety (US-2 acceptance: "replay changes nothing"): apply
+ * `target` only if it's a strictly FORWARD move from the order's current
+ * `fulfillment_status`. A stale "shipped" arriving after "delivered" was already
+ * recorded, or the exact same status replaying, is a no-op — never regresses or
+ * double-applies. A `canceled` order is terminal and never auto-advances,
+ * regardless of target (checked explicitly, not via the rank table — a
+ * cancellation isn't "behind" `not_fulfilled`, it's a different axis entirely).
+ * An unrecognized current status is treated as rank 0 (the safe "not yet
+ * fulfilled" assumption).
+ */
+export function shouldApplyFulfillmentTransition(
+  currentFulfillmentStatus: string | null | undefined,
+  target: MlFulfillmentTransition | null,
+): boolean {
+  if (!target) return false
+  if (currentFulfillmentStatus === 'canceled') return false
+  const currentRank = FULFILLMENT_RANK[currentFulfillmentStatus ?? ''] ?? 0
+  return FULFILLMENT_RANK[target] > currentRank
+}
