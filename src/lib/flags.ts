@@ -31,7 +31,7 @@ import {
   type FlagRow,
 } from './flags-cache'
 
-export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled' | 'ml.sync_enabled'
+export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled' | 'ml.sync_enabled' | 'ml.orders_enabled'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -50,11 +50,19 @@ export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled' | 'ml
  *    on ML or in Miyagi) is worse than the feature being off, so a read outage
  *    must HALT sync, not run it uncontrolled. Enabling is the deliberate
  *    action, and a per-seller enable (on the ML connection) must ALSO be on.
+ *  - ENABLEMENT (`ml.orders_enabled`): default `false` (ml-orders-native epic,
+ *    Sprint 1). Materializing a paid ML sale as a real Medusa order is new write
+ *    surface on the same critical path as the stock sync above — a flag-read
+ *    outage must not start creating orders unsupervised, so this fails to the
+ *    "today's behavior exactly" side (stock sync only, no order) like
+ *    `ml.sync_enabled`, not to the usual kill-switch default-`true`. Sprint 1
+ *    gates on this GLOBAL flag only; a per-seller enable is Sprint 2 · US-6.
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
   'shipping.envia_enabled': false,
   'ml.sync_enabled': false,
+  'ml.orders_enabled': false,
 }
 
 const TABLE = 'platform_flags'

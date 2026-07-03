@@ -138,19 +138,37 @@ export async function getItemDetail(accessToken: string, itemId: string): Promis
 /**
  * The order shape the stock sync reads: which ML items a sale touched, and **how
  * many units** of each (the delta we apply to Medusa). `id` is the exactly-once
- * key.
+ * key. Widened (ml-orders-native S1 · US-1) with the fields order materialization
+ * needs — `unit_price`/`sale_fee` per line, `buyer`, `pack_id`, `shipping.id`, and
+ * `payments[]` — plus an index signature so the FULL raw response round-trips
+ * through this type untouched (we persist it verbatim; see the Sprint 1 plan's
+ * decision to capture raw payloads rather than guess ML's exact fee/shipping
+ * field names from outside a live sandbox).
  */
 export type MlOrder = {
   id: string | number
   status?: string
   date_created?: string
-  order_items?: { item?: { id?: string }; quantity?: number }[]
+  pack_id?: string | number | null
+  currency_id?: string
+  total_amount?: number
+  buyer?: { id?: number | string; nickname?: string; email?: string | null }
+  shipping?: { id?: number | string | null }
+  order_items?: {
+    item?: { id?: string; title?: string }
+    quantity?: number
+    unit_price?: number
+    sale_fee?: number
+  }[]
+  payments?: Record<string, unknown>[]
+  [key: string]: unknown
 }
 
 /**
- * Fetch one ML order (Sprint 4 · inbound stock webhook). An `orders_v2`
- * notification carries `/orders/{id}`; we read its line items to learn which ML
- * items sold and how many. GET /orders/{id}.
+ * Fetch one ML order (Sprint 4 · inbound stock webhook; widened for order
+ * materialization in S1). An `orders_v2` notification carries `/orders/{id}`; we
+ * read its line items to learn which ML items sold and how many, and (S1) the
+ * full response is what gets persisted as `ml_raw_order`. GET /orders/{id}.
  */
 export async function getMlOrder(accessToken: string, orderId: string): Promise<MlOrder> {
   const res = await fetch(`${ML_API}/orders/${encodeURIComponent(orderId)}`, {
@@ -158,6 +176,29 @@ export async function getMlOrder(accessToken: string, orderId: string): Promise<
   })
   if (!res.ok) throw new Error(`ML /orders/${orderId} failed: ${res.status}`)
   return res.json()
+}
+
+/**
+ * Fetch one ML shipment's detail (ml-orders-native S1 · US-1). An order's
+ * `shipping.id` only — the real cost/status lives here. `x-format-new: true` is
+ * ML's documented header for the current response shape. Best-effort by
+ * contract: the caller must not let a failed shipment fetch block order
+ * materialization, so this returns `null` on any failure rather than throwing.
+ * GET /shipments/{id}.
+ */
+export async function getShipmentDetail(
+  accessToken: string,
+  shippingId: string | number,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(`${ML_API}/shipments/${encodeURIComponent(String(shippingId))}`, {
+      headers: { Authorization: `Bearer ${accessToken}`, 'x-format-new': 'true' },
+    })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
 }
 
 /**

@@ -14,6 +14,11 @@
  *
  * Gated by the global `ml.sync_enabled` kill-switch: flip it OFF and this job (and
  * all live sync) halts immediately.
+ *
+ * (ml-orders-native S1 · US-1) When `ml.orders_enabled` is also on, step 1's
+ * recovery additionally materializes a Medusa order for each recovered sale —
+ * the exact same `applyMlOrderToLink` path the webhook uses, so a dropped
+ * webhook recovers BOTH the stock decrement and the order, not just the former.
  */
 
 import { MedusaContainer } from '@medusajs/framework/types'
@@ -42,6 +47,7 @@ type Link = {
 export default async function reconcileMlInventoryJob(container: MedusaContainer) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
   if (!(await isEnabled('ml.sync_enabled'))) return // global kill-switch (fail-closed)
+  const ordersEnabled = await isEnabled('ml.orders_enabled')
 
   const ml = container.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
   const allLinks = (await ml.listProductMlLinks({}, { take: MAX_LINKS_PER_RUN })) as Link[]
@@ -84,6 +90,10 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
         (marker ? new Date(marker).getTime() : Date.now() - FIRST_RUN_LOOKBACK_MS) - OVERLAP_MS,
       ).toISOString()
       const { orders, truncated } = await ml.searchSellerOrdersSince(sellerId, since)
+      // Fetched once per seller (not per order) — only needed for materialization's
+      // shipment-detail fetch, and only when there's at least one order to recover.
+      const sellerAccessToken =
+        ordersEnabled && orders.length > 0 ? await ml.getAccessTokenForSeller(sellerId) : null
       let newestDate = ''
       for (const order of orders) {
         if (order.date_created && order.date_created > newestDate) newestDate = order.date_created
@@ -91,7 +101,16 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
         for (const { mlItemId, quantity } of order.items) {
           const link = linkByItem.get(mlItemId)
           if (!link) continue
-          const result = await applyMlOrderToLink(container as never, ml, link, order.id, quantity)
+          const result = await applyMlOrderToLink(
+            container as never,
+            ml,
+            link,
+            order.id,
+            quantity,
+            ordersEnabled,
+            order.raw,
+            sellerAccessToken,
+          )
           if (result === 'applied') {
             recovered++
             sRecovered++

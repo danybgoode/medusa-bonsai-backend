@@ -11,13 +11,18 @@
  *    quantities and **decrement** Medusa available by that many units
  *    (`applySale` → clamped ≥ 0, preserves Medusa reservations). A delta composes
  *    correctly with a simultaneous Miyagi sale; an absolute set would double-count.
- *  - **Idempotent per ML order id** (a bounded ring of applied order ids on the
- *    linkage): a redelivered notification, or the reconcile poll surfacing the
- *    same order, applies once. (The order id — not the notification `_id` — is the
- *    exactly-once key; distinct sales of one item must not collapse to a replay.)
+ *  - **Idempotent per ML order id** (a durable `ml_applied_order` DB row, ml-
+ *    orders-native S1 · US-0): a redelivered notification, or the reconcile poll
+ *    surfacing the same order, applies once. (The order id — not the notification
+ *    `_id` — is the exactly-once key; distinct sales of one item must not
+ *    collapse to a replay.)
  *  - Gated by the global `ml.sync_enabled` kill-switch + the per-seller enable;
  *    unknown user / unlinked item / disabled seller → clean 200 ignore.
  *  - Always ACK 200 (except a malformed body); the reconcile job recovers any gap.
+ *  - (S1 · US-1) When `ml.orders_enabled` is also on, the SAME apply additionally
+ *    materializes a real Medusa order — see `applyMlOrderToLink` for how the two
+ *    effects stay coupled (never a decrement without a record, never an order
+ *    without the decrement that funded it).
  *
  * Public by design (ML has no shared secret): validated by mapping `user_id` to a
  * connected seller and reading the order from ML with that seller's token. The
@@ -55,10 +60,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       return res.status(200).json({ ...ACK, ignored: 'seller_disabled' })
     }
 
-    const { status, items: soldItems } = await ml.getMlOrderItems(conn.seller_id, orderId)
+    const { status, items: soldItems, raw: rawOrder } = await ml.getMlOrderItems(conn.seller_id, orderId)
     // Only a paid order consumed stock — a payment_required/cancelled order must not
     // decrement (a later `paid` notification applies then, idempotent per order id).
     if (!isSoldOrderStatus(status)) return res.status(200).json({ ...ACK, ignored: 'not_paid' })
+
+    // ml-orders-native S1 · US-1: materialize a Medusa order alongside the stock
+    // decrement, dark behind the global flag. The seller's token is only needed
+    // on this path (the shipment-detail fetch), so it's fetched once here rather
+    // than inside the per-item loop/lock.
+    const ordersEnabled = await isEnabled('ml.orders_enabled')
+    const sellerAccessToken = ordersEnabled ? await ml.getAccessTokenForSeller(conn.seller_id) : null
 
     const applied: string[] = []
     for (const { mlItemId, quantity } of soldItems) {
@@ -66,7 +78,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         const link = await ml.getLinkByMlItem(mlItemId)
         if (!link || link.seller_id !== conn.seller_id) continue // unlinked → clean ignore
         // Atomic, exactly-once decrement (serialized per link; re-checks inside the lock).
-        const result = await applyMlOrderToLink(req.scope, ml, link, orderId, quantity)
+        const result = await applyMlOrderToLink(
+          req.scope,
+          ml,
+          link,
+          orderId,
+          quantity,
+          ordersEnabled,
+          rawOrder,
+          sellerAccessToken,
+        )
         if (result === 'applied') applied.push(mlItemId)
       } catch (e) {
         console.error('[ml-webhook] apply failed', mlItemId, orderId, e)

@@ -48,16 +48,6 @@ export function shouldPushStock(args: {
   return cur !== clampAvailable(args.lastPushedAvailable)
 }
 
-// ── Exactly-once sale application (US-11) ────────────────────────────────────────
-// The dedupe key is the ML **order id** — the natural exactly-once key for a sale.
-// A bounded ring of applied order ids rides the linkage metadata, so the same ML
-// order decrements Medusa once no matter how many notifications (or reconcile
-// polls) surface it. (Earlier drafts keyed on the notification `_id` and fell back
-// to the `resource` path — unsafe: distinct sales of the same item share a
-// resource and would be dropped as replays.)
-export type AppliedOrder = { id: string; ts: string }
-export const APPLIED_ORDERS_CAP = 500
-
 /**
  * Only a **paid** ML order has consumed stock. Applying every order id (incl.
  * `payment_required` / `cancelled` / `invalid`) would wrongly, permanently reduce
@@ -68,24 +58,42 @@ export function isSoldOrderStatus(status: string | null | undefined): boolean {
   return status === 'paid'
 }
 
-export function isOrderApplied(applied: AppliedOrder[] | null | undefined, orderId: string): boolean {
-  if (!orderId) return false
-  return Array.isArray(applied) && applied.some((o) => o.id === orderId)
+// ── Exactly-once sale application (US-0, ml-orders-native S1) ────────────────────
+// The dedupe key is the ML **order id** — the natural exactly-once key for a sale.
+// Supersedes the capped 500-entry ring that used to ride the linkage metadata (a
+// ring evicts, so a very-delayed replay could theoretically outrun it) with a
+// durable `ml_applied_order` DB row, `unique(link_id, ml_order_id)`. (Earlier
+// drafts keyed on the notification `_id` and fell back to the `resource` path —
+// unsafe: distinct sales of the same item share a resource and would be dropped
+// as replays.)
+
+export type AppliedOrderRow = { id: string; medusa_order_id: string | null } | null | undefined
+
+export type ApplyDecision =
+  | { kind: 'skip' } // a row already exists for (link, orderId) — already applied, no matter what
+  | { kind: 'apply'; materializeOrder: boolean } // fresh — stock decrement always runs; order creation only if the flag is on
+
+/**
+ * The exactly-once + "one inventory effect, flag on or off" decision (US-0/US-1).
+ * An existing row always wins (idempotent replay, regardless of the current flag
+ * value — flipping the flag mid-flight must never re-materialize an already-applied
+ * sale). A fresh order always gets the stock decrement; it additionally gets a
+ * Medusa order only when `ordersEnabled` is true — so the inventory effect count
+ * never depends on the flag, only the order-creation side effect does.
+ */
+export function decideMlOrderApply(existing: AppliedOrderRow, ordersEnabled: boolean): ApplyDecision {
+  if (existing) return { kind: 'skip' }
+  return { kind: 'apply', materializeOrder: ordersEnabled }
 }
 
 /**
- * Append an applied ML order id to the bounded ring (drops the oldest past the
- * cap). A blank or already-present id returns the list unchanged, so the ring
- * only grows on a genuinely new order.
+ * Classify a DB write error as a unique-constraint violation (Postgres code
+ * `23505`, or MikroORM's own exception name) — the defense-in-depth path when two
+ * writers race the insert despite the per-link lock (e.g. a lock-service outage).
+ * A caller that sees this should treat the row as already-applied, not throw.
  */
-export function recordAppliedOrder(
-  applied: AppliedOrder[] | null | undefined,
-  orderId: string,
-  now: string = new Date().toISOString(),
-  cap: number = APPLIED_ORDERS_CAP,
-): AppliedOrder[] {
-  const base = Array.isArray(applied) ? applied : []
-  if (!orderId || base.some((o) => o.id === orderId)) return base
-  const next = [...base, { id: orderId, ts: now }]
-  return next.length > cap ? next.slice(next.length - cap) : next
+export function isUniqueViolationError(e: unknown): boolean {
+  const code = (e as { code?: string } | null)?.code
+  const name = (e as { name?: string } | null)?.name
+  return code === '23505' || name === 'UniqueConstraintViolationException'
 }

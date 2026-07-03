@@ -1,13 +1,16 @@
 /**
  * Atomic application of an ML sale to a linked Medusa product's inventory
- * (Sprint 4 · US-11/12). Shared by the inbound webhook and the reconcile job so
- * the exactly-once decrement is defined once.
+ * (Sprint 4 · US-11/12; exactly-once storage upgraded to a durable table in
+ * ml-orders-native S1 · US-0). Shared by the inbound webhook and the reconcile
+ * job so the exactly-once decrement is defined once.
  *
  * Two correctness guarantees:
- *  - **Exactly-once** — the applied-order ring + the decrement are a
- *    read-check-write, so concurrent deliveries (two webhooks, or a webhook racing
+ *  - **Exactly-once** — a `getAppliedOrder` read-check + `recordAppliedOrder`
+ *    write against the durable `ml_applied_order` table (`unique(link_id,
+ *    ml_order_id)`), so concurrent deliveries (two webhooks, or a webhook racing
  *    the reconcile poll) are serialized per link with the Redis-backed **locking**
- *    module and re-checked inside the lock.
+ *    module and re-checked inside the lock. The table's unique index is
+ *    defense-in-depth against a lock-service outage.
  *  - **Oversell-safe decrement** — an ML sale is a **relative** reduction of
  *    `stocked_quantity` (`adjustInventory(-n)`), NOT an absolute set of available.
  *    A relative stocked decrement composes with a concurrent Miyagi reservation
@@ -22,11 +25,13 @@
 
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import type MercadolibreModuleService from '../modules/mercadolibre/service'
-import { isOrderApplied, safeDecrement, type AppliedOrder } from '../modules/mercadolibre/sync-utils'
+import { decideMlOrderApply, safeDecrement } from '../modules/mercadolibre/sync-utils'
 import { getVariantInventoryItemId, resolveStockLocationId } from '../api/store/_utils/inventory'
+import { materializeMlOrder } from './ml-order-materialize'
+import type { MlOrder } from '../modules/mercadolibre/client'
 
 type Scope = { resolve: (key: string) => any }
-type LinkRef = { id: string; product_id: string; variant_id?: string | null }
+type LinkRef = { id: string; seller_id: string; product_id: string; variant_id?: string | null; ml_item_id: string }
 
 export type ApplyResult = 'applied' | 'skipped'
 
@@ -71,10 +76,14 @@ async function decrementProductStock(
 }
 
 /**
- * Apply one ML order's sale of `quantity` units to `link`, exactly once, atomically.
- * Records the order id in the ring only — the outbound mirror (`pushStockToMl`) owns
- * `last_pushed_available`, so an ML sale doesn't stamp a baseline that could make a
- * later real push skip.
+ * Apply one ML order's sale of `quantity` units to `link`, exactly once,
+ * atomically — the stock decrement always runs (S4); when `ordersEnabled` is
+ * true AND this is a fresh apply (not a replay), it ALSO materializes a Medusa
+ * order inside the same lock (ml-orders-native S1 · US-0/US-1) — never both a
+ * decrement AND a duplicate order on replay, never an order without the
+ * decrement that funded it. `mlOrder` (the full raw ML order) + `sellerAccessToken`
+ * are only needed when `ordersEnabled` is true (materialization + its shipment
+ * fetch); omit them on the flag-off path.
  */
 export async function applyMlOrderToLink(
   scope: Scope,
@@ -82,34 +91,51 @@ export async function applyMlOrderToLink(
   link: LinkRef,
   orderId: string,
   quantity: number,
+  ordersEnabled = false,
+  mlOrder?: MlOrder | null,
+  sellerAccessToken?: string | null,
 ): Promise<ApplyResult> {
   const locking = scope.resolve(Modules.LOCKING)
-  // The critical section holds ONLY the correctness writes (decrement + markApplied);
-  // the observability event is emitted AFTER the lock releases so a slow log insert
-  // can never extend the lock hold (cross-review: keep side effects out of the lock).
+  // The critical section holds ONLY the correctness writes (decrement + record +
+  // materialize); the observability event is emitted AFTER the lock releases so a
+  // slow log insert can never extend the lock hold (cross-review: keep side
+  // effects out of the lock).
   const applied = await locking.execute(
     `ml-sync:${link.id}`,
-    async (): Promise<{ decremented: number; sellerId: string; mlItemId: string | null } | null> => {
-      // Re-read the link INSIDE the lock so the applied-order check reflects any
-      // concurrent apply that already committed.
-      const fresh = await ml.getLink(link.id)
-      const meta = (fresh?.metadata ?? {}) as Record<string, unknown>
-      if (isOrderApplied(meta.ml_applied_orders as AppliedOrder[] | undefined, orderId)) return null
+    async (): Promise<{ decremented: number; sellerId: string; mlItemId: string | null; medusaOrderId: string | null } | null> => {
+      // Re-read INSIDE the lock so the applied-order check reflects any concurrent
+      // apply that already committed (US-0: durable table, not the metadata ring).
+      const [fresh, existing] = await Promise.all([ml.getLink(link.id), ml.getAppliedOrder(link.id, orderId)])
+      const decision = decideMlOrderApply(existing, ordersEnabled)
+      if (decision.kind === 'skip') return null
 
-      if (quantity > 0) {
-        const decremented = await decrementProductStock(scope, link.product_id, link.variant_id, quantity)
-        if (decremented == null) return null // couldn't resolve inventory → retry, do NOT mark
-        await ml.markOrderApplied(link.id, orderId)
-        return {
-          decremented,
-          sellerId: (fresh as { seller_id?: string } | null)?.seller_id ?? '',
-          mlItemId: (fresh as { ml_item_id?: string } | null)?.ml_item_id ?? null,
-        }
+      const decremented =
+        quantity > 0 ? await decrementProductStock(scope, link.product_id, link.variant_id, quantity) : 0
+      if (decremented == null) return null // couldn't resolve inventory → retry, do NOT mark
+
+      // The decrement is now a REAL, committed inventory mutation — from here on
+      // we MUST record the row no matter what, or a retry would decrement again
+      // (the exact double-apply bug this table exists to prevent). Materialization
+      // failure (an unresolved product/config gap) degrades to `medusaOrderId:
+      // null` rather than aborting; the order is left un-materialized for this
+      // sale — a stated, honest gap for Sprint 1 — never a second stock decrement.
+      let medusaOrderId: string | null = null
+      if (decision.materializeOrder && mlOrder && sellerAccessToken) {
+        const materialized = await materializeMlOrder(scope, link, sellerAccessToken, mlOrder)
+        medusaOrderId = materialized?.medusaOrderId ?? null
       }
-      await ml.markOrderApplied(link.id, orderId) // zero-qty line: record exactly-once, no stock change
-      return null
+
+      await ml.recordAppliedOrder(link.id, orderId, { inventoryDelta: decremented, medusaOrderId })
+      return {
+        decremented,
+        sellerId: (fresh as { seller_id?: string } | null)?.seller_id ?? '',
+        mlItemId: (fresh as { ml_item_id?: string } | null)?.ml_item_id ?? null,
+        medusaOrderId,
+      }
     },
-    { timeout: 5 },
+    // Order materialization adds a shipment fetch + a DB write inside the lock —
+    // give it more headroom than the stock-only path.
+    { timeout: ordersEnabled && mlOrder ? 15 : 5 },
   )
 
   if (!applied) return 'skipped'
@@ -122,8 +148,10 @@ export async function applyMlOrderToLink(
     productId: link.product_id,
     mlItemId: applied.mlItemId,
     code: orderId,
-    message: `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId})`,
-    metadata: { sold: quantity, decremented: applied.decremented },
+    message: applied.medusaOrderId
+      ? `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId}, pedido ${applied.medusaOrderId})`
+      : `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId})`,
+    metadata: { sold: quantity, decremented: applied.decremented, medusa_order_id: applied.medusaOrderId },
   })
   return 'applied'
 }
