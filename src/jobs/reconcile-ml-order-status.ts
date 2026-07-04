@@ -59,6 +59,7 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
     `select id, fulfillment_status, metadata from "order"
      where metadata->>'source' = 'mercadolibre'
        and deleted_at is null
+       and status != 'canceled'
        and (fulfillment_status is null or fulfillment_status not in ('delivered','partially_delivered','canceled'))
      order by created_at asc
      limit ?`,
