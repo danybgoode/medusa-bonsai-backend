@@ -31,7 +31,12 @@ import {
   type FlagRow,
 } from './flags-cache'
 
-export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled' | 'ml.sync_enabled' | 'ml.orders_enabled'
+export type FlagKey =
+  | 'checkout.stripe_enabled'
+  | 'shipping.envia_enabled'
+  | 'ml.sync_enabled'
+  | 'ml.orders_enabled'
+  | 'ml.sync_paywall_enabled'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -56,13 +61,21 @@ export type FlagKey = 'checkout.stripe_enabled' | 'shipping.envia_enabled' | 'ml
  *    outage must not start creating orders unsupervised, so this fails to the
  *    "today's behavior exactly" side (stock sync only, no order) like
  *    `ml.sync_enabled`, not to the usual kill-switch default-`true`. Sprint 1
- *    gates on this GLOBAL flag only; a per-seller enable is Sprint 2 · US-6.
+ *    gated this GLOBAL flag only; Sprint 2 · US-6 additionally gates on the
+ *    per-seller `ml_sync` entitlement below.
+ *  - ENABLEMENT (`ml.sync_paywall_enabled`): default `false`, mirrors the
+ *    frontend's own key of the same name (`lib/flags.ts`) — the paid/promoter-SKU
+ *    entitlement gate for ML sync/orders (epic 03 · mercadolibre-sync Sprint 5;
+ *    reused here for order materialization, ml-orders-native S2 · US-6). A
+ *    flag-read outage must not silently ungate a paid feature, so this fails to
+ *    "paywall off" (today's — pre-paywall — behavior), not to "everyone entitled."
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
   'shipping.envia_enabled': false,
   'ml.sync_enabled': false,
   'ml.orders_enabled': false,
+  'ml.sync_paywall_enabled': false,
 }
 
 const TABLE = 'platform_flags'

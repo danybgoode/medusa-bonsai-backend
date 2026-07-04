@@ -30,6 +30,7 @@ import MercadolibreModuleService from '../modules/mercadolibre/service'
 import { applyMlOrderToLink } from '../lib/ml-sync-apply'
 import { isSoldOrderStatus } from '../modules/mercadolibre/sync-utils'
 import { getProductAvailableQuantity } from '../api/store/_utils/inventory'
+import { resolveMlOrdersEntitlement } from '../lib/ml-orders-entitlement'
 
 const MAX_LINKS_PER_RUN = 2000
 const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000 // no marker yet → scan the last 24h
@@ -47,7 +48,7 @@ type Link = {
 export default async function reconcileMlInventoryJob(container: MedusaContainer) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
   if (!(await isEnabled('ml.sync_enabled'))) return // global kill-switch (fail-closed)
-  const ordersEnabled = await isEnabled('ml.orders_enabled')
+  const globalOrdersEnabled = await isEnabled('ml.orders_enabled')
 
   const ml = container.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
   const allLinks = (await ml.listProductMlLinks({}, { take: MAX_LINKS_PER_RUN })) as Link[]
@@ -84,6 +85,11 @@ export default async function reconcileMlInventoryJob(container: MedusaContainer
 
     // ── 1. Recover missed ML sales (delta, idempotent per order id) ──────────────
     const nowIso = new Date().toISOString()
+    // S2 · US-6: per-seller entitlement, resolved once per seller (not per link/
+    // order) — the global flag stays necessary but is no longer sufficient; the
+    // stock recovery below (step 1's decrement) is never gated by either check.
+    const ordersEnabled =
+      globalOrdersEnabled && (await resolveMlOrdersEntitlement(container as never, sellerId)).entitled
     try {
       const marker = await ml.getSellerSyncMarker(sellerId)
       const since = new Date(
