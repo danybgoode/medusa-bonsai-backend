@@ -41,6 +41,7 @@ import {
 } from '../modules/mercadolibre/sync-utils'
 import { applyMlFulfillmentTransition } from '../lib/ml-fulfillment-apply'
 import { applyMlOrderCancel } from '../lib/ml-order-cancel-apply'
+import { notifySellerOfMlOrderEvent } from '../lib/ml-notify-seller'
 
 const MAX_ORDERS_PER_RUN = 500
 // Real Medusa FulfillmentStatus values that mean "nothing left to track."
@@ -117,6 +118,7 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
             message: `Pedido de Mercado Libre cancelado — reabastecido +${cancelDecision.restockQty} (pedido ${candidate.id})`,
             metadata: { ml_order_id: mlOrderId, medusa_order_id: candidate.id, restocked: cancelDecision.restockQty },
           })
+          void notifySellerOfMlOrderEvent(container as never, sellerId, 'ml_order_cancelled', candidate.id)
         }
         continue // cancelled (or a concurrent pass already handled it) — nothing else to reconcile for this order
       }
@@ -176,6 +178,12 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
           message: `Estado de pedido de Mercado Libre actualizado: ${target} (pedido ${candidate.id})`,
           metadata: { ml_order_id: mlOrderId, medusa_order_id: candidate.id },
         })
+        void notifySellerOfMlOrderEvent(
+          container as never,
+          sellerId,
+          target === 'shipped' ? 'ml_order_shipped' : 'ml_order_delivered',
+          candidate.id,
+        )
       }
     } catch (e) {
       alerts.push(
