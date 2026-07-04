@@ -193,6 +193,83 @@ describe('decideMlOrderCancel — US-4 exactly-once cancel/refund mapping', () =
   })
 })
 
+describe('signature regression smoke — one ML sale moves stock EXACTLY ONCE (Sprint 1+2 combined)', () => {
+  // A tiny in-memory simulation driven purely by the exported decision
+  // functions — this IS the correctness core `applyMlOrderToLink`/
+  // `applyMlOrderCancel` compose around; proving it here proves the invariant
+  // the README's "Deploy order" section requires at every sprint: an ML sale
+  // moves stock exactly once, flag ON and flag OFF — now extended through a
+  // cancel + a replay of the ORIGINAL sale notification (a case decideMlOrderApply
+  // must keep skipping even after the row's been cancelled, since it only looks
+  // at medusa_order_id, never cancelled_at).
+  type Row = { id: string; medusa_order_id: string | null; cancelled_at: string | null; inventory_delta: number }
+
+  function runScenario(ordersEnabled: boolean) {
+    let stocked = 10
+    let row: Row | null = null
+    let decrements = 0
+    let restocks = 0
+
+    // 1. First sight of the sale — always decrements once, materializes only if enabled.
+    const first = decideMlOrderApply(row, ordersEnabled)
+    expect(first).toEqual({ kind: 'apply', materializeOrder: ordersEnabled })
+    const soldQty = 3
+    const decrement = safeDecrement(stocked, 0, soldQty)
+    stocked -= decrement
+    decrements++
+    row = {
+      id: 'mlao_1',
+      medusa_order_id: ordersEnabled ? 'order_1' : null,
+      cancelled_at: null,
+      inventory_delta: decrement,
+    }
+
+    // 2. A webhook replay of the SAME sale notification — must never decrement again.
+    const replay = decideMlOrderApply(row, ordersEnabled)
+    expect(replay.kind).not.toBe('apply') // 'skip' or (flag-off case) still 'skip'
+    if (replay.kind === 'apply') decrements++ // would fail the assertion above first
+
+    // 3. Cancel — only reachable/meaningful once an order was actually materialized.
+    if (row.medusa_order_id) {
+      const cancelDecision = decideMlOrderCancel(row, 'cancelled', 'not_fulfilled')
+      expect(cancelDecision).toEqual({ kind: 'restock-and-cancel', restockQty: row.inventory_delta })
+      if (cancelDecision.kind === 'restock-and-cancel') {
+        stocked += cancelDecision.restockQty
+        restocks++
+        row = { ...row, cancelled_at: new Date().toISOString() }
+      }
+
+      // 4. A replayed cancel notification — must never restock a second time.
+      const cancelReplay = decideMlOrderCancel(row, 'cancelled', 'not_fulfilled')
+      expect(cancelReplay).toEqual({ kind: 'skip' })
+
+      // 5. The ORIGINAL sale notification replaying AFTER cancellation — must
+      // still skip (decideMlOrderApply only ever looks at medusa_order_id, not
+      // cancelled_at), so a cancelled order can never be re-decremented.
+      const saleReplayAfterCancel = decideMlOrderApply(row, ordersEnabled)
+      expect(saleReplayAfterCancel).toEqual({ kind: 'skip' })
+    }
+
+    return { stocked, decrements, restocks, finalRow: row }
+  }
+
+  it('flag ON: decrement once, materialize, cancel restocks exactly the decremented amount, net stock unchanged', () => {
+    const result = runScenario(true)
+    expect(result.decrements).toBe(1)
+    expect(result.restocks).toBe(1)
+    expect(result.stocked).toBe(10) // -3 then +3 — back to baseline, never double-moved
+    expect(result.finalRow?.cancelled_at).not.toBeNull()
+  })
+
+  it('flag OFF: decrement once, no materialization, so no cancel/restock ever applies (nothing to cancel)', () => {
+    const result = runScenario(false)
+    expect(result.decrements).toBe(1)
+    expect(result.restocks).toBe(0)
+    expect(result.stocked).toBe(7) // -3, stays decremented — no order was ever created to cancel
+    expect(result.finalRow?.medusa_order_id).toBeNull()
+  })
+})
+
 describe('normalizeOrderItems — per-item sold quantities', () => {
   it('sums quantities per ML item and drops items without an id', () => {
     const items = normalizeOrderItems({
