@@ -176,3 +176,57 @@ export function shouldApplyFulfillmentTransition(
   const currentRank = FULFILLMENT_RANK[currentFulfillmentStatus ?? ''] ?? 0
   return FULFILLMENT_RANK[target] > currentRank
 }
+
+// ── ML → Medusa cancel/refund mapping (US-4, ml-orders-native S2) ───────────────
+// ML's own vocabulary only exposes a full order-level `cancelled` (see the
+// vocabulary note above `mapMlOrderStatusToFulfillment`) — there is no distinct
+// partial-refund/mediation status in the client today, so this only reacts to a
+// full `cancelled` order.status, same "never guess" discipline as the fulfillment
+// mapping. A true partial-refund signal is a fast-follow once the client fetches
+// ML's mediations/claims surface (out of this sprint's scope, same shape as the
+// still-open shipments-webhook gap above).
+
+export type AppliedOrderCancelRow = {
+  medusa_order_id: string | null
+  cancelled_at: string | Date | null
+  inventory_delta: number
+} | null | undefined
+
+export type CancelDecision =
+  | { kind: 'skip' } // never materialized, already cancelled, or ML isn't reporting a cancel
+  | { kind: 'restock-and-cancel'; restockQty: number } // the common case — not yet shipped
+  | { kind: 'log-edge'; code: string } // ML cancelled AFTER Miyagi already shipped — never guessed, logged instead
+
+/** True only for ML's unambiguous full-order cancellation. */
+export function isMlCancelledStatus(mlOrderStatus: string | null | undefined): boolean {
+  return mlOrderStatus === 'cancelled'
+}
+
+/**
+ * Decide how (or whether) to reflect an ML cancellation/refund onto an
+ * already-materialized Medusa order (US-4 acceptance: exactly-once restock,
+ * replay-safe, never a crash on an edge state). `restockQty` is always the
+ * row's own `inventory_delta` — what THIS decrement actually removed, not ML's
+ * sold qty — so a restock can never put back more than was ever taken out (the
+ * same asymmetric-safety reasoning as `safeDecrement`).
+ *
+ * A row already fulfilled to `shipped` or beyond when ML reports a cancel is a
+ * post-fulfillment return/mediation — genuinely different from a pre-ship
+ * cancel (Miyagi already handed the item to a carrier) — so it's surfaced as a
+ * logged note for manual review rather than auto-restocked/auto-cancelled.
+ */
+export function decideMlOrderCancel(
+  applied: AppliedOrderCancelRow,
+  mlOrderStatus: string | null | undefined,
+  medusaFulfillmentStatus: string | null | undefined,
+): CancelDecision {
+  if (!applied || !applied.medusa_order_id) return { kind: 'skip' } // nothing materialized → nothing to cancel
+  if (applied.cancelled_at) return { kind: 'skip' } // already handled — replay is a no-op
+  if (!isMlCancelledStatus(mlOrderStatus)) return { kind: 'skip' }
+
+  const fulfillmentRank = FULFILLMENT_RANK[medusaFulfillmentStatus ?? ''] ?? 0
+  if (fulfillmentRank >= 1) {
+    return { kind: 'log-edge', code: 'ML_CANCEL_AFTER_FULFILLMENT' }
+  }
+  return { kind: 'restock-and-cancel', restockQty: Math.max(0, Math.trunc(applied.inventory_delta)) }
+}

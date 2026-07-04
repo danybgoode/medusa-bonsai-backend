@@ -17,6 +17,13 @@ import { model } from '@medusajs/framework/utils'
  * "today's behavior exactly"). Both the decrement and the order-materialization
  * write into this row inside the SAME Redis lock `applyMlOrderToLink` already
  * holds per link, so a crash mid-apply can't leave a half-applied order.
+ *
+ * `cancelled_at` (ml-orders-native S2 · US-4): stamped once an ML
+ * cancellation/refund has been reflected — a restock of exactly `inventory_delta`
+ * units plus a Medusa order cancel. Its presence is the exactly-once guarantee for
+ * the reverse direction (`decideMlOrderCancel`): a replayed cancel notification
+ * sees it already set and is a no-op, mirroring how `medusa_order_id` already
+ * guards the forward apply direction.
  */
 const MlAppliedOrder = model
   .define('ml_applied_order', {
@@ -26,6 +33,7 @@ const MlAppliedOrder = model
     medusa_order_id: model.text().nullable(),
     inventory_delta: model.number(),
     applied_at: model.dateTime(),
+    cancelled_at: model.dateTime().nullable(),
   })
   .indexes([
     // The exactly-once constraint itself — defense in depth behind the Redis lock

@@ -7,6 +7,8 @@ import {
   isUniqueViolationError,
   mapMlOrderStatusToFulfillment,
   shouldApplyFulfillmentTransition,
+  isMlCancelledStatus,
+  decideMlOrderCancel,
 } from '../sync-utils'
 import { normalizeOrderItems } from '../client'
 
@@ -143,6 +145,51 @@ describe('shouldApplyFulfillmentTransition — forward-only, replay-safe (US-2 a
   })
   it('null target is always false', () => {
     expect(shouldApplyFulfillmentTransition('not_fulfilled', null)).toBe(false)
+  })
+})
+
+describe('isMlCancelledStatus — only ML\'s unambiguous full-order cancel', () => {
+  it('cancelled → true; every other status (incl. paid/refund-shaped-but-undefined) → false', () => {
+    expect(isMlCancelledStatus('cancelled')).toBe(true)
+    expect(isMlCancelledStatus('paid')).toBe(false)
+    expect(isMlCancelledStatus('invalid')).toBe(false)
+    expect(isMlCancelledStatus(null)).toBe(false)
+    expect(isMlCancelledStatus(undefined)).toBe(false)
+  })
+})
+
+describe('decideMlOrderCancel — US-4 exactly-once cancel/refund mapping', () => {
+  it('never materialized (no row, or no medusa_order_id yet) → skip', () => {
+    expect(decideMlOrderCancel(null, 'cancelled', null)).toEqual({ kind: 'skip' })
+    expect(decideMlOrderCancel(undefined, 'cancelled', null)).toEqual({ kind: 'skip' })
+    expect(
+      decideMlOrderCancel({ medusa_order_id: null, cancelled_at: null, inventory_delta: 2 }, 'cancelled', null),
+    ).toEqual({ kind: 'skip' })
+  })
+  it('ML status isn\'t a cancel → skip, regardless of fulfillment state', () => {
+    const applied = { medusa_order_id: 'order_1', cancelled_at: null, inventory_delta: 2 }
+    expect(decideMlOrderCancel(applied, 'paid', null)).toEqual({ kind: 'skip' })
+    expect(decideMlOrderCancel(applied, null, null)).toEqual({ kind: 'skip' })
+  })
+  it('already cancelled (cancelled_at set) → skip — a replayed notification changes nothing', () => {
+    const applied = { medusa_order_id: 'order_1', cancelled_at: new Date().toISOString(), inventory_delta: 2 }
+    expect(decideMlOrderCancel(applied, 'cancelled', null)).toEqual({ kind: 'skip' })
+  })
+  it('materialized, not yet cancelled, not yet shipped → restock-and-cancel with the row\'s own inventory_delta', () => {
+    const applied = { medusa_order_id: 'order_1', cancelled_at: null, inventory_delta: 3 }
+    expect(decideMlOrderCancel(applied, 'cancelled', null)).toEqual({ kind: 'restock-and-cancel', restockQty: 3 })
+    expect(decideMlOrderCancel(applied, 'cancelled', 'not_fulfilled')).toEqual({
+      kind: 'restock-and-cancel',
+      restockQty: 3,
+    })
+  })
+  it('already shipped or beyond when ML cancels → log-edge, never auto-restocked/auto-cancelled', () => {
+    const applied = { medusa_order_id: 'order_1', cancelled_at: null, inventory_delta: 3 }
+    expect(decideMlOrderCancel(applied, 'cancelled', 'shipped')).toEqual({
+      kind: 'log-edge',
+      code: 'ML_CANCEL_AFTER_FULFILLMENT',
+    })
+    expect(decideMlOrderCancel(applied, 'cancelled', 'partially_shipped').kind).toBe('log-edge')
   })
 })
 
