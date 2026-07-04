@@ -31,6 +31,7 @@ import type MercadolibreModuleService from '../modules/mercadolibre/service'
 import { decideMlOrderApply, safeDecrement } from '../modules/mercadolibre/sync-utils'
 import { getVariantInventoryItemId, resolveStockLocationId } from '../api/store/_utils/inventory'
 import { materializeMlOrder } from './ml-order-materialize'
+import { notifySellerOfMlOrderEvent } from './ml-notify-seller'
 import type { MlOrder } from '../modules/mercadolibre/client'
 
 type Scope = { resolve: (key: string) => any }
@@ -202,5 +203,12 @@ export async function applyMlOrderToLink(
         : `Venta de Mercado Libre aplicada: -${applied.decremented} (orden ${orderId})`,
     metadata: { sold: quantity, decremented: applied.decremented, medusa_order_id: applied.medusaOrderId, retried: applied.retried },
   })
+
+  // Seller notification (US-5) — fires whenever THIS pass is the one that first
+  // produced a Medusa order id (fresh apply or a successful retry-materialize
+  // alike). Fire-and-forget, outside the lock, never blocks the caller.
+  if (applied.medusaOrderId) {
+    void notifySellerOfMlOrderEvent(scope, applied.sellerId, 'ml_order_new', applied.medusaOrderId)
+  }
   return 'applied'
 }

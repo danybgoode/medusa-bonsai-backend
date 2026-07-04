@@ -35,6 +35,7 @@ import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
 import { applyMlOrderToLink } from '../../../lib/ml-sync-apply'
 import { isSoldOrderStatus } from '../../../modules/mercadolibre/sync-utils'
+import { resolveMlOrdersEntitlement } from '../../../lib/ml-orders-entitlement'
 
 const ACK = { received: true }
 
@@ -69,7 +70,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // decrement, dark behind the global flag. The seller's token is only needed
     // on this path (the shipment-detail fetch), so it's fetched once here rather
     // than inside the per-item loop/lock.
-    const ordersEnabled = await isEnabled('ml.orders_enabled')
+    // S2 · US-6: the global flag is necessary but no longer sufficient — a
+    // non-entitled seller keeps stock-only sync even with the flag on (the stock
+    // decrement below is never gated by either check).
+    const globalOrdersEnabled = await isEnabled('ml.orders_enabled')
+    const ordersEnabled =
+      globalOrdersEnabled && (await resolveMlOrdersEntitlement(req.scope, conn.seller_id)).entitled
     const sellerAccessToken = ordersEnabled ? await ml.getAccessTokenForSeller(conn.seller_id) : null
 
     const applied: string[] = []

@@ -34,8 +34,14 @@ import { tgNotifyAdmin, esc } from '../lib/telegram'
 import { MERCADOLIBRE_MODULE } from '../modules/mercadolibre'
 import MercadolibreModuleService from '../modules/mercadolibre/service'
 import { getShipmentDetail } from '../modules/mercadolibre/client'
-import { mapMlOrderStatusToFulfillment, shouldApplyFulfillmentTransition } from '../modules/mercadolibre/sync-utils'
+import {
+  mapMlOrderStatusToFulfillment,
+  shouldApplyFulfillmentTransition,
+  decideMlOrderCancel,
+} from '../modules/mercadolibre/sync-utils'
 import { applyMlFulfillmentTransition } from '../lib/ml-fulfillment-apply'
+import { applyMlOrderCancel } from '../lib/ml-order-cancel-apply'
+import { notifySellerOfMlOrderEvent } from '../lib/ml-notify-seller'
 
 const MAX_ORDERS_PER_RUN = 500
 // Real Medusa FulfillmentStatus values that mean "nothing left to track."
@@ -53,6 +59,7 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
     `select id, fulfillment_status, metadata from "order"
      where metadata->>'source' = 'mercadolibre'
        and deleted_at is null
+       and status != 'canceled'
        and (fulfillment_status is null or fulfillment_status not in ('delivered','partially_delivered','canceled'))
      order by created_at asc
      limit ?`,
@@ -87,6 +94,51 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
 
     try {
       const { status: mlOrderStatus, raw } = await ml.getMlOrderItems(sellerId, mlOrderId)
+
+      // Cancel/refund mapping (US-4) — checked BEFORE the shipment fetch, since a
+      // cancelled ML order never maps to a fulfillment transition either way.
+      const appliedRow = await ml.getAppliedOrderByMedusaOrderId(candidate.id)
+      const cancelDecision = decideMlOrderCancel(appliedRow, mlOrderStatus, candidate.fulfillment_status)
+      if (cancelDecision.kind === 'restock-and-cancel') {
+        const outcome = await applyMlOrderCancel(
+          container as never,
+          ml,
+          (appliedRow as { id: string }).id,
+          (appliedRow as { link_id: string }).link_id,
+          candidate.id,
+          cancelDecision.restockQty,
+        )
+        if (outcome === 'cancelled') {
+          advanced++
+          logger.info(`[reconcile-ml-order-status] ${candidate.id} → cancelled (restock +${cancelDecision.restockQty})`)
+          await ml.recordSyncEvent({
+            sellerId,
+            kind: 'ml_cancel_applied',
+            outcome: 'ok',
+            code: mlOrderId,
+            message: `Pedido de Mercado Libre cancelado — reabastecido +${cancelDecision.restockQty} (pedido ${candidate.id})`,
+            metadata: { ml_order_id: mlOrderId, medusa_order_id: candidate.id, restocked: cancelDecision.restockQty },
+          })
+          void notifySellerOfMlOrderEvent(container as never, sellerId, 'ml_order_cancelled', candidate.id)
+        }
+        continue // cancelled (or a concurrent pass already handled it) — nothing else to reconcile for this order
+      }
+      if (cancelDecision.kind === 'log-edge') {
+        await ml.recordSyncEvent({
+          sellerId,
+          kind: 'ml_cancel_edge',
+          outcome: 'ok',
+          code: cancelDecision.code,
+          message: `Mercado Libre reportó cancelación/reembolso DESPUÉS del envío — requiere revisión manual (pedido ${candidate.id})`,
+          metadata: { ml_order_id: mlOrderId, medusa_order_id: candidate.id, fulfillment_status: candidate.fulfillment_status },
+        })
+        // Stamp it ONE-TIME (cross-review fix) — otherwise nothing about this
+        // order's ML/fulfillment status changes on its own, so this event would
+        // repeat every */30 pass forever.
+        await ml.setAppliedOrderEdgeLogged((appliedRow as { id: string }).id)
+        continue // never guessed — surfaced for manual review, not auto-applied
+      }
+
       const shippingId = raw?.shipping?.id
       let shipmentStatus: string | null = null
       if (shippingId != null) {
@@ -131,6 +183,12 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
           message: `Estado de pedido de Mercado Libre actualizado: ${target} (pedido ${candidate.id})`,
           metadata: { ml_order_id: mlOrderId, medusa_order_id: candidate.id },
         })
+        void notifySellerOfMlOrderEvent(
+          container as never,
+          sellerId,
+          target === 'shipped' ? 'ml_order_shipped' : 'ml_order_delivered',
+          candidate.id,
+        )
       }
     } catch (e) {
       alerts.push(

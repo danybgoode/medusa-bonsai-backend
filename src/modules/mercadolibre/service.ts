@@ -539,6 +539,19 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   }
 
   /**
+   * The applied-order row for an already-materialized Medusa order (US-4,
+   * ml-orders-native S2). `materializeMlOrder`'s own order metadata doesn't carry
+   * `link_id`, so the cancel/refund reconcile path — which only has the Medusa
+   * order id — looks the row up by `medusa_order_id` instead (unique in practice:
+   * one applied-order row ever sets a given order id).
+   */
+  async getAppliedOrderByMedusaOrderId(medusaOrderId: string) {
+    if (!medusaOrderId) return null
+    const [row] = await this.listMlAppliedOrders({ medusa_order_id: medusaOrderId }, { take: 1 })
+    return row ?? null
+  }
+
+  /**
    * Record an ML order as durably applied, exactly once (US-0). The caller must
    * already hold the per-link Redis lock and have confirmed via `getAppliedOrder`
    * that no row exists yet — this write, plus the stock decrement and (when
@@ -575,6 +588,25 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
    */
   async setAppliedOrderMedusaId(appliedOrderId: string, medusaOrderId: string): Promise<void> {
     await this.updateMlAppliedOrders({ id: appliedOrderId, medusa_order_id: medusaOrderId })
+  }
+
+  /**
+   * Stamp an applied-order row as cancelled (US-4, ml-orders-native S2) — the
+   * exactly-once guarantee for the reverse direction: once set,
+   * `decideMlOrderCancel` treats any replayed cancel notification as a no-op.
+   */
+  async setAppliedOrderCancelled(appliedOrderId: string): Promise<void> {
+    await this.updateMlAppliedOrders({ id: appliedOrderId, cancelled_at: new Date() })
+  }
+
+  /**
+   * Stamp a post-fulfillment cancel/refund edge case as logged (US-4, cross-review
+   * fix) — makes `decideMlOrderCancel`'s `log-edge` a ONE-TIME note instead of a
+   * repeat every 30-minute reconcile pass forever (nothing about the order's ML or
+   * fulfillment status changes on its own to stop it otherwise).
+   */
+  async setAppliedOrderEdgeLogged(appliedOrderId: string): Promise<void> {
+    await this.updateMlAppliedOrders({ id: appliedOrderId, edge_logged_at: new Date() })
   }
 
   /** Read the reconcile poll marker (ISO) for a seller, or null. */
