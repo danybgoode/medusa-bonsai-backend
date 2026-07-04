@@ -15,14 +15,9 @@
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
-import {
-  createOrderFulfillmentWorkflow,
-  createOrderShipmentWorkflow,
-  markOrderFulfillmentAsDeliveredWorkflow,
-} from '@medusajs/medusa/core-flows'
 import { normalizeMedusaOrder } from '../route'
 import { resolveSeller } from '../../../../_utils/clerk-auth'
-import { resolveShippingOptionIds, resolveStockLocationId } from '../../../../_utils/fulfillment'
+import { applyOrderStatusTransition, LIFECYCLE_STATES } from '../../../../../../lib/order-status-transition'
 
 // ── GET ──────────────────────────────────────────────────────────────────────
 
@@ -81,8 +76,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
 
-const LIFECYCLE_STATES = new Set(['processing', 'shipped', 'in_transit', 'delivered', 'completed'])
-
 export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const seller = await resolveSeller(req)
   if (!seller) return res.status(401).json({ message: 'Unauthorized' })
@@ -130,197 +123,13 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     }
   } catch { /* if the link query fails, skip the check rather than block shipping */ }
 
-  const meta = ((order.metadata ?? {}) as Record<string, any>)
-
-  // Guard: a manual (SPEI/DiMo/cash) order cannot transition to shipped/in_transit
-  // before payment is confirmed (S2.2 — server gate; this PATCH is what the manual-
-  // carrier "ship-manual" path proxies to, and the bypass-proof enforcement point).
-  if (
-    (newStatus === 'shipped' || newStatus === 'in_transit') &&
-    ['manual', 'spei', 'cash', 'dimo'].includes((meta.payment_method as string) ?? '') &&
-    meta.payment_received !== true
-  ) {
-    return res.status(422).json({ message: 'Aún no confirmas el pago de este pedido.' })
-  }
-
-  const prevShipment = (meta.shipment ?? {}) as Record<string, any>
-  const now = new Date().toISOString()
-
-  let fulfillmentState = newStatus
-  let shipment = prevShipment
-
-  if (newStatus === 'shipped' || newStatus === 'in_transit') {
-    shipment = {
-      ...prevShipment,
-      carrier: body.carrier ?? prevShipment.carrier ?? 'manual',
-      carrier_label: body.carrier_label ?? prevShipment.carrier_label ?? null,
-      tracking_number: body.tracking_number ?? prevShipment.tracking_number ?? null,
-      status: newStatus === 'in_transit' ? 'in_transit' : 'shipped',
-      shipped_at: prevShipment.shipped_at ?? now,
-      created_at: prevShipment.created_at ?? now,
-    }
-  } else if (newStatus === 'delivered') {
-    shipment = { ...prevShipment, status: 'delivered', delivered_at: now }
-  }
-
-  // ── E-full: native Medusa fulfillment workflows ──────────────────────────
-  // Run alongside the metadata update (which drives normalizeMedusaOrder).
-  // Falls back gracefully if shipping options aren't seeded yet.
-
-  if (newStatus === 'shipped' || newStatus === 'in_transit') {
-    await runFulfillWorkflow({ req, order, orderId, body, newStatus, now })
-  } else if (newStatus === 'delivered') {
-    await runDeliveredWorkflow({ req, order, orderId })
-  }
-
-  // ── Always: persist lifecycle state on order.metadata ────────────────────
-  try {
-    await orderService.updateOrders(orderId, {
-      metadata: {
-        ...meta,
-        fulfillment_state: fulfillmentState,
-        ...(Object.keys(shipment).length ? { shipment } : {}),
-        ...(newStatus === 'delivered' ? { delivered_at: now } : {}),
-        ...(newStatus === 'completed' ? { completed_at: now } : {}),
-      },
-    })
-  } catch (e) {
-    console.error('[seller orders] status update error:', e)
-    return res.status(500).json({ message: 'Failed to update order' })
-  }
+  const result = await applyOrderStatusTransition(req.scope, {
+    orderId,
+    order,
+    newStatus,
+    body: { carrier: body.carrier, carrier_label: body.carrier_label, tracking_number: body.tracking_number },
+  })
+  if (!result.ok) return res.status(result.status).json({ message: result.message })
 
   return res.json({ status: newStatus })
-}
-
-// ── E-full helpers ────────────────────────────────────────────────────────────
-
-async function runFulfillWorkflow({
-  req,
-  order,
-  orderId,
-  body,
-  newStatus,
-  now,
-}: {
-  req: MedusaRequest
-  order: Record<string, unknown>
-  orderId: string
-  body: { carrier?: string; tracking_number?: string }
-  newStatus: string
-  now: string
-}) {
-  const fulfillments = (order.fulfillments as any[]) ?? []
-  const existingFulfillment = fulfillments[0]
-
-  // If already has a native fulfillment, just add the shipment label
-  if (existingFulfillment?.id) {
-    await runShipmentWorkflow({ req, orderId, fulfillmentId: existingFulfillment.id, order, body })
-    return
-  }
-
-  // Resolve shipping option for this order's fulfillment method
-  const meta = (order.metadata ?? {}) as Record<string, any>
-  const fulfillmentMethod = (meta.fulfillment_method ?? 'shipping') as string
-  const optionKey = fulfillmentMethod === 'local_pickup' ? 'pickup'
-    : fulfillmentMethod === 'digital' || fulfillmentMethod === 'service' ? 'digital'
-    : fulfillmentMethod === 'none' || fulfillmentMethod === 'coord' || fulfillmentMethod === 'rental' ? 'coord'
-    : 'shipping'
-
-  const [optionIds, locationId] = await Promise.all([
-    resolveShippingOptionIds(req.scope),
-    resolveStockLocationId(req.scope),
-  ])
-
-  const shippingOptionId = optionIds[optionKey]
-  if (!shippingOptionId) {
-    // Shipping options not seeded yet — E-lite metadata path continues
-    console.warn('[seller orders] E-full skipped: shipping option not found, option_key=%s', optionKey)
-    return
-  }
-
-  const items = ((order.items as any[]) ?? []).map((i: any) => ({ id: i.id, quantity: i.quantity ?? 1 }))
-  if (!items.length) return
-
-  try {
-    const { result: fulfillment } = await createOrderFulfillmentWorkflow(req.scope).run({
-      input: {
-        order_id: orderId,
-        items,
-        shipping_option_id: shippingOptionId,
-        ...(locationId ? { location_id: locationId } : {}),
-        no_notification: true,
-        metadata: { source: 'seller_patch', created_at: now },
-      } as any,
-    })
-
-    if ((fulfillment as any)?.id && body.tracking_number) {
-      await runShipmentWorkflow({ req, orderId, fulfillmentId: (fulfillment as any).id, order, body })
-    }
-  } catch (e) {
-    // E-full failures are non-fatal — metadata update still runs
-    console.error('[seller orders] createOrderFulfillmentWorkflow error (non-fatal):', e)
-  }
-}
-
-async function runShipmentWorkflow({
-  req,
-  orderId,
-  fulfillmentId,
-  order,
-  body,
-}: {
-  req: MedusaRequest
-  orderId: string
-  fulfillmentId: string
-  order: Record<string, unknown>
-  body: { carrier?: string; tracking_number?: string }
-}) {
-  if (!body.tracking_number) return
-
-  const items = ((order.items as any[]) ?? []).map((i: any) => ({ id: i.id, quantity: i.quantity ?? 1 }))
-  if (!items.length) return
-
-  try {
-    await createOrderShipmentWorkflow(req.scope).run({
-      input: {
-        order_id: orderId,
-        fulfillment_id: fulfillmentId,
-        items,
-        no_notification: true,
-        labels: [{
-          tracking_number: body.tracking_number,
-          tracking_url: '',
-          label_url: '',
-        }],
-      } as any,
-    })
-  } catch (e) {
-    console.error('[seller orders] createOrderShipmentWorkflow error (non-fatal):', e)
-  }
-}
-
-async function runDeliveredWorkflow({
-  req,
-  order,
-  orderId,
-}: {
-  req: MedusaRequest
-  order: Record<string, unknown>
-  orderId: string
-}) {
-  const fulfillments = (order.fulfillments as any[]) ?? []
-  const fulfillmentId = fulfillments[0]?.id
-  if (!fulfillmentId) return
-
-  try {
-    await markOrderFulfillmentAsDeliveredWorkflow(req.scope).run({
-      input: {
-        orderId,
-        fulfillmentId,
-        no_notification: true,
-      } as any,
-    })
-  } catch (e) {
-    console.error('[seller orders] markOrderFulfillmentAsDeliveredWorkflow error (non-fatal):', e)
-  }
 }
