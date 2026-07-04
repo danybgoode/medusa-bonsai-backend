@@ -184,6 +184,10 @@ export async function materializeMlOrder(
           items,
           metadata: {
             source: 'mercadolibre',
+            // Automatic source tag (ml-orders-native S3 · US-7) — rides the same
+            // metadata.tags array a seller's manual tags live in, so an ML order
+            // is taggable/filterable exactly like any other from the moment it lands.
+            tags: ['mercadolibre'],
             ml_order_id: String(mlOrder.id),
             // The seller who owns this order — the reconcile-ml-order-status job
             // (US-2) reads this to fetch the ML shipment with the right token

@@ -202,10 +202,19 @@ export function normalizeMedusaOrder(
   // (normalizeMedusaOrder curates; it never passes raw metadata through).
   const source = metadata.source === 'mercadolibre' ? 'mercadolibre' : 'miyagi'
 
+  // Free-form seller tags (ml-orders-native S3 · US-7) — manual CRUD via
+  // `[id]/tags`, plus the automatic 'mercadolibre' tag stamped at materialization.
+  // No native Medusa order-tags concept exists (unlike Product), so this rides
+  // metadata like every other cross-cutting order flag on this page.
+  const tags = Array.isArray(metadata.tags)
+    ? metadata.tags.filter((t): t is string => typeof t === 'string')
+    : []
+
   return {
     id: order.id,
     status,
     source,
+    tags,
     ml_order_id: source === 'mercadolibre' ? ((metadata.ml_order_id as string) ?? null) : null,
     ml_pack_id: source === 'mercadolibre' ? ((metadata.ml_pack_id as string) ?? null) : null,
     amount_cents: isSupportOrder ? (support.amount_cents ?? order.total ?? 0) : (order.total ?? 0),
