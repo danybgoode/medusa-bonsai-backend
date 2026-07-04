@@ -131,6 +131,10 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
           message: `Mercado Libre reportó cancelación/reembolso DESPUÉS del envío — requiere revisión manual (pedido ${candidate.id})`,
           metadata: { ml_order_id: mlOrderId, medusa_order_id: candidate.id, fulfillment_status: candidate.fulfillment_status },
         })
+        // Stamp it ONE-TIME (cross-review fix) — otherwise nothing about this
+        // order's ML/fulfillment status changes on its own, so this event would
+        // repeat every */30 pass forever.
+        await ml.setAppliedOrderEdgeLogged((appliedRow as { id: string }).id)
         continue // never guessed — surfaced for manual review, not auto-applied
       }
 

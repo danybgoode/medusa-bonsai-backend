@@ -163,20 +163,29 @@ describe('decideMlOrderCancel — US-4 exactly-once cancel/refund mapping', () =
     expect(decideMlOrderCancel(null, 'cancelled', null)).toEqual({ kind: 'skip' })
     expect(decideMlOrderCancel(undefined, 'cancelled', null)).toEqual({ kind: 'skip' })
     expect(
-      decideMlOrderCancel({ medusa_order_id: null, cancelled_at: null, inventory_delta: 2 }, 'cancelled', null),
+      decideMlOrderCancel(
+        { medusa_order_id: null, cancelled_at: null, edge_logged_at: null, inventory_delta: 2 },
+        'cancelled',
+        null,
+      ),
     ).toEqual({ kind: 'skip' })
   })
   it('ML status isn\'t a cancel → skip, regardless of fulfillment state', () => {
-    const applied = { medusa_order_id: 'order_1', cancelled_at: null, inventory_delta: 2 }
+    const applied = { medusa_order_id: 'order_1', cancelled_at: null, edge_logged_at: null, inventory_delta: 2 }
     expect(decideMlOrderCancel(applied, 'paid', null)).toEqual({ kind: 'skip' })
     expect(decideMlOrderCancel(applied, null, null)).toEqual({ kind: 'skip' })
   })
   it('already cancelled (cancelled_at set) → skip — a replayed notification changes nothing', () => {
-    const applied = { medusa_order_id: 'order_1', cancelled_at: new Date().toISOString(), inventory_delta: 2 }
+    const applied = {
+      medusa_order_id: 'order_1',
+      cancelled_at: new Date().toISOString(),
+      edge_logged_at: null,
+      inventory_delta: 2,
+    }
     expect(decideMlOrderCancel(applied, 'cancelled', null)).toEqual({ kind: 'skip' })
   })
   it('materialized, not yet cancelled, not yet shipped → restock-and-cancel with the row\'s own inventory_delta', () => {
-    const applied = { medusa_order_id: 'order_1', cancelled_at: null, inventory_delta: 3 }
+    const applied = { medusa_order_id: 'order_1', cancelled_at: null, edge_logged_at: null, inventory_delta: 3 }
     expect(decideMlOrderCancel(applied, 'cancelled', null)).toEqual({ kind: 'restock-and-cancel', restockQty: 3 })
     expect(decideMlOrderCancel(applied, 'cancelled', 'not_fulfilled')).toEqual({
       kind: 'restock-and-cancel',
@@ -184,12 +193,21 @@ describe('decideMlOrderCancel — US-4 exactly-once cancel/refund mapping', () =
     })
   })
   it('already shipped or beyond when ML cancels → log-edge, never auto-restocked/auto-cancelled', () => {
-    const applied = { medusa_order_id: 'order_1', cancelled_at: null, inventory_delta: 3 }
+    const applied = { medusa_order_id: 'order_1', cancelled_at: null, edge_logged_at: null, inventory_delta: 3 }
     expect(decideMlOrderCancel(applied, 'cancelled', 'shipped')).toEqual({
       kind: 'log-edge',
       code: 'ML_CANCEL_AFTER_FULFILLMENT',
     })
     expect(decideMlOrderCancel(applied, 'cancelled', 'partially_shipped').kind).toBe('log-edge')
+  })
+  it('a log-edge case already logged (edge_logged_at set) → skip — never repeats the note every reconcile pass', () => {
+    const applied = {
+      medusa_order_id: 'order_1',
+      cancelled_at: null,
+      edge_logged_at: new Date().toISOString(),
+      inventory_delta: 3,
+    }
+    expect(decideMlOrderCancel(applied, 'cancelled', 'shipped')).toEqual({ kind: 'skip' })
   })
 })
 
@@ -202,7 +220,13 @@ describe('signature regression smoke — one ML sale moves stock EXACTLY ONCE (S
   // cancel + a replay of the ORIGINAL sale notification (a case decideMlOrderApply
   // must keep skipping even after the row's been cancelled, since it only looks
   // at medusa_order_id, never cancelled_at).
-  type Row = { id: string; medusa_order_id: string | null; cancelled_at: string | null; inventory_delta: number }
+  type Row = {
+    id: string
+    medusa_order_id: string | null
+    cancelled_at: string | null
+    edge_logged_at: string | null
+    inventory_delta: number
+  }
 
   function runScenario(ordersEnabled: boolean) {
     let stocked = 10
@@ -221,6 +245,7 @@ describe('signature regression smoke — one ML sale moves stock EXACTLY ONCE (S
       id: 'mlao_1',
       medusa_order_id: ordersEnabled ? 'order_1' : null,
       cancelled_at: null,
+      edge_logged_at: null,
       inventory_delta: decrement,
     }
 

@@ -189,6 +189,7 @@ export function shouldApplyFulfillmentTransition(
 export type AppliedOrderCancelRow = {
   medusa_order_id: string | null
   cancelled_at: string | Date | null
+  edge_logged_at: string | Date | null
   inventory_delta: number
 } | null | undefined
 
@@ -214,6 +215,9 @@ export function isMlCancelledStatus(mlOrderStatus: string | null | undefined): b
  * post-fulfillment return/mediation — genuinely different from a pre-ship
  * cancel (Miyagi already handed the item to a carrier) — so it's surfaced as a
  * logged note for manual review rather than auto-restocked/auto-cancelled.
+ * `edge_logged_at` makes that log a ONE-TIME note, not a repeat every 30-minute reconcile pass
+ * pass forever (cross-review catch: nothing about the order's ML/fulfillment
+ * status changes on its own, so an unguarded log-edge would never stop firing).
  */
 export function decideMlOrderCancel(
   applied: AppliedOrderCancelRow,
@@ -221,7 +225,7 @@ export function decideMlOrderCancel(
   medusaFulfillmentStatus: string | null | undefined,
 ): CancelDecision {
   if (!applied || !applied.medusa_order_id) return { kind: 'skip' } // nothing materialized → nothing to cancel
-  if (applied.cancelled_at) return { kind: 'skip' } // already handled — replay is a no-op
+  if (applied.cancelled_at || applied.edge_logged_at) return { kind: 'skip' } // already handled — replay is a no-op
   if (!isMlCancelledStatus(mlOrderStatus)) return { kind: 'skip' }
 
   const fulfillmentRank = FULFILLMENT_RANK[medusaFulfillmentStatus ?? ''] ?? 0

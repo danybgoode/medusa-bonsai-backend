@@ -37,11 +37,17 @@ export async function notifySellerOfMlOrderEvent(
     const clerkUserId = (seller as { clerk_user_id?: string | null } | undefined)?.clerk_user_id
     if (!clerkUserId) return // unclaimed shop — no account to notify
 
-    await fetch(`${SITE_URL}/api/internal/ml/notify-seller`, {
+    const res = await fetch(`${SITE_URL}/api/internal/ml/notify-seller`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-internal-secret': secret },
       body: JSON.stringify({ clerkUserId, event, orderId: medusaOrderId }),
     })
+    // fetch() only rejects on a network-level failure — a non-2xx HTTP response
+    // (wrong secret, a 500 on the frontend) resolves normally and would otherwise
+    // be silently treated as "delivered." Log it (still never throw further).
+    if (!res.ok) {
+      console.error(`[ml-notify-seller] notify-seller returned ${res.status} for order ${medusaOrderId}`)
+    }
   } catch (e) {
     console.error('[ml-notify-seller] failed (non-fatal):', e instanceof Error ? e.message : e)
   }

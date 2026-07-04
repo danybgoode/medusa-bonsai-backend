@@ -599,6 +599,16 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     await this.updateMlAppliedOrders({ id: appliedOrderId, cancelled_at: new Date() })
   }
 
+  /**
+   * Stamp a post-fulfillment cancel/refund edge case as logged (US-4, cross-review
+   * fix) — makes `decideMlOrderCancel`'s `log-edge` a ONE-TIME note instead of a
+   * repeat every 30-minute reconcile pass forever (nothing about the order's ML or
+   * fulfillment status changes on its own to stop it otherwise).
+   */
+  async setAppliedOrderEdgeLogged(appliedOrderId: string): Promise<void> {
+    await this.updateMlAppliedOrders({ id: appliedOrderId, edge_logged_at: new Date() })
+  }
+
   /** Read the reconcile poll marker (ISO) for a seller, or null. */
   async getSellerSyncMarker(sellerId: string): Promise<string | null> {
     const conn = await this.getConnection(sellerId)
