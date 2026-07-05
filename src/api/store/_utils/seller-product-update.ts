@@ -226,6 +226,23 @@ export async function updateSellerProduct(
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
   const remoteQuery = scope.resolve('remoteQuery')
 
+  // A caller can't know the newly-created variant ids until AFTER
+  // option_dimensions commits, so combining it with price_cents/quantity
+  // (which resolve to the sole variant only when exactly one exists) in the
+  // SAME request would let the dimensions mutation succeed and then 422 on
+  // the price/stock block — a confusing "did it work?" response after a
+  // real mutation already landed (cross-agent review catch, 2026-07-05).
+  // Reject upfront instead: set per-combination prices via variant_prices
+  // at dimension-creation time, and stock in a separate follow-up call
+  // (re-fetch the price-grid for the new variant ids first).
+  if (body.option_dimensions !== undefined && (body.price_cents !== undefined || body.quantity !== undefined)) {
+    return {
+      ok: false,
+      status: 422,
+      message: 'No combines option_dimensions con price_cents/quantity en la misma solicitud. Usa variant_prices para los precios; el stock se ajusta en una solicitud aparte con variant_id.',
+    }
+  }
+
   // ── Priced option dimensions (print-configurator listings) ───────────────
   if (body.option_dimensions !== undefined) {
     const result = await applyOptionDimensions(scope, id, body.option_dimensions, body.variant_prices)

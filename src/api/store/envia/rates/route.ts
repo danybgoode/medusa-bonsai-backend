@@ -217,7 +217,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // same filter in listing.ts/price-grid route).
     const priceVariant = ((p.variants ?? []) as any[])
       .filter((v) => v?.metadata?.disabled !== true)
-      .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number }>)
+      .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number; currency_code?: string }>)
+      // MXN only — mixing currencies into one max() would compare, e.g., a
+      // 50 USD price against a 1000 MXN price as raw integers, producing a
+      // meaningless declared value (cross-agent review catch, 2026-07-05).
+      .filter((pr) => pr?.currency_code === 'mxn')
       .reduce((max: number | undefined, pr) =>
         typeof pr?.amount === 'number' && (max === undefined || pr.amount > max) ? pr.amount : max,
         undefined as number | undefined)

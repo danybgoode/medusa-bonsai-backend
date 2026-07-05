@@ -131,8 +131,16 @@ export function toListingShape(product: any, seller?: any): ListingShape {
   const variantPrices: Array<{ amount: number; currency_code: string }> = variants
     .map((v: any) => {
       const prices: any[] = v?.prices ?? []
-      const mxnPrice = prices.find((p: any) => p.currency_code === 'mxn')
-      return mxnPrice ?? prices[0]
+      const mxnPrices = prices.filter((p: any) => p.currency_code === 'mxn')
+      // A variant can carry MULTIPLE mxn prices (Story 2.2's quantity
+      // tiers) — the display/"desde $X" price must be the base (qty=1)
+      // entry, not whichever tier the DB happens to return first. Picking
+      // array-order-first could show a bulk-discount tier as if it were the
+      // starting price (cross-agent review catch, 2026-07-05).
+      const basePrice = mxnPrices.length > 0
+        ? mxnPrices.reduce((lowest, p) => ((p.min_quantity ?? 1) < (lowest.min_quantity ?? 1) ? p : lowest))
+        : undefined
+      return basePrice ?? prices[0]
     })
     .filter((p): p is { amount: number; currency_code: string } => !!p)
   const priceObj = variantPrices.length > 0
