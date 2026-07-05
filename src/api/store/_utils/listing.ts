@@ -113,19 +113,37 @@ export function isFeaturedPin(l: { metadata?: Record<string, unknown> | null }):
 
 export function toListingShape(product: any, seller?: any): ListingShape {
   const meta = (product.metadata ?? {}) as Record<string, unknown>
-  const variant = product.variants?.[0]
-  const mxnPrice = variant?.prices?.find((p: any) => p.currency_code === 'mxn')
-  const priceObj = mxnPrice ?? variant?.prices?.[0]
+  const variants: any[] = product.variants ?? []
+
+  // ── Price (min across all variants) ───────────────────────────────────────
+  // Single-variant listings resolve to that one variant's price, byte-for-byte
+  // as before. Multi-variant (configurator) listings show the cheapest
+  // combination — the "desde $X" price a shop grid needs; the PDP's own
+  // price-grid resolves the exact variant+quantity price separately.
+  const variantPrices: Array<{ amount: number; currency_code: string }> = variants
+    .map((v: any) => {
+      const prices: any[] = v?.prices ?? []
+      const mxnPrice = prices.find((p: any) => p.currency_code === 'mxn')
+      return mxnPrice ?? prices[0]
+    })
+    .filter((p): p is { amount: number; currency_code: string } => !!p)
+  const priceObj = variantPrices.length > 0
+    ? variantPrices.reduce((min, p) => (p.amount < min.amount ? p : min))
+    : undefined
   const fallbackPrice = typeof meta.price_cents === 'number' ? meta.price_cents : null
 
-  // ── Stock (Medusa Inventory) ──────────────────────────────────────────────
+  // ── Stock (Medusa Inventory, summed across ALL variants) ──────────────────
   // Managed (physical) variants carry inventory items with location levels;
-  // available = Σ(stocked − reserved). Unmanaged legacy items (services, autos
-  // pre-backfill, etc.) have no inventory item → treated as unlimited / in stock.
-  const manageInventory = !!variant?.manage_inventory
+  // available = Σ(stocked − reserved) across every variant, not just one —
+  // mirrors getProductAvailableQuantity() in inventory.ts. Unmanaged legacy
+  // items (services, autos pre-backfill, etc.) have no inventory item →
+  // treated as unlimited / in stock.
+  const manageInventory = variants.some((v: any) => !!v?.manage_inventory)
   let availableQuantity: number | null = null
   if (manageInventory) {
-    const levels: any[] = (variant?.inventory_items ?? [])
+    const levels: any[] = variants
+      .filter((v: any) => v?.manage_inventory)
+      .flatMap((v: any) => v?.inventory_items ?? [])
       .flatMap((ii: any) => ii?.inventory?.location_levels ?? [])
     availableQuantity = levels.reduce(
       (sum: number, lvl: any) =>
@@ -151,7 +169,7 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     location: (meta.location as string) ?? null,
     attrs: (meta.attrs as Record<string, unknown>) ?? {},
     weight_grams: typeof product.weight === 'number' ? product.weight : null,
-    sku: (variant?.sku as string) ?? null,
+    sku: (variants[0]?.sku as string) ?? null,
     metadata: meta,
     images: (product.images ?? []).map((img: any) => ({
       url: img.url,

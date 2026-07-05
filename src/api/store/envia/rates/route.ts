@@ -210,7 +210,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const packages: EnviaPackage[] = shippable.map((p: any) => {
     const meta = (p.metadata ?? {}) as Record<string, unknown>
     const weightGrams = (meta.weight_grams as number | undefined) ?? pkgDefaults.weight_grams ?? 500
-    const priceVariant = (p.variants?.[0]?.prices?.[0]?.amount as number | undefined)
+    // Max price across all variants — a multi-variant (configurator) listing's
+    // declared value should reflect its most expensive combination, not
+    // whichever variant happens to be first.
+    const priceVariant = ((p.variants ?? []) as any[])
+      .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number }>)
+      .reduce((max: number | undefined, pr) =>
+        typeof pr?.amount === 'number' && (max === undefined || pr.amount > max) ? pr.amount : max,
+        undefined as number | undefined)
     return {
       content: String(p.title ?? 'Producto').slice(0, 80),
       weight: Math.max(0.1, weightGrams / 1000),

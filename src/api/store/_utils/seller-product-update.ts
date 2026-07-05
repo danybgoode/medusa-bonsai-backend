@@ -11,13 +11,21 @@
 import type { MedusaRequest } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { IProductModuleService, IPricingModuleService } from '@medusajs/framework/types'
-import { updateProductsWorkflow } from '@medusajs/medusa/core-flows'
+import {
+  updateProductsWorkflow,
+  createProductOptionsWorkflow,
+  createProductVariantsWorkflow,
+  deleteProductVariantsWorkflow,
+  deleteProductOptionsWorkflow,
+} from '@medusajs/medusa/core-flows'
 import {
   isStockableListingType,
   resolveStockLocationId,
   setVariantAvailableQuantity,
   getProductAvailableQuantity,
+  provisionVariantInventory,
 } from './inventory'
+import { generateSku, buildVariantComboKey, validateOptionDimensions } from './seller-product-create'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
@@ -39,6 +47,29 @@ export interface SellerProductUpdateBody {
    */
   images?: Array<{ url: string; alt?: string | null }>
   images_mode?: 'append' | 'replace'
+  /**
+   * Add real priced option dimensions (Tamaño / Material / Acabado, up to 3)
+   * to a listing that is still on the platform's auto-created single
+   * "Default"/"Default" variant. Builds the full cartesian product of
+   * variants via additive-only workflows — NEVER via updateProductsWorkflow
+   * with a full variants/options array, which Medusa hard-deletes anything
+   * omitted from the replace (verified against installed MikroORM
+   * orphan-removal + Collection.set() source, 2026-07-05). The old Default
+   * variant is deleted only if it has zero order line items; otherwise it's
+   * disabled (manage_inventory:false + metadata.disabled:true), never
+   * deleted. Rejected (422) if the product already has real dimensions —
+   * restructuring an already-multi-variant product isn't supported this
+   * sprint.
+   */
+  option_dimensions?: Array<{ title: string; values: string[] }>
+  /** Per-combination price in cents (MXN), keyed by buildVariantComboKey(). Required alongside option_dimensions. */
+  variant_prices?: Record<string, number>
+  /**
+   * Explicit variant to target for `price_cents`/`quantity` updates on a
+   * multi-variant listing. Falls back to the sole variant when the product
+   * has exactly one (legacy single-variant path, unchanged).
+   */
+  variant_id?: string
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -46,6 +77,112 @@ export type SellerProductImage = { url: string; alt: string | null }
 export type SellerProductUpdateResult =
   | { ok: true; images?: SellerProductImage[] }
   | { ok: false; status: number; message: string }
+
+/**
+ * Add priced option dimensions to a listing still on the single auto-created
+ * "Default"/"Default" variant, via additive-only workflows (see the
+ * `option_dimensions` doc comment above for why `updateProductsWorkflow`'s
+ * full-array replace is unsafe here). Rejects if the product already has
+ * real dimensions.
+ */
+async function applyOptionDimensions(
+  scope: MedusaRequest['scope'],
+  id: string,
+  dimensionsRaw: Array<{ title: string; values: string[] }>,
+  variantPrices: Record<string, number> | undefined,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
+  const remoteQuery = scope.resolve('remoteQuery')
+
+  const { data: rows } = await remoteQuery.graph({
+    entity: 'product',
+    fields: ['id', 'options.id', 'options.title', 'variants.id', 'variants.manage_inventory'],
+    filters: { id },
+  })
+  const product = rows?.[0] as any
+  const existingOptions: Array<{ id: string; title: string }> = product?.options ?? []
+  const existingVariants: Array<{ id: string; manage_inventory?: boolean }> = product?.variants ?? []
+
+  const isDefaultOnly =
+    existingOptions.length === 1 && existingOptions[0].title === 'Default' && existingVariants.length === 1
+  if (!isDefaultOnly) {
+    return {
+      ok: false,
+      status: 422,
+      message: 'Este producto ya tiene opciones configuradas; la edición de dimensiones existentes no está soportada todavía.',
+    }
+  }
+
+  const validated = validateOptionDimensions(dimensionsRaw)
+  if (!validated.ok) return { ok: false, status: 422, message: validated.message }
+  const missingPrice = validated.combos.find((combo) => {
+    const price = variantPrices?.[buildVariantComboKey(combo)]
+    return !(typeof price === 'number' && price > 0)
+  })
+  if (missingPrice) {
+    return { ok: false, status: 422, message: `Falta el precio para la combinación ${buildVariantComboKey(missingPrice)}.` }
+  }
+
+  const oldVariantId = existingVariants[0].id
+  const oldOptionId = existingOptions[0].id
+  const oldManageInventory = !!existingVariants[0].manage_inventory
+
+  await createProductOptionsWorkflow(scope).run({
+    input: {
+      product_options: validated.dimensions.map((d) => ({ product_id: id, title: d.title, values: d.values })),
+    },
+  })
+  await createProductVariantsWorkflow(scope).run({
+    input: {
+      product_variants: validated.combos.map((combo) => ({
+        product_id: id,
+        title: Object.values(combo).join(' / '),
+        sku: generateSku(),
+        options: combo,
+        manage_inventory: oldManageInventory,
+        prices: [{ amount: variantPrices![buildVariantComboKey(combo)], currency_code: 'mxn' }],
+      })),
+    },
+  })
+
+  // Re-fetch rather than trust the workflow's run() output shape — reliably
+  // identifies the newly-created variant ids regardless of it.
+  const { data: afterRows } = await remoteQuery.graph({
+    entity: 'product',
+    fields: ['id', 'variants.id'],
+    filters: { id },
+  })
+  const afterVariantIds: string[] = ((afterRows?.[0] as any)?.variants ?? []).map((v: any) => v.id)
+  const newVariantIds = afterVariantIds.filter((vid) => vid !== oldVariantId)
+
+  if (oldManageInventory) {
+    const locationId = await resolveStockLocationId(scope)
+    if (locationId) {
+      for (const variantId of newVariantIds) {
+        await provisionVariantInventory(scope, { variantId, locationId, quantity: 0 })
+      }
+    } else {
+      console.error('[applyOptionDimensions] no stock location — new variants left unprovisioned', { id })
+    }
+  }
+
+  // Order-safety guard: never delete a variant an order line item references.
+  // Soft-disable instead (hidden, non-purchasable) — the option itself is
+  // left in place too since the disabled variant still references it.
+  const orderService: any = scope.resolve(Modules.ORDER)
+  const referencingOrders = await orderService.listOrderLineItems({ variant_id: oldVariantId }, { take: 1 })
+  if (Array.isArray(referencingOrders) && referencingOrders.length > 0) {
+    await (productService as any).updateProductVariants(oldVariantId, {
+      manage_inventory: false,
+      metadata: { disabled: true },
+    })
+  } else {
+    await deleteProductVariantsWorkflow(scope).run({ input: { ids: [oldVariantId] } })
+    await deleteProductOptionsWorkflow(scope).run({ input: { ids: [oldOptionId] } })
+  }
+
+  return { ok: true }
+}
 
 export async function updateSellerProduct(
   scope: MedusaRequest['scope'],
@@ -55,6 +192,12 @@ export async function updateSellerProduct(
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
   const remoteQuery = scope.resolve('remoteQuery')
+
+  // ── Priced option dimensions (print-configurator listings) ───────────────
+  if (body.option_dimensions !== undefined) {
+    const result = await applyOptionDimensions(scope, id, body.option_dimensions, body.variant_prices)
+    if (!result.ok) return result
+  }
 
   // ── Base product fields ──────────────────────────────────────────────────────
   const baseUpdate: Record<string, unknown> = { id }
@@ -150,7 +293,15 @@ export async function updateSellerProduct(
       fields: ['variants.id', 'variants.prices.id', 'variants.prices.currency_code'],
       filters: { id },
     })
-    const variant = (rows?.[0] as any)?.variants?.[0]
+    const variants: any[] = (rows?.[0] as any)?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
     const prices: Array<{ id: string; currency_code: string }> = variant?.prices ?? []
     const existing = prices.find(p => p.currency_code === 'mxn') ?? prices[0]
 
@@ -169,16 +320,13 @@ export async function updateSellerProduct(
           prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
         }])
       } else {
-        await updateProductsWorkflow(scope).run({
-          input: {
-            selector: { id },
-            update: {
-              variants: [{
-                id: variant.id,
-                prices: [{ amount: body.price_cents, currency_code: 'mxn' }],
-              }],
-            },
-          },
+        // Single-variant field update — NEVER route this through
+        // updateProductsWorkflow's `variants` array, which does a full
+        // Collection.set() replace at the Product level and hard-deletes any
+        // sibling variant omitted from the array (verified 2026-07-05; see
+        // the option_dimensions doc comment above).
+        await (productService as any).updateProductVariants(variant.id, {
+          prices: [{ amount: body.price_cents, currency_code: 'mxn' }],
         })
       }
     }
@@ -196,12 +344,18 @@ export async function updateSellerProduct(
     })
     const product = rows?.[0] as any
     const listingType = product?.type?.value ?? (product?.metadata?.listing_type as string | undefined) ?? 'product'
-    const variant = product?.variants?.[0] as
+    const variants: any[] = product?.variants ?? []
+    const variant = (body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined) as
       | { id: string; sku?: string | null; title?: string | null; manage_inventory?: boolean }
       | undefined
 
     if (!isStockableListingType(listingType)) {
       return { ok: false, status: 422, message: 'Only physical products can have a stock quantity' }
+    }
+    if (!variant && variants.length > 1) {
+      return { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
     }
     if (variant) {
       const locationId = await resolveStockLocationId(scope)

@@ -58,7 +58,14 @@ async function decrementProductStock(
   let vId = variantId ?? undefined
   if (!vId) {
     const { data } = await query.graph({ entity: 'product', fields: ['variants.id'], filters: { id: productId } })
-    vId = ((data?.[0] as any)?.variants?.[0] as { id?: string } | undefined)?.id
+    const variants = ((data?.[0] as any)?.variants ?? []) as { id?: string }[]
+    if (variants.length > 1) {
+      // Multi-variant (configurator) product with no linked variant_id — silently
+      // decrementing variants[0] could restock/deduct the wrong combination.
+      console.error('[decrementProductStock] no variant_id but product has multiple variants — refusing to guess', { productId })
+    } else {
+      vId = variants[0]?.id
+    }
   }
   if (!vId) return null // unresolved → retry, don't mark applied
   const inventoryItemId = await getVariantInventoryItemId(scope, vId)
