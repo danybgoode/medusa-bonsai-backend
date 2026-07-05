@@ -113,11 +113,14 @@ export function isFeaturedPin(l: { metadata?: Record<string, unknown> | null }):
 
 export function toListingShape(product: any, seller?: any): ListingShape {
   const meta = (product.metadata ?? {}) as Record<string, unknown>
-  // Exclude variants soft-disabled by the option-dimensions order-safety
-  // guard (seller-product-update.ts's applyOptionDimensions) — a disabled
-  // variant is hidden/non-purchasable, so its price must never deflate the
-  // "desde $X" display (cross-agent review catch, 2026-07-05). Mirrors the
-  // same filter in listings/[id]/price-grid/route.ts.
+  // Exclude any variant flagged `metadata.disabled` (hidden/non-purchasable)
+  // so its price can never deflate the "desde $X" display. Nothing in this
+  // codebase sets this today (an earlier option-dimensions design that did
+  // was replaced — see applyOptionDimensions() in seller-product-update.ts —
+  // with an outright refusal instead of an in-place disable, once Medusa's
+  // variant-options constraint made preserving the old variant unsafe), but
+  // the filter is defensive/cheap to keep for any future per-variant
+  // disable. Mirrors the same filter in listings/[id]/price-grid/route.ts.
   const variants: any[] = (product.variants ?? []).filter((v: any) => v?.metadata?.disabled !== true)
 
   // ── Price (min across all variants) ───────────────────────────────────────

@@ -51,16 +51,26 @@ export interface SellerProductUpdateBody {
   /**
    * Add real priced option dimensions (Tamaño / Material / Acabado, up to 3)
    * to a listing that is still on the platform's auto-created single
-   * "Default"/"Default" variant. Builds the full cartesian product of
-   * variants via additive-only workflows — NEVER via updateProductsWorkflow
-   * with a full variants/options array, which Medusa hard-deletes anything
-   * omitted from the replace (verified against installed MikroORM
-   * orphan-removal + Collection.set() source, 2026-07-05). The old Default
-   * variant is deleted only if it has zero order line items; otherwise it's
-   * disabled (manage_inventory:false + metadata.disabled:true), never
-   * deleted. Rejected (422) if the product already has real dimensions —
-   * restructuring an already-multi-variant product isn't supported this
-   * sprint.
+   * "Default"/"Default" variant. Deletes the old Default variant + option
+   * (proper cleanup, via deleteProductVariantsWorkflow +
+   * deleteProductOptionsWorkflow) then builds the full cartesian product of
+   * new variants via additive-only workflows — NEVER via
+   * updateProductsWorkflow with a full variants/options array, which Medusa
+   * hard-deletes anything omitted from the replace with no cross-module link
+   * cleanup (verified against installed MikroORM orphan-removal +
+   * Collection.set() source, 2026-07-05). The old Default option MUST be
+   * deleted before the new variants are created — Medusa requires every new
+   * variant's options map to cover the product's full CURRENT option set
+   * (verified against @medusajs/product's assignOptionsToVariants,
+   * 2026-07-05 cross-agent review catch — creating a variant with only the
+   * new dimensions while "Default" is still attached throws INVALID_DATA).
+   * Order-safety guard: since that means the old variant can never be
+   * preserved once this runs, the whole operation is REFUSED (422) if the
+   * old variant has any order line items — a fresh/unsold listing (the
+   * normal case) converts; one with sales history needs a new listing
+   * instead. Also rejected (422) if the product already has real
+   * dimensions — restructuring an already-multi-variant product isn't
+   * supported this sprint.
    */
   option_dimensions?: Array<{ title: string; values: string[] }>
   /** Per-combination price in cents (MXN), keyed by buildVariantComboKey(). Required alongside option_dimensions. */
@@ -100,7 +110,6 @@ async function applyOptionDimensions(
   dimensionsRaw: Array<{ title: string; values: string[] }>,
   variantPrices: Record<string, number> | undefined,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const remoteQuery = scope.resolve('remoteQuery')
 
   const { data: rows } = await remoteQuery.graph({
@@ -136,6 +145,37 @@ async function applyOptionDimensions(
   const oldOptionId = existingOptions[0].id
   const oldManageInventory = !!existingVariants[0].manage_inventory
 
+  // Order-safety guard — checked FIRST, before any mutation, and now a hard
+  // refusal rather than an in-place restructure. Verified against
+  // @medusajs/product/dist/services/product-module-service.js's
+  // `assignOptionsToVariants` (2026-07-05, cross-agent review catch): Medusa
+  // requires every variant passed to createVariants_/updateVariants_ to
+  // specify a value for EVERY option currently attached to the product — so
+  // the new Tamaño/Material variants literally cannot be created while the
+  // old "Default" option is still attached, meaning "Default" must always be
+  // deleted before creating them. That makes preserving the old variant
+  // (this sprint's original soft-disable design) impossible to do safely in
+  // the same stroke, so a listing with any order history is refused outright
+  // (422) instead — "safe" means never risking data loss, not "always
+  // possible." A fresh/unsold listing (the common case for a new print-
+  // configurator conversion) converts normally.
+  const orderService: any = scope.resolve(Modules.ORDER)
+  const referencingOrders = await orderService.listOrderLineItems({ variant_id: oldVariantId }, { take: 1 })
+  if (Array.isArray(referencingOrders) && referencingOrders.length > 0) {
+    return {
+      ok: false,
+      status: 422,
+      message: 'Este anuncio ya tiene pedidos; no se puede convertir a variantes múltiples. Crea un nuevo anuncio para la versión con opciones.',
+    }
+  }
+
+  // No orders — safe to fully replace. The old variant + "Default" option
+  // must be deleted BEFORE creating the new ones (see the constraint above);
+  // both delete workflows do the proper remote-link + inventory-item
+  // cleanup (unlike updateProductsWorkflow's array-replace hard-delete).
+  await deleteProductVariantsWorkflow(scope).run({ input: { ids: [oldVariantId] } })
+  await deleteProductOptionsWorkflow(scope).run({ input: { ids: [oldOptionId] } })
+
   await createProductOptionsWorkflow(scope).run({
     input: {
       product_options: validated.dimensions.map((d) => ({ product_id: id, title: d.title, values: d.values })),
@@ -154,17 +194,16 @@ async function applyOptionDimensions(
     },
   })
 
-  // Re-fetch rather than trust the workflow's run() output shape — reliably
-  // identifies the newly-created variant ids regardless of it.
-  const { data: afterRows } = await remoteQuery.graph({
-    entity: 'product',
-    fields: ['id', 'variants.id'],
-    filters: { id },
-  })
-  const afterVariantIds: string[] = ((afterRows?.[0] as any)?.variants ?? []).map((v: any) => v.id)
-  const newVariantIds = afterVariantIds.filter((vid) => vid !== oldVariantId)
-
   if (oldManageInventory) {
+    // Re-fetch rather than trust the workflow's run() output shape — every
+    // variant on the product is new at this point (the old one was deleted
+    // above), so no id-diffing is needed.
+    const { data: afterRows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['id', 'variants.id'],
+      filters: { id },
+    })
+    const newVariantIds: string[] = ((afterRows?.[0] as any)?.variants ?? []).map((v: any) => v.id)
     const locationId = await resolveStockLocationId(scope)
     if (locationId) {
       for (const variantId of newVariantIds) {
@@ -173,21 +212,6 @@ async function applyOptionDimensions(
     } else {
       console.error('[applyOptionDimensions] no stock location — new variants left unprovisioned', { id })
     }
-  }
-
-  // Order-safety guard: never delete a variant an order line item references.
-  // Soft-disable instead (hidden, non-purchasable) — the option itself is
-  // left in place too since the disabled variant still references it.
-  const orderService: any = scope.resolve(Modules.ORDER)
-  const referencingOrders = await orderService.listOrderLineItems({ variant_id: oldVariantId }, { take: 1 })
-  if (Array.isArray(referencingOrders) && referencingOrders.length > 0) {
-    await (productService as any).updateProductVariants(oldVariantId, {
-      manage_inventory: false,
-      metadata: { disabled: true },
-    })
-  } else {
-    await deleteProductVariantsWorkflow(scope).run({ input: { ids: [oldVariantId] } })
-    await deleteProductOptionsWorkflow(scope).run({ input: { ids: [oldOptionId] } })
   }
 
   return { ok: true }

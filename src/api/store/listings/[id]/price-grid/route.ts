@@ -26,9 +26,9 @@ export interface PriceGridResponse {
  * zero drift risk (custom-print-products Sprint 2, Story 2.3). The frontend's
  * `lib/price-grid.ts` derives display prices from this fetched-once ladder.
  *
- * Excludes variants disabled by the option-dimensions order-safety guard
- * (`metadata.disabled === true` on the old Default variant — see
- * `seller-product-update.ts`'s `applyOptionDimensions`).
+ * Excludes any variant flagged `metadata.disabled` (hidden/non-purchasable)
+ * — defensive; nothing sets this today (see the comment on the same filter
+ * in `_utils/listing.ts`).
  */
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const { id } = req.params

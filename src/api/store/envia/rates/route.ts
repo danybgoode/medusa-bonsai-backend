@@ -212,9 +212,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const weightGrams = (meta.weight_grams as number | undefined) ?? pkgDefaults.weight_grams ?? 500
     // Max price across all variants — a multi-variant (configurator) listing's
     // declared value should reflect its most expensive combination, not
-    // whichever variant happens to be first. Excludes variants soft-disabled
-    // by the option-dimensions order-safety guard (cross-agent review catch,
-    // 2026-07-05 — mirrors the same filter in listing.ts/price-grid route).
+    // whichever variant happens to be first. Excludes any variant flagged
+    // metadata.disabled (defensive; nothing sets this today — mirrors the
+    // same filter in listing.ts/price-grid route).
     const priceVariant = ((p.variants ?? []) as any[])
       .filter((v) => v?.metadata?.disabled !== true)
       .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number }>)
