@@ -26,6 +26,7 @@ import {
   provisionVariantInventory,
 } from './inventory'
 import { generateSku, buildVariantComboKey, validateOptionDimensions } from './seller-product-create'
+import { validateTierLadder, type PriceTier } from '../../../lib/price-tiers'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
@@ -65,11 +66,19 @@ export interface SellerProductUpdateBody {
   /** Per-combination price in cents (MXN), keyed by buildVariantComboKey(). Required alongside option_dimensions. */
   variant_prices?: Record<string, number>
   /**
-   * Explicit variant to target for `price_cents`/`quantity` updates on a
-   * multi-variant listing. Falls back to the sole variant when the product
-   * has exactly one (legacy single-variant path, unchanged).
+   * Explicit variant to target for `price_cents`/`quantity`/`variant_tiers`
+   * updates on a multi-variant listing. Falls back to the sole variant when
+   * the product has exactly one (legacy single-variant path, unchanged).
    */
   variant_id?: string
+  /**
+   * Quantity price-break tiers for the targeted variant (e.g. 10→$X, 50→$Y).
+   * Must cover [1, ∞) with no overlap/gap (`validateTierLadder`) — rejected
+   * (422, es-MX message) otherwise. REPLACES that variant's existing prices
+   * (soft-deletes them first) with the full tier ladder; a listing that never
+   * sets `variant_tiers` keeps its flat `price_cents` price exactly as today.
+   */
+  variant_tiers?: PriceTier[]
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -330,6 +339,57 @@ export async function updateSellerProduct(
         })
       }
     }
+  }
+
+  // ── Quantity price-break tiers ────────────────────────────────────────────
+  if (body.variant_tiers !== undefined) {
+    const validated = validateTierLadder(body.variant_tiers)
+    if (!validated.ok) return { ok: false, status: 422, message: validated.message }
+
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['variants.id', 'variants.prices.id', 'variants.prices.currency_code'],
+      filters: { id },
+    })
+    const variants: any[] = (rows?.[0] as any)?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
+
+    const { data: varRows } = await remoteQuery.graph({
+      entity: 'product_variant',
+      fields: ['id', 'price_set.id'],
+      filters: { id: variant.id },
+    })
+    const priceSetId = (varRows?.[0] as any)?.price_set?.id
+    if (!priceSetId) {
+      return { ok: false, status: 422, message: 'Esta variante no tiene un conjunto de precios; agrega un precio primero.' }
+    }
+
+    // Replace: soft-delete the variant's existing MXN prices (the flat
+    // no-tier price included), then add the full tier ladder — avoids two
+    // simultaneously-matching MXN prices for the same quantity.
+    const existingMxnPriceIds: string[] = ((variant.prices ?? []) as Array<{ id: string; currency_code: string }>)
+      .filter((p) => p.currency_code === 'mxn')
+      .map((p) => p.id)
+    if (existingMxnPriceIds.length > 0) {
+      await (pricingService as any).softDeletePrices(existingMxnPriceIds)
+    }
+    await (pricingService as any).addPrices([{
+      price_set_id: priceSetId,
+      prices: body.variant_tiers.map((tier) => ({
+        amount: tier.amount,
+        currency_code: 'mxn',
+        min_quantity: tier.min_quantity,
+        max_quantity: tier.max_quantity,
+        rules: {},
+      })),
+    }])
   }
 
   // ── Stock / restock (managed physical products) ──────────────────────────────
