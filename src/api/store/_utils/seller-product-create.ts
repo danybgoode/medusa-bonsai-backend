@@ -118,8 +118,8 @@ export function validateOptionDimensions(
 
     const seenValues = new Set<string>()
     const values: string[] = []
-    for (const raw of dim.values ?? []) {
-      const value = raw?.trim().slice(0, 40)
+    for (const rawValue of dim.values ?? []) {
+      const value = rawValue?.trim().slice(0, 40)
       if (!value) continue
       const valueKey = value.toLowerCase()
       if (seenValues.has(valueKey)) continue
