@@ -300,13 +300,22 @@ export async function createSellerProduct(
       .map((v) => v.id)
       .filter((id): id is string => !!id)
     const locationId = await resolveStockLocationId(scope)
+    // `body.quantity` means "how many units of this ONE item" for a
+    // single-variant listing — applying it to every generated combination on
+    // a multi-variant (configurator) create would phantom-multiply stock
+    // (quantity:10 × 6 variants = 60 apparent units, a cross-agent review
+    // catch, 2026-07-05). Multi-variant creates default every combo to 0 —
+    // the seller sets real per-variant stock afterward via the variant_id-
+    // aware quantity-update path (seller-product-update.ts), same as the
+    // option_dimensions edit path already does for newly-added combos.
+    const perVariantQuantity = dimensionCombos ? 0 : quantity
     if (variantIds.length > 0 && locationId) {
       for (const variantId of variantIds) {
         await provisionVariantInventory(scope, {
           variantId,
           salesChannelId,
           locationId,
-          quantity,
+          quantity: perVariantQuantity,
         })
       }
     } else {

@@ -9,7 +9,7 @@
  */
 
 import type { MedusaRequest } from '@medusajs/framework/http'
-import { Modules } from '@medusajs/framework/utils'
+import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { IProductModuleService, IPricingModuleService } from '@medusajs/framework/types'
 import {
   updateProductsWorkflow,
@@ -329,13 +329,25 @@ export async function updateSellerProduct(
           prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
         }])
       } else {
-        // Single-variant field update — NEVER route this through
-        // updateProductsWorkflow's `variants` array, which does a full
-        // Collection.set() replace at the Product level and hard-deletes any
-        // sibling variant omitted from the array (verified 2026-07-05; see
-        // the option_dimensions doc comment above).
-        await (productService as any).updateProductVariants(variant.id, {
-          prices: [{ amount: body.price_cents, currency_code: 'mxn' }],
+        // The variant has no price_set at all (edge case). Two unsafe paths
+        // ruled out here: updateProductsWorkflow's `variants` array does a
+        // full Collection.set() replace at the Product level and hard-
+        // deletes any sibling variant omitted from the array (verified
+        // 2026-07-05; see the option_dimensions doc comment above); and
+        // productService.updateProductVariants()'s UpdateProductVariantDTO
+        // has NO `prices` field at all (confirmed against
+        // @medusajs/types/dist/product/common.d.ts) — it would silently
+        // drop the payload with no error, a cross-agent review catch
+        // (2026-07-05). Create a fresh price set and link it via the exact
+        // remote-link shape Medusa's own createVariantPricingLinkStep uses
+        // (@medusajs/core-flows/dist/product/steps/create-variant-pricing-link.js).
+        const newPriceSet = await (pricingService as any).createPriceSets({
+          prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
+        })
+        const remoteLink = scope.resolve(ContainerRegistrationKeys.LINK)
+        await remoteLink.create({
+          [Modules.PRODUCT]: { variant_id: variant.id },
+          [Modules.PRICING]: { price_set_id: newPriceSet.id },
         })
       }
     }
