@@ -227,19 +227,22 @@ export async function updateSellerProduct(
   const remoteQuery = scope.resolve('remoteQuery')
 
   // A caller can't know the newly-created variant ids until AFTER
-  // option_dimensions commits, so combining it with price_cents/quantity
-  // (which resolve to the sole variant only when exactly one exists) in the
-  // SAME request would let the dimensions mutation succeed and then 422 on
-  // the price/stock block — a confusing "did it work?" response after a
-  // real mutation already landed (cross-agent review catch, 2026-07-05).
-  // Reject upfront instead: set per-combination prices via variant_prices
-  // at dimension-creation time, and stock in a separate follow-up call
+  // option_dimensions commits, so combining it with price_cents/quantity/
+  // variant_tiers (all of which resolve to a specific variant_id, or the
+  // sole variant when exactly one exists) in the SAME request would let the
+  // dimensions mutation succeed and then 422 on the price/stock/tiers block
+  // — a confusing "did it work?" response after a real mutation already
+  // landed (cross-agent review catch, 2026-07-05 — the original guard
+  // missed variant_tiers, a second review pass caught that gap). Reject
+  // upfront instead: set per-combination prices via variant_prices at
+  // dimension-creation time, and stock/tiers in a separate follow-up call
   // (re-fetch the price-grid for the new variant ids first).
-  if (body.option_dimensions !== undefined && (body.price_cents !== undefined || body.quantity !== undefined)) {
+  if (body.option_dimensions !== undefined
+    && (body.price_cents !== undefined || body.quantity !== undefined || body.variant_tiers !== undefined)) {
     return {
       ok: false,
       status: 422,
-      message: 'No combines option_dimensions con price_cents/quantity en la misma solicitud. Usa variant_prices para los precios; el stock se ajusta en una solicitud aparte con variant_id.',
+      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers en la misma solicitud. Usa variant_prices para los precios; el stock y los niveles se ajustan en una solicitud aparte con variant_id.',
     }
   }
 
@@ -353,7 +356,20 @@ export async function updateSellerProduct(
         : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
     }
     const prices: Array<{ id: string; currency_code: string }> = variant?.prices ?? []
-    const existing = prices.find(p => p.currency_code === 'mxn') ?? prices[0]
+    const mxnPrices = prices.filter(p => p.currency_code === 'mxn')
+    // A variant with quantity tiers (Story 2.2) carries MULTIPLE mxn prices.
+    // Silently picking one via .find() and overwriting only that tier would
+    // corrupt the ladder (the other tiers keep stale amounts) — reject
+    // instead and point at the right tool (cross-agent review catch,
+    // 2026-07-05).
+    if (mxnPrices.length > 1) {
+      return {
+        ok: false,
+        status: 422,
+        message: 'Esta variante tiene niveles de precio por cantidad; usa variant_tiers para actualizarlos, no price_cents.',
+      }
+    }
+    const existing = mxnPrices[0] ?? prices[0]
 
     if (existing?.id) {
       await (pricingService as any).updatePrices([{ id: existing.id, amount: body.price_cents }])
