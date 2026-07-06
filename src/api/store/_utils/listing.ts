@@ -203,3 +203,36 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     shop: seller ? toSellerShape(seller) : null,
   }
 }
+
+/**
+ * Seller-private variant-metadata keys that must never reach a PUBLIC read.
+ * `unit_cost_cents` is the seller's COGS (profit-analyzer S1 · US-1) — only
+ * the Clerk-authed seller-scoped GET may return it. Any route that serializes
+ * RAW variants (rather than through `toListingShape`, which never emits
+ * variant metadata) must pass its products through
+ * `stripPrivateVariantMetadata` before responding. Add future private keys
+ * here, not at call sites.
+ */
+const PRIVATE_VARIANT_METADATA_KEYS = ['unit_cost_cents'] as const
+
+/**
+ * Deep-copy-free scrub of seller-private keys from every variant's metadata
+ * on a raw product row (public keys like `disabled` survive — the storefront
+ * filters on them). Returns new product/variant/metadata objects; never
+ * mutates the input rows.
+ */
+export function stripPrivateVariantMetadata<T extends { variants?: any[] | null }>(product: T): T {
+  const variants = product.variants
+  if (!Array.isArray(variants) || variants.length === 0) return product
+  return {
+    ...product,
+    variants: variants.map((v) => {
+      const meta = v?.metadata as Record<string, unknown> | null | undefined
+      if (!meta || typeof meta !== 'object') return v
+      if (!PRIVATE_VARIANT_METADATA_KEYS.some((k) => k in meta)) return v
+      const next = { ...meta }
+      for (const k of PRIVATE_VARIANT_METADATA_KEYS) delete next[k]
+      return { ...v, metadata: next }
+    }),
+  }
+}
