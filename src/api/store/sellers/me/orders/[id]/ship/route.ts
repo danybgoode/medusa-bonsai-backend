@@ -37,6 +37,8 @@ import {
 import { toEnviaStateCode } from '../../../../../../../modules/fulfillment-envia/mx-state-codes'
 import { isEnabled } from '../../../../../../../lib/flags'
 import { enviaKillGate, ENVIA_LABEL_DISABLED_MESSAGE } from '../../../../../../../lib/envia-killswitch'
+import { parseEnviaLabelCost } from '../../../../../../../lib/profit-ledger'
+import { appendNativeShippingLedger } from '../../../../../../../lib/profit-ledger-write'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const seller = await resolveSeller(req)
@@ -251,6 +253,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── 6. Persist shipment snapshot on order.metadata ────────────────────────
+  // The label COST is captured here too (profit-analyzer S1 · US-2): parsed
+  // defensively from the raw Envia response — previously discarded, which
+  // left native margins shipping-blind. Null when unparseable (the profit
+  // dashboard renders "envío pendiente" honestly).
+  const labelCost = parseEnviaLabelCost(shipment.raw)
   const shipmentSnapshot = {
     carrier: shipment.carrier || meta.shipping_carrier || 'envia',
     carrier_label: shipment.carrier?.toUpperCase() ?? null,
@@ -262,6 +269,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     estimated_delivery_date: shipment.estimatedDeliveryDate ?? null,
     shipped_at: now,
     created_at: now,
+    cost_cents: labelCost?.amount_cents ?? null,
+    cost_source_field: labelCost?.source_field ?? null,
   }
 
   try {
@@ -275,6 +284,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   } catch (e) {
     console.error('[ship] metadata update failed:', e)
     // Return success anyway — the shipment was created in Envia
+  }
+
+  // Profit ledger follow-up event (US-2): the label cost completes the sale's
+  // partial row. Flag-gated + best-effort + idempotent inside the helper.
+  if (labelCost) {
+    await appendNativeShippingLedger(req.scope, {
+      orderId,
+      amountCents: labelCost.amount_cents,
+      metadata: { rate_id: rateId, source_field: labelCost.source_field, envia_shipment_id: shipment.enviaShipmentId || null },
+    })
   }
 
   return res.json({

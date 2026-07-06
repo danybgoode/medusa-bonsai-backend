@@ -37,6 +37,7 @@ export type FlagKey =
   | 'ml.sync_enabled'
   | 'ml.orders_enabled'
   | 'ml.sync_paywall_enabled'
+  | 'ops.profit_enabled'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -63,6 +64,12 @@ export type FlagKey =
  *    `ml.sync_enabled`, not to the usual kill-switch default-`true`. Sprint 1
  *    gated this GLOBAL flag only; Sprint 2 · US-6 additionally gates on the
  *    per-seller `ml_sync` entitlement below.
+ *  - ENABLEMENT (`ops.profit_enabled`): default `false` (profit-analyzer epic,
+ *    Sprint 1). Gates the financial-events ledger writes + the seller profit
+ *    read API — the whole surface ships dark and a flag-read outage must not
+ *    start writing ledger rows unsupervised. The ledger is append-only, so
+ *    rows written while ON are never mutated by a later OFF; the backfill
+ *    route heals any gap when it comes back ON.
  *  - ENABLEMENT (`ml.sync_paywall_enabled`): default `false`, mirrors the
  *    frontend's own key of the same name (`lib/flags.ts`) — the paid/promoter-SKU
  *    entitlement gate for ML sync/orders (epic 03 · mercadolibre-sync Sprint 5;
@@ -76,6 +83,7 @@ const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'ml.sync_enabled': false,
   'ml.orders_enabled': false,
   'ml.sync_paywall_enabled': false,
+  'ops.profit_enabled': false,
 }
 
 const TABLE = 'platform_flags'
