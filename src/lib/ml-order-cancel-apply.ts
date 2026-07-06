@@ -72,7 +72,16 @@ export async function applyMlOrderCancel(
             fields: ['variants.id'],
             filters: { id: (link as { product_id: string }).product_id },
           })
-          variantId = ((data?.[0] as any)?.variants?.[0] as { id?: string } | undefined)?.id
+          const variants = ((data?.[0] as any)?.variants ?? []) as { id?: string }[]
+          if (variants.length > 1) {
+            // Multi-variant (configurator) product with no linked variant_id —
+            // silently restocking variants[0] could credit the wrong combination.
+            console.error('[cancelMlOrderApply] no variant_id but product has multiple variants — refusing to guess', {
+              productId: (link as { product_id: string }).product_id,
+            })
+          } else {
+            variantId = variants[0]?.id
+          }
         }
         if (!variantId) return 'skipped'
         const inventoryItemId = await getVariantInventoryItemId(scope, variantId)

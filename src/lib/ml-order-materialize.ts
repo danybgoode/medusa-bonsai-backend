@@ -146,9 +146,19 @@ export async function materializeMlOrder(
     filters: { id: link.product_id },
   })
   const product = data?.[0] as { title?: string; variants?: { id: string; title?: string }[] } | undefined
-  const variant = link.variant_id
-    ? product?.variants?.find((v) => v.id === link.variant_id)
-    : product?.variants?.[0]
+  let variant: { id: string; title?: string } | undefined
+  if (link.variant_id) {
+    variant = product?.variants?.find((v) => v.id === link.variant_id)
+  } else if ((product?.variants?.length ?? 0) > 1) {
+    // A multi-variant (configurator) product with no linked variant_id can't be
+    // safely guessed — silently picking variants[0] would materialize the wrong
+    // combination. Fail loud and let the reconcile job retry once the link is fixed.
+    console.error('[materializeMlOrder] link has no variant_id but product has multiple variants — refusing to guess', {
+      productId: link.product_id, linkId: link.id,
+    })
+  } else {
+    variant = product?.variants?.[0]
+  }
   if (!variant) return null // unresolved product/variant → retry via reconcile
 
   const [regionId, salesChannelId] = await Promise.all([resolveMxnRegionId(scope), resolveMlSalesChannelId(scope)])
