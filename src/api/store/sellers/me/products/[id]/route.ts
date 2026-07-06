@@ -28,6 +28,32 @@ async function resolveOwnership(req: MedusaRequest, productId: string) {
   return { seller, error: null, status: 200 }
 }
 
+// GET /store/sellers/me/products/:id — seller-scoped per-variant read.
+// Exists because COGS (`variant.metadata.unit_cost_cents`) is seller-private:
+// the public /store/listings + price-grid reads must never carry it, so the
+// edit UI reads current costs here (profit-analyzer S1 · US-1).
+export async function GET(req: MedusaRequest, res: MedusaResponse) {
+  const { id } = req.params
+  const { seller, error, status } = await resolveOwnership(req, id)
+  if (!seller) return res.status(status).json({ message: error })
+
+  const remoteQuery = req.scope.resolve('remoteQuery')
+  const { data: rows } = await remoteQuery.graph({
+    entity: 'product',
+    fields: ['id', 'variants.id', 'variants.title', 'variants.metadata'],
+    filters: { id },
+  })
+  const variants = (((rows?.[0] as any)?.variants ?? []) as any[]).map((v) => {
+    const cost = (v?.metadata as Record<string, unknown> | null)?.unit_cost_cents
+    return {
+      id: v.id as string,
+      title: (v.title as string | null) ?? null,
+      unit_cost_cents: typeof cost === 'number' && Number.isInteger(cost) && cost >= 0 ? cost : null,
+    }
+  })
+  res.json({ product_id: id, variants })
+}
+
 // PATCH /store/sellers/me/products/:id — update title, description, price, status
 export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const { id } = req.params

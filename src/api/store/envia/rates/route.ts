@@ -120,7 +120,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   try {
     const { data } = await remoteQuery.graph({
       entity: 'product',
-      fields: ['id', 'title', 'metadata', 'variants.prices.*'],
+      fields: ['id', 'title', 'metadata', 'variants.metadata', 'variants.prices.*'],
       filters: { id: listingIds },
     })
     products = data ?? []
@@ -210,7 +210,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const packages: EnviaPackage[] = shippable.map((p: any) => {
     const meta = (p.metadata ?? {}) as Record<string, unknown>
     const weightGrams = (meta.weight_grams as number | undefined) ?? pkgDefaults.weight_grams ?? 500
-    const priceVariant = (p.variants?.[0]?.prices?.[0]?.amount as number | undefined)
+    // Max price across all variants — a multi-variant (configurator) listing's
+    // declared value should reflect its most expensive combination, not
+    // whichever variant happens to be first. Excludes any variant flagged
+    // metadata.disabled (defensive; nothing sets this today — mirrors the
+    // same filter in listing.ts/price-grid route).
+    const priceVariant = ((p.variants ?? []) as any[])
+      .filter((v) => v?.metadata?.disabled !== true)
+      .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number; currency_code?: string }>)
+      // MXN only — mixing currencies into one max() would compare, e.g., a
+      // 50 USD price against a 1000 MXN price as raw integers, producing a
+      // meaningless declared value (cross-agent review catch, 2026-07-05).
+      .filter((pr) => pr?.currency_code === 'mxn')
+      .reduce((max: number | undefined, pr) =>
+        typeof pr?.amount === 'number' && (max === undefined || pr.amount > max) ? pr.amount : max,
+        undefined as number | undefined)
     return {
       content: String(p.title ?? 'Producto').slice(0, 80),
       weight: Math.max(0.1, weightGrams / 1000),
