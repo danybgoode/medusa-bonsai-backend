@@ -155,6 +155,11 @@ module.exports = defineConfig({
       resolve: './src/modules/mercadolibre',
     },
 
+    // ── Profit module (append-only financial-events ledger) ────────────────────
+    {
+      resolve: './src/modules/profit',
+    },
+
     // ── Auth providers ─────────────────────────────────────────────────────────
     {
       resolve: '@medusajs/medusa/auth',

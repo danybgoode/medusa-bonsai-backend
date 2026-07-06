@@ -2,6 +2,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { isHiddenCatalogProduct } from '../../../_utils/support'
+import { stripPrivateVariantMetadata } from '../../../_utils/listing'
 
 // GET /store/sellers/:slug/products — all active products for a seller storefront
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -61,8 +62,14 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     .sort((a: { created_at?: string | Date }, b: { created_at?: string | Date }) =>
       new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
     )
+  // This route returns RAW product rows (incl. variant metadata — the
+  // storefront filters on `disabled`), so seller-private keys must be
+  // scrubbed here: without this, a public read leaks the seller's COGS
+  // (`unit_cost_cents`) to anyone with the publishable key (profit-analyzer
+  // S1 — pre-merge reviewer catch).
   const products = matchedProducts
     .slice(offset, offset + limit)
+    .map(stripPrivateVariantMetadata)
 
   res.json({
     seller,

@@ -32,6 +32,7 @@ import { decideMlOrderApply, safeDecrement } from '../modules/mercadolibre/sync-
 import { getVariantInventoryItemId, resolveStockLocationId } from '../api/store/_utils/inventory'
 import { materializeMlOrder } from './ml-order-materialize'
 import { notifySellerOfMlOrderEvent } from './ml-notify-seller'
+import { appendOrderLedger } from './profit-ledger-write'
 import type { MlOrder } from '../modules/mercadolibre/client'
 
 type Scope = { resolve: (key: string) => any }
@@ -216,6 +217,12 @@ export async function applyMlOrderToLink(
   // alike). Fire-and-forget, outside the lock, never blocks the caller.
   if (applied.medusaOrderId) {
     void notifySellerOfMlOrderEvent(scope, applied.sellerId, 'ml_order_new', applied.medusaOrderId)
+    // Profit ledger (profit-analyzer S1 · US-2): the materialized order's
+    // revenue / ML fee / COGS-snapshot / shipping events, parsed from the raw
+    // payloads Epic A stamped on its metadata. Outside the lock, flag-gated +
+    // best-effort + idempotent inside the helper — the backfill route heals
+    // any pass this misses.
+    void appendOrderLedger(scope, applied.medusaOrderId)
   }
   return 'applied'
 }

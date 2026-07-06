@@ -62,6 +62,14 @@ export interface CreateProductBody {
    * `option_dimensions` is set.
    */
   variant_prices?: Record<string, number>
+  /**
+   * Unit cost (COGS) in integer centavos MXN, stored on the created variant's
+   * `metadata.unit_cost_cents` (seller-private — never surfaced on public
+   * reads). Single-variant listings only (the bulk-import path); a
+   * dimensioned listing sets per-variant costs after creation via the update
+   * route's `variant_id` + `unit_cost_cents` (profit-analyzer S1 · US-1).
+   */
+  unit_cost_cents?: number | null
 }
 
 const MAX_OPTION_DIMENSIONS = 3
@@ -157,6 +165,11 @@ export async function createSellerProduct(
 
   if (!body.title?.trim() || body.title.trim().length < 3) {
     return { ok: false, status: 400, message: 'title must be at least 3 characters' }
+  }
+
+  if (body.unit_cost_cents !== undefined && body.unit_cost_cents !== null
+    && (!Number.isInteger(body.unit_cost_cents) || body.unit_cost_cents < 0)) {
+    return { ok: false, status: 422, message: 'El costo unitario debe ser un entero en centavos de 0 o más.' }
   }
 
   // ── Priced option dimensions (print-configurator listings) ────────────────
@@ -279,6 +292,9 @@ export async function createSellerProduct(
               prices: body.price_cents != null && body.price_cents > 0
                 ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
                 : [],
+              ...(body.unit_cost_cents != null
+                ? { metadata: { unit_cost_cents: body.unit_cost_cents } }
+                : {}),
             }],
       }],
     },
