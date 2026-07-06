@@ -89,6 +89,16 @@ export interface SellerProductUpdateBody {
    * sets `variant_tiers` keeps its flat `price_cents` price exactly as today.
    */
   variant_tiers?: PriceTier[]
+  /**
+   * Unit cost (COGS) in integer centavos MXN for the targeted variant
+   * (`variant_id`, or the sole variant — same resolution as `price_cents`).
+   * Stored on `variant.metadata.unit_cost_cents`, which is seller-private:
+   * the public listing/price-grid reads never surface variant metadata cost,
+   * only the seller-scoped GET does. `null` clears it. The profit ledger
+   * snapshots this at sale time, so a later edit never rewrites history
+   * (profit-analyzer S1 · US-1).
+   */
+  unit_cost_cents?: number | null
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -238,11 +248,12 @@ export async function updateSellerProduct(
   // dimension-creation time, and stock/tiers in a separate follow-up call
   // (re-fetch the price-grid for the new variant ids first).
   if (body.option_dimensions !== undefined
-    && (body.price_cents !== undefined || body.quantity !== undefined || body.variant_tiers !== undefined)) {
+    && (body.price_cents !== undefined || body.quantity !== undefined || body.variant_tiers !== undefined
+      || body.unit_cost_cents !== undefined)) {
     return {
       ok: false,
       status: 422,
-      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers en la misma solicitud. Usa variant_prices para los precios; el stock y los niveles se ajustan en una solicitud aparte con variant_id.',
+      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles y el costo se ajustan en una solicitud aparte con variant_id.',
     }
   }
 
@@ -459,6 +470,36 @@ export async function updateSellerProduct(
         rules: {},
       })),
     }])
+  }
+
+  // ── Unit cost (COGS) — variant.metadata.unit_cost_cents ──────────────────
+  if (body.unit_cost_cents !== undefined) {
+    if (body.unit_cost_cents !== null
+      && (!Number.isInteger(body.unit_cost_cents) || body.unit_cost_cents < 0)) {
+      return { ok: false, status: 422, message: 'El costo unitario debe ser un entero en centavos de 0 o más.' }
+    }
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['variants.id', 'variants.metadata'],
+      filters: { id },
+    })
+    const variants: any[] = (rows?.[0] as any)?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
+    // Read-merge-write on the variant metadata (same discipline as the
+    // product-level metadata merge above) so sibling keys like `disabled`
+    // survive; null deletes the key rather than storing a null.
+    const currentMeta = ((variant.metadata ?? {}) as Record<string, unknown>)
+    const nextMeta: Record<string, unknown> = { ...currentMeta }
+    if (body.unit_cost_cents === null) delete nextMeta.unit_cost_cents
+    else nextMeta.unit_cost_cents = body.unit_cost_cents
+    await (productService as any).updateProductVariants(variant.id, { metadata: nextMeta })
   }
 
   // ── Stock / restock (managed physical products) ──────────────────────────────
