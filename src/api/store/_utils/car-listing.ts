@@ -46,6 +46,36 @@ export function carMake(l: CarListingLike): string {
   return str(attrsOf(l).make) || str(l.metadata?.brand)
 }
 
+// ── Brand canonicalization (cars-vertical S1.1) ───────────────────────────────
+// MIRROR of the frontend lib/car-brands.ts — keep the alias keys in sync across
+// repos (same pattern as isPrintPlacementListing / isFeaturedPin mirrors). The
+// filter is the source of truth: the facet rail merges e.g. "VW" and
+// "Volkswagen" into one option, so the `brand` filter must match that whole
+// group for the option's count to stay honest. Only ABBREVIATION aliases need a
+// map entry — everything else canonicalizes to its own accent-stripped, lowercased
+// form (which a case-insensitive match already unifies).
+const BRAND_ALIAS_TO_KEY: Record<string, string> = {
+  vw: 'volkswagen',
+  chevy: 'chevrolet',
+  mercedes: 'mercedes-benz',
+  'mercedes benz': 'mercedes-benz',
+  mercedesbenz: 'mercedes-benz',
+  'general motors': 'gmc',
+  'great wall': 'gwm',
+  'land rover': 'land rover',
+}
+
+function normalizeBrand(input: string): string {
+  return input.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ')
+}
+
+/** Stable comparison key for a brand — merges abbreviations + casing/accents. */
+export function canonicalBrandKey(input: unknown): string {
+  const k = normalizeBrand(str(input))
+  if (!k) return ''
+  return BRAND_ALIAS_TO_KEY[k] ?? k
+}
+
 export function carModel(l: CarListingLike): string {
   // No legacy top-level equivalent — modelo only ever lived in attrs.
   return str(attrsOf(l).model)
@@ -74,6 +104,12 @@ export function carFuel(l: CarListingLike): string {
 // scheme.
 
 export function matchesBrand(l: CarListingLike, brand: string): boolean {
+  const reqKey = canonicalBrandKey(brand)
+  const makeKey = canonicalBrandKey(carMake(l))
+  // Exact canonical-group match (what a facet click sends) keeps the option's
+  // count honest — "Volkswagen" catches both "Volkswagen" and "VW".
+  if (reqKey && makeKey && reqKey === makeKey) return true
+  // Substring fallback for free-text partial typing ("volk") + unknown brands.
   return carMake(l).toLowerCase().includes(brand.toLowerCase())
 }
 

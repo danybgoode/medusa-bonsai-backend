@@ -1,5 +1,6 @@
 import {
   carMake, carModel, carYear, carKm, carTransmission, carFuel,
+  canonicalBrandKey,
   matchesBrand, matchesModel, matchesYearFrom, matchesYearTo, matchesKmFrom, matchesKmTo,
   toCarFacetPoolEntry,
 } from '../car-listing'
@@ -66,6 +67,24 @@ describe('car-listing filter predicates · honest missing-value handling', () =>
     expect(matchesBrand(car, 'volkswagen')).toBe(true)
     expect(matchesBrand(car, 'nissan')).toBe(false)
     expect(matchesModel(car, 'jet')).toBe(true)
+  })
+
+  it('brand match is alias/casing aware so a facet count stays honest', () => {
+    const vw = { attrs: { make: 'VW' } }
+    const messy = { attrs: { make: '  volkswagén ' } }
+    // A "Volkswagen" facet click must catch both the abbreviation and accented casing.
+    expect(matchesBrand(vw, 'Volkswagen')).toBe(true)
+    expect(matchesBrand(messy, 'Volkswagen')).toBe(true)
+    expect(matchesBrand(car, 'volk')).toBe(true)   // partial free-text still works
+  })
+
+  it('canonicalBrandKey merges abbreviations + casing/accents', () => {
+    expect(canonicalBrandKey('VW')).toBe('volkswagen')
+    expect(canonicalBrandKey('Volkswagen')).toBe('volkswagen')
+    expect(canonicalBrandKey('Chevy')).toBe('chevrolet')
+    expect(canonicalBrandKey('Mercedes Benz')).toBe('mercedes-benz')
+    expect(canonicalBrandKey('Citroën')).toBe('citroen')  // unknown → own normalized form
+    expect(canonicalBrandKey('  ')).toBe('')
   })
 
   it('year/km bounds include a matching car', () => {
