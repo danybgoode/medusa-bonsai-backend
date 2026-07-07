@@ -29,17 +29,28 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   )
   if (!order) return { order: null, code: 404 as const }
 
+  // Reject outright when ownership can't be established at all (no resolvable
+  // product ids on the order) — this route writes order-level metadata, so
+  // silently allowing it through here would let any authenticated seller
+  // touch any such order.
   const productIds = ((order.items ?? []) as any[]).map((i: any) => i.product_id).filter(Boolean)
-  if (productIds.length) {
-    const { data: sellerRows } = await (remoteQuery as any).graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: sellerAuth.sellerId },
-    })
-    const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
-    const owns = productIds.some((pid: string) => sellerProductIds.has(pid))
-    if (!owns) return { order: null, code: 403 as const }
-  }
+  if (productIds.length === 0) return { order: null, code: 403 as const }
+
+  const { data: sellerRows } = await (remoteQuery as any).graph({
+    entity: 'seller',
+    fields: ['id', 'products.id'],
+    filters: { id: sellerAuth.sellerId },
+  })
+  const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
+  // Require ownership of EVERY item, not just one — this write is ORDER-level
+  // (tags apply to the whole order), so a seller who owns only some items
+  // must not be able to mutate state that also covers another seller's item
+  // (cross-agent review catch, 2026-07-07). A cart can only ever hold one
+  // seller's items in normal use (lib/cart.ts on the frontend enforces this
+  // at checkout), so this is a no-op for every real order today — pure
+  // defense-in-depth against that invariant ever weakening elsewhere.
+  const owns = productIds.every((pid: string) => sellerProductIds.has(pid))
+  if (!owns) return { order: null, code: 403 as const }
 
   return { order, code: 200 as const }
 }
