@@ -121,6 +121,19 @@ export function normalizeMedusaOrder(
       return fields.length ? { title: (it?.title as string) ?? 'Producto', fields } : null
     })
     .filter(Boolean)
+
+  // Raw per-item ids/qty/personalization (custom-print-products S4 · 4.3) —
+  // unlike `personalization` above (filtered to items that HAVE fields), this
+  // is EVERY item, so "Volver a pedir" can rebuild a configurator cart line
+  // (variant selection alone, no custom fields, still needs a variant_id).
+  const lineItems = ((order.items as any[]) ?? []).map((it: any) => ({
+    product_id: (it?.product_id as string) ?? null,
+    variant_id: (it?.variant_id as string) ?? null,
+    quantity: Number(it?.quantity) || 1,
+    unit_price_cents: Math.round(Number(it?.unit_price) || 0),
+    personalization: (it?.metadata?.personalization ?? null) as unknown,
+  }))
+
   const metadata = (order.metadata ?? {}) as Record<string, unknown>
   const checkoutSelection = (metadata.checkout_selection ?? {}) as Record<string, unknown>
   const support = (metadata.support ?? null) as Record<string, unknown> | null
@@ -258,6 +271,19 @@ export function normalizeMedusaOrder(
     buyer_clerk_user_id: null,
     // Per-line-item buyer personalization (empty array when none).
     personalization,
+    // Raw per-item ids/qty/personalization for reorder (custom-print-products S4 · 4.3).
+    line_items: lineItems,
+    // Lightweight proof-of-print sign-off (custom-print-products S4 · 4.1):
+    // a durable order-metadata flag pair, same curation discipline as
+    // `tags`/`refund_state` above. Advisory only — never gates shipping.
+    proof_sent: metadata.proof_sent === true,
+    proof_sent_at: (metadata.proof_sent_at as string) ?? null,
+    proof_image_url: (metadata.proof_image_url as string) ?? null,
+    proof_size: (metadata.proof_size as string) ?? null,
+    proof_quantity: typeof metadata.proof_quantity === 'number' ? metadata.proof_quantity : null,
+    proof_price_cents: typeof metadata.proof_price_cents === 'number' ? metadata.proof_price_cents : null,
+    proof_approved: metadata.proof_approved === true,
+    proof_approved_at: (metadata.proof_approved_at as string) ?? null,
     support: isSupportOrder ? support : null,
     created_at: order.created_at,
     updated_at: order.updated_at,
