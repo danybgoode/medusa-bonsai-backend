@@ -9,6 +9,8 @@
  * push filters into the remoteQuery call and add a proper count query.
  */
 
+import { splitCategories } from './category-split'
+
 export interface ListingShape {
   id: string
   shop_id: string
@@ -20,6 +22,8 @@ export interface ListingShape {
   condition: string | null
   listing_type: string
   category: string | null
+  /** Seller-defined collection handles this listing belongs to (own-shop-premium-presentation S2). */
+  collections: string[]
   state: string | null
   municipio: string | null
   location: string | null
@@ -169,6 +173,8 @@ export function toListingShape(product: any, seller?: any): ListingShape {
   }
   const inStock = !manageInventory || (availableQuantity ?? 0) > 0
 
+  const { platformCategory, collections } = splitCategories(product.categories, seller?.slug)
+
   return {
     id: product.id,
     shop_id: seller?.id ?? '',
@@ -179,7 +185,8 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     currency: (priceObj?.currency_code ?? (meta.currency as string | undefined) ?? 'mxn').toUpperCase(),
     condition: (meta.condition as string) ?? null,
     listing_type: (product.type?.value ?? (meta.listing_type as string | undefined) ?? 'product') as string,
-    category: product.categories?.[0]?.handle ?? null,
+    category: platformCategory?.handle ?? null,
+    collections: collections.map((c) => c.handle),
     state: (meta.state as string) ?? null,
     municipio: (meta.municipio as string) ?? null,
     location: (meta.location as string) ?? null,
