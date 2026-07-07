@@ -30,6 +30,8 @@ import { validateTierLadder, type PriceTier } from '../../../lib/price-tiers'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
+import { splitCategories } from './category-split'
+import { resolveOwnedCollectionIds } from './seller-collections'
 
 export interface SellerProductUpdateBody {
   title?: string
@@ -99,6 +101,16 @@ export interface SellerProductUpdateBody {
    * (profit-analyzer S1 · US-1).
    */
   unit_cost_cents?: number | null
+  /**
+   * Full replacement set of seller-owned collection ids this product should
+   * belong to (own-shop-premium-presentation S2). Requires the `seller`
+   * context param on `updateSellerProduct` (the seller-UI + MCP-agent call
+   * sites already resolve it) — every id is intersected against
+   * `resolveOwnedCollectionIds` so a request can never attach a product to
+   * another seller's collection, and the product's platform-taxonomy
+   * category (if any) is always preserved untouched.
+   */
+  collection_ids?: string[]
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -231,6 +243,7 @@ export async function updateSellerProduct(
   scope: MedusaRequest['scope'],
   id: string,
   body: SellerProductUpdateBody,
+  seller?: { id: string; slug: string },
 ): Promise<SellerProductUpdateResult> {
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
@@ -270,6 +283,26 @@ export async function updateSellerProduct(
   if (body.status !== undefined) baseUpdate.status = body.status
   if (body.weight_grams != null && body.weight_grams > 0) {
     baseUpdate.weight = Math.round(body.weight_grams)
+  }
+
+  // ── Collection assignment (own-shop-premium-presentation S2) ─────────────
+  if (body.collection_ids !== undefined) {
+    if (!seller) {
+      return { ok: false, status: 422, message: 'collection_ids requiere contexto de vendedor.' }
+    }
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['categories.id', 'categories.handle'],
+      filters: { id },
+    })
+    const currentCategories = ((rows?.[0] as any)?.categories ?? []) as Array<{ id: string; handle: string }>
+    const { platformCategory } = splitCategories(currentCategories, seller.slug)
+    const ownedIds = await resolveOwnedCollectionIds(scope, seller.id)
+    const requestedOwned = body.collection_ids.filter((cid) => ownedIds.has(cid))
+    baseUpdate.category_ids = [
+      ...(platformCategory ? [platformCategory.id] : []),
+      ...requestedOwned,
+    ]
   }
 
   const needsMetadataMerge = body.metadata !== undefined || body.attrs !== undefined
