@@ -417,6 +417,50 @@ export async function predictCategory(
   }
 }
 
+// ── Fee estimate (Sprint 2 · US-4, profit-analyzer) ──────────────────────────
+// The suggester needs ML's OWN fee rate for a category/listing-type so the
+// solve-for-price formula uses a real, not guessed, fee%. GET
+// /sites/{site}/listing_prices returns the fee breakdown for a given
+// category + listing type (+ a reference price ML evaluates it at).
+
+/** The fee breakdown `GET /sites/{site}/listing_prices` returns for one listing type. */
+export type MlListingPrice = {
+  listing_type_id?: string
+  listing_type_name?: string
+  currency_id?: string
+  sale_fee_amount?: number
+  sale_fee_details?: {
+    percentage_fee?: number
+    fixed_fee?: number
+  }
+}
+
+/**
+ * Fetch ML's fee breakdown for a category/listing-type at a reference price.
+ * GET /sites/{site}/listing_prices?price=&category_id=&listing_type_id=.
+ * ML returns EITHER a single object (when `listing_type_id` is given) or an
+ * array of per-listing-type objects (when it's omitted) — normalise to the
+ * single object the caller asked for (or the first array entry as a
+ * fallback, defensively, since the exact shape is unconfirmed against a live
+ * sandbox — see LEARNINGS on ML raw-payload verification).
+ */
+export async function getListingPrices(
+  accessToken: string,
+  siteId: string,
+  opts: { price: number; categoryId: string; listingTypeId: string },
+): Promise<MlListingPrice> {
+  const url =
+    `${ML_API}/sites/${encodeURIComponent(siteId)}/listing_prices` +
+    `?price=${encodeURIComponent(String(opts.price))}` +
+    `&category_id=${encodeURIComponent(opts.categoryId)}` +
+    `&listing_type_id=${encodeURIComponent(opts.listingTypeId)}`
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+  if (!res.ok) throw new Error(`ML listing_prices failed: ${res.status}`)
+  const data = await res.json()
+  if (Array.isArray(data)) return (data[0] ?? {}) as MlListingPrice
+  return (data ?? {}) as MlListingPrice
+}
+
 /** Narrow a raw ML item detail (+ description, link flag) to the wire shape. */
 export function toMlImportItem(
   detail: MlItemDetail,
