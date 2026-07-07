@@ -26,6 +26,7 @@ import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_util
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
 import { isSupportProductMetadata, normalizeSupportCheckout, type NormalizedSupportCheckout } from '../../../_utils/support'
 import { resolveSellerForCheckout } from '../../../_utils/support-seller-resolution'
+import { resolveRentalCheckout, type RentalBooking } from '../../../../../lib/rental-checkout'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -151,10 +152,12 @@ function normalizeShippingQuote(input?: CheckoutShippingQuote | null) {
 
 async function loadProductForCheckout(remoteQuery: any, productId?: string | null) {
   if (!productId) return null
+  // `type.value` is the authoritative listing-type marker (rental pricing gates on it,
+  // falling back to metadata.listing_type) — see resolveRentalCheckout in S1.2.
   if (typeof remoteQuery?.graph === 'function') {
     const { data: rows } = await remoteQuery.graph({
       entity: 'product',
-      fields: ['id', 'title', 'metadata', 'status'],
+      fields: ['id', 'title', 'metadata', 'status', 'type.value'],
       filters: { id: productId },
     })
     return rows?.[0] ?? null
@@ -162,7 +165,7 @@ async function loadProductForCheckout(remoteQuery: any, productId?: string | nul
 
   const { data: rows } = await remoteQuery({
     product: {
-      fields: ['id', 'title', 'metadata', 'status'],
+      fields: ['id', 'title', 'metadata', 'status', 'type.value'],
       variables: { filters: { id: productId } },
     },
   })
@@ -184,6 +187,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     pickup_spot_id?: string
     /** Local pickup: the buyer's proposed appointment (Delivery & Manual-Money Polish S2.1). */
     pickup_appointment?: { date?: string; window?: string }
+    /** Rental listing: the buyer's chosen date range. ONLY dates — the total is
+     *  recomputed server-side (checkout.rental_pricing_enabled, S1.2). Never an amount. */
+    rental?: { check_in?: string; check_out?: string }
     shipping_address?: CheckoutShippingAddress
     shipping_quote?: CheckoutShippingQuote
     escrow?: boolean              // buyer explicitly opts in to escrow when mode='optional'
@@ -304,6 +310,36 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const productRecord = await loadProductForCheckout(remoteQuery as any, productId)
   const productMetadata = ((productRecord as any)?.metadata ?? {}) as Record<string, unknown>
 
+  // ── Rental pricing (server-recomputed total) ──────────────────────────────
+  // A rental checkout sends ONLY the date range; the total (nights × rate +
+  // deposit) is recomputed here from those dates + the product's own attrs + the
+  // listing's variant price. Behind checkout.rental_pricing_enabled (default OFF
+  // ⇒ 422 → today's coordination flow). A client-sent amount can NEVER influence
+  // this — resolveRentalCheckout takes no amount parameter (tamper guarantee).
+  // Trigger on the fulfillment method (not mere `body.rental` presence) so a stray
+  // `rental` field on a NORMAL product can never divert its checkout.
+  let rentalBooking: RentalBooking | null = null
+  if (body.fulfillment_method === 'rental') {
+    const listingType =
+      (productRecord as any)?.type?.value ??
+      (productMetadata.listing_type as string | undefined) ??
+      'product'
+    const rentalResult = resolveRentalCheckout({
+      flagEnabled: await isEnabled('checkout.rental_pricing_enabled'),
+      fulfillmentMethod: body.fulfillment_method,
+      listingType,
+      rental: body.rental,
+      rateCents: Math.round(Number((item as any).unit_price ?? 0)),
+      attrs: (productMetadata.attrs as Record<string, unknown>) ?? {},
+      itemCount: (cart.items ?? []).length,
+      quantity: Math.round(Number((item as any).quantity ?? 1)),
+    })
+    if (!rentalResult.ok) {
+      return res.status(422).json({ message: rentalResult.message, code: rentalResult.code })
+    }
+    rentalBooking = rentalResult.booking
+  }
+
   if (supportCheckout && !isSupportProductMetadata(productMetadata)) {
     return res.status(422).json({
       message: 'Este producto no puede usarse para apoyos.',
@@ -328,7 +364,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     (sum: number, i: any) => sum + Math.round(Number(i.unit_price ?? 0) * Number(i.quantity ?? 1)),
     0,
   )
-  const rawItemsCents = supportCheckout?.amount_cents ?? body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
+  // Rental total (server-recomputed) wins over every other source — a client
+  // `offer_amount_cents` sent alongside `rental` is ignored (tamper guarantee).
+  const rawItemsCents = rentalBooking?.total_cents ?? supportCheckout?.amount_cents ?? body.offer_amount_cents ?? (Math.round(Number(cart.total ?? 0)) || itemsTotalCents)
   const shippingQuote = normalizeShippingQuote(body.shipping_quote)
   const shippingCents = shippingQuote?.amount_cents ?? 0
   // priceCents and checkoutTotalCents are finalized after bundle discount is resolved below
@@ -380,7 +418,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // offer override (offer_amount_cents already reflects an agreed price).
   const bundleSettings = (sellerSettings.bundles ?? null) as BundleSettings | null
   const itemCount = (cart.items ?? []).length
-  const bundleTier = body.offer_amount_cents || supportCheckout ? null : resolveBundleTier(bundleSettings, itemCount)
+  const bundleTier = body.offer_amount_cents || supportCheckout || rentalBooking ? null : resolveBundleTier(bundleSettings, itemCount)
   const bundleDiscountCents = bundleTier
     ? Math.round(itemsTotalCents * bundleTier.percent_off / 100)
     : 0
@@ -393,7 +431,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const postBundleBase = Math.max(0, rawItemsCents - bundleDiscountCents)
   let couponInfo: { code: string; promotion_id: string; discount_cents: number } | null = null
   let couponDiscountCents = 0
-  if (body.coupon_code && !body.offer_amount_cents && !supportCheckout) {
+  if (body.coupon_code && !body.offer_amount_cents && !supportCheckout && !rentalBooking) {
     const couponIds = Array.isArray((sellerMeta as any).coupon_ids) ? (sellerMeta as any).coupon_ids as string[] : []
     const promotionService = req.scope.resolve(Modules.PROMOTION) as IPromotionModuleService
     const resolution = await resolveCouponForCheckout(promotionService, body.coupon_code, couponIds, postBundleBase)
@@ -525,6 +563,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(pickupAppointment ? { pickup_appointment: pickupAppointment } : {}),
+        // Rental booking block (dates + itemized deposit) — read back by the order
+        // normalizer (S1.3) so both sides + agents see the breakdown w/o arithmetic.
+        ...(rentalBooking ? { rental_booking: rentalBooking } : {}),
         ...(body.seller_id ? { seller_id: body.seller_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
         ...(supportMetadata ? {
@@ -678,6 +719,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
+        // Rental reconciliation (Stripe metadata values must be strings).
+        ...(rentalBooking ? {
+          rental_check_in: rentalBooking.check_in,
+          rental_check_out: rentalBooking.check_out,
+          rental_total_cents: String(rentalBooking.total_cents),
+          rental_deposit_cents: String(rentalBooking.deposit_cents),
+        } : {}),
       },
     })
 
@@ -776,6 +824,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         } : {}),
         ...(body.pickup_spot_id ? { pickup_spot_id: body.pickup_spot_id } : {}),
         ...(body.offer_id ? { offer_id: body.offer_id } : {}),
+        // Rental reconciliation (kept string-typed to match the Stripe block).
+        ...(rentalBooking ? {
+          rental_check_in: rentalBooking.check_in,
+          rental_check_out: rentalBooking.check_out,
+          rental_total_cents: String(rentalBooking.total_cents),
+          rental_deposit_cents: String(rentalBooking.deposit_cents),
+        } : {}),
       },
     }
 

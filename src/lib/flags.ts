@@ -33,6 +33,7 @@ import {
 
 export type FlagKey =
   | 'checkout.stripe_enabled'
+  | 'checkout.rental_pricing_enabled'
   | 'shipping.envia_enabled'
   | 'ml.sync_enabled'
   | 'ml.orders_enabled'
@@ -85,9 +86,16 @@ export type FlagKey =
  *    than through that frontend-gated route — a flag-read outage must not
  *    silently push a price to Mercado Libre, so this fails to "publish rail
  *    off" (no ML write), never to "always push."
+ *  - ENABLEMENT (`checkout.rental_pricing_enabled`): default `false`
+ *    (rental-backend-line-item-pricing epic, Sprint 1). Gates the start-checkout
+ *    rental branch that charges a server-recomputed nights × rate + deposit total.
+ *    A flag-read outage must never let a rental charge a computed multi-night total
+ *    unsupervised, so it fails to OFF ⇒ the request 422s and the buyer is routed to
+ *    today's coordination flow (AskSeller). Enabling is the deliberate action.
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
+  'checkout.rental_pricing_enabled': false,
   'shipping.envia_enabled': false,
   'ml.sync_enabled': false,
   'ml.orders_enabled': false,

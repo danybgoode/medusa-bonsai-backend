@@ -14,6 +14,7 @@ import { MedusaContainer } from '@medusajs/framework/types'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../_utils/clerk-auth'
+import { readRentalBooking, deriveRentalBookingState } from '../../../../../lib/rental-booking'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerAuth = await resolveSeller(req)
@@ -215,6 +216,13 @@ export function normalizeMedusaOrder(
     return 'none'
   })()
 
+  // Rental booking (rental line-item pricing S1.3): the derived state both sides +
+  // agents read, plus the raw block so order pages / emails / the ledger render the
+  // breakdown (noches × tarifa · depósito · total) without a second fetch. Absent for
+  // every non-rental order → 'none' / null (frontend reads rental_booking_state ?? 'none').
+  const rentalBooking = readRentalBooking(metadata)
+  const rentalBookingState = deriveRentalBookingState(rentalBooking)
+
   const buyerName = customer
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
     : null
@@ -265,6 +273,12 @@ export function normalizeMedusaOrder(
     // 'none' / null pre-deploy (frontend reads pickup_appointment_state ?? 'none').
     pickup_appointment_state: pickupAppointmentState,
     pickup_appointment: pa,
+    // Rental booking (S1.3): derived state + raw block so both order pages, both
+    // emails, and the in-chat ledger render the dates + itemized deposit (Sprint 2
+    // consumes these). Null / 'none' on every non-rental order — byte-for-byte
+    // unchanged for today's orders.
+    rental_booking_state: rentalBookingState,
+    rental_booking: rentalBooking,
     event_tickets: Array.isArray(metadata.event_tickets) ? metadata.event_tickets : [],
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
