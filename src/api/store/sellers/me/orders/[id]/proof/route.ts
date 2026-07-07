@@ -12,6 +12,14 @@
  * no new table. `normalizeMedusaOrder` (../route.ts) curates these fields for
  * reads the same way it already does for `tags`/`refund_state`.
  *
+ * Known v1 scope limit: proof state is ORDER-level, derived from only the
+ * first line item — a cart can only ever hold items from ONE seller
+ * (`lib/cart.ts`'s own doc comment on the frontend), so ownership is never
+ * ambiguous, but an order with MULTIPLE configurator items from that same
+ * seller only gets one proof/approval covering the first item. Fine for the
+ * sprint's single-item buy-now case; a true multi-item proof would need
+ * per-line-item metadata, out of scope here.
+ *
  * Auth: Clerk JWT — must be the seller who owns the order's product.
  */
 
@@ -33,17 +41,23 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   )
   if (!order) return { order: null, code: 404 as const }
 
+  // Reject outright when ownership can't be established at all (no resolvable
+  // product ids on the order) — this route writes order-level metadata, so
+  // silently allowing it through here would let any authenticated seller
+  // touch any such order (cross-agent review catch, 2026-07-07; unlike
+  // tags/confirm-payment, which only tag/confirm-payment an order the
+  // seller already reached some other way, this is a NEW write surface).
   const productIds = ((order.items ?? []) as any[]).map((i: any) => i.product_id).filter(Boolean)
-  if (productIds.length) {
-    const { data: sellerRows } = await (remoteQuery as any).graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: sellerAuth.sellerId },
-    })
-    const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
-    const owns = productIds.some((pid: string) => sellerProductIds.has(pid))
-    if (!owns) return { order: null, code: 403 as const }
-  }
+  if (productIds.length === 0) return { order: null, code: 403 as const }
+
+  const { data: sellerRows } = await (remoteQuery as any).graph({
+    entity: 'seller',
+    fields: ['id', 'products.id'],
+    filters: { id: sellerAuth.sellerId },
+  })
+  const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
+  const owns = productIds.some((pid: string) => sellerProductIds.has(pid))
+  if (!owns) return { order: null, code: 403 as const }
 
   return { order, code: 200 as const }
 }
