@@ -85,12 +85,20 @@ export async function createSellerCollection(
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const remoteLink = scope.resolve(ContainerRegistrationKeys.LINK)
 
+  // Every candidate is checked before being adopted — the prior version
+  // checked handle N-1 then unconditionally adopted handle N without ever
+  // verifying it, so the loop could exit on a handle that was never
+  // confirmed free (cross-agent review catch, 2026-07-07). If all 20
+  // candidates are genuinely taken (never observed in practice), the last
+  // one is adopted anyway and `createProductCategories` below surfaces a
+  // real unique-constraint error rather than silently colliding.
   const base = `${sellerSlug}-${slugify(trimmed)}`
   let handle = base
-  for (let suffix = 2; suffix <= 20; suffix++) {
-    const [existing] = await productService.listProductCategories({ handle })
+  for (let suffix = 1; suffix <= 20; suffix++) {
+    const candidate = suffix === 1 ? base : `${base}-${suffix}`
+    const [existing] = await productService.listProductCategories({ handle: candidate })
+    handle = candidate
     if (!existing) break
-    handle = `${base}-${suffix}`
   }
 
   const existingCollections = await listSellerCollections(scope, sellerId)

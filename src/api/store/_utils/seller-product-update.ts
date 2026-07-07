@@ -298,10 +298,21 @@ export async function updateSellerProduct(
     const currentCategories = ((rows?.[0] as any)?.categories ?? []) as Array<{ id: string; handle: string }>
     const { platformCategory } = splitCategories(currentCategories, seller.slug)
     const ownedIds = await resolveOwnedCollectionIds(scope, seller.id)
-    const requestedOwned = body.collection_ids.filter((cid) => ownedIds.has(cid))
+    // A foreign/typo/deleted id is REJECTED outright (422), not silently
+    // dropped — a partial-success write here would let a seller believe a
+    // product was assigned to a collection when the id was actually
+    // discarded (cross-agent review catch, 2026-07-07).
+    const unknownIds = body.collection_ids.filter((cid) => !ownedIds.has(cid))
+    if (unknownIds.length > 0) {
+      return {
+        ok: false,
+        status: 422,
+        message: `Colección(es) no válida(s) o no pertenecen a tu tienda: ${unknownIds.join(', ')}`,
+      }
+    }
     baseUpdate.category_ids = [
       ...(platformCategory ? [platformCategory.id] : []),
-      ...requestedOwned,
+      ...body.collection_ids,
     ]
   }
 

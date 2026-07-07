@@ -98,6 +98,22 @@ describe('createSellerCollection', () => {
     await createSellerCollection(scope as any, 'seller_1', 'miyagiprints', 'Bordados')
     expect((createCalls[0] as { metadata: { sort_order: number } }).metadata.sort_order).toBe(1)
   })
+
+  it('checks EVERY candidate before adopting it, even the 20th (cross-review catch: the prior loop, on suffix=20, adopted "base-20" without ever calling listProductCategories on it — it only ever checked "base" through "base-19")', async () => {
+    const base = 'miyagiprints-zines'
+    // Every candidate from base through base-19 is taken (19 handles) — the
+    // OLD loop's last check (suffix=20) reads handle="base-19" (taken), sets
+    // handle="base-20", and EXITS without ever checking base-20 itself. The
+    // fixed loop must call listProductCategories with handle="base-20" before
+    // adopting it.
+    const existingHandles = [base, ...Array.from({ length: 18 }, (_, i) => `${base}-${i + 2}`)]
+    const { scope, productService } = fakeScope({ existingHandles })
+    const result = await createSellerCollection(scope as any, 'seller_1', 'miyagiprints', 'Zines')
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.collection.handle).toBe(`${base}-20`)
+    const checkedHandles = productService.listProductCategories.mock.calls.map((c: any) => c[0]?.handle)
+    expect(checkedHandles).toContain(`${base}-20`)
+  })
 })
 
 describe('renameSellerCollection', () => {
