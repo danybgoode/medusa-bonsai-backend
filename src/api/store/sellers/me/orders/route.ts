@@ -10,6 +10,7 @@
  * so the existing frontend UI components work without changes.
  */
 
+import { MedusaContainer } from '@medusajs/framework/types'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../_utils/clerk-auth'
@@ -19,7 +20,23 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (!sellerAuth) return res.status(401).json({ message: 'Unauthorized' })
   const { sellerId, sellerName } = sellerAuth
 
-  const remoteQuery = req.scope.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
+  const orders = await listOrdersForSeller(req.scope, sellerId, sellerName)
+  return res.json({ orders, seller_id: sellerId })
+}
+
+/**
+ * The shared order-listing query — extracted from the Clerk-gated `GET` above
+ * (ml-orders-native S3 · US-9) so the new internal agent-read bridge
+ * (`internal/sellers/orders/route.ts`) can call the SAME function instead of a
+ * third copy of this query. Behavior-preserving; the Clerk route's `GET` is now
+ * a thin wrapper.
+ */
+export async function listOrdersForSeller(
+  scope: MedusaContainer,
+  sellerId: string,
+  sellerName: string,
+): Promise<ReturnType<typeof normalizeMedusaOrder>[]> {
+  const remoteQuery = (scope as any).resolve(ContainerRegistrationKeys.REMOTE_QUERY)
 
   // ── Get seller's product IDs ──────────────────────────────────────────────
   let productIds: string[] = []
@@ -31,15 +48,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     })
     productIds = ((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
   } catch {
-    return res.json({ orders: [], seller_id: sellerId })
+    return []
   }
 
-  if (!productIds.length) {
-    return res.json({ orders: [], seller_id: sellerId })
-  }
+  if (!productIds.length) return []
 
   // ── Fetch Medusa orders that contain these products ───────────────────────
-  const knex = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
+  const knex = (scope as any).resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
 
   let orders: unknown[] = []
   try {
@@ -58,15 +73,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       .map((r) => r.order_id)
       .filter(Boolean) as string[]
 
-    if (!orderIds.length) {
-      return res.json({ orders: [], seller_id: sellerId })
-    }
+    if (!orderIds.length) return []
 
     // Step 2: fetch full order objects via the Remote Query (query.graph). Using
     // orderService.listOrders here throws "Shipping method version is required to
     // load adjustments" once an order has a shipping method — which silently
     // returned [] (the .catch) and made every seller's orders page look empty.
-    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+    const query = (scope as any).resolve(ContainerRegistrationKeys.QUERY)
     const { data } = await (query as any).graph({
       entity: 'order',
       fields: [
@@ -82,9 +95,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── Normalize to legacy shape ─────────────────────────────────────────────
-  const normalized = (orders as any[]).map(o => normalizeMedusaOrder(o, sellerId, sellerName))
-
-  return res.json({ orders: normalized, seller_id: sellerId })
+  return (orders as any[]).map(o => normalizeMedusaOrder(o, sellerId, sellerName))
 }
 
 // ── Normalization helper ──────────────────────────────────────────────────────
@@ -202,10 +213,19 @@ export function normalizeMedusaOrder(
   // (normalizeMedusaOrder curates; it never passes raw metadata through).
   const source = metadata.source === 'mercadolibre' ? 'mercadolibre' : 'miyagi'
 
+  // Free-form seller tags (ml-orders-native S3 · US-7) — manual CRUD via
+  // `[id]/tags`, plus the automatic 'mercadolibre' tag stamped at materialization.
+  // No native Medusa order-tags concept exists (unlike Product), so this rides
+  // metadata like every other cross-cutting order flag on this page.
+  const tags = Array.isArray(metadata.tags)
+    ? metadata.tags.filter((t): t is string => typeof t === 'string')
+    : []
+
   return {
     id: order.id,
     status,
     source,
+    tags,
     ml_order_id: source === 'mercadolibre' ? ((metadata.ml_order_id as string) ?? null) : null,
     ml_pack_id: source === 'mercadolibre' ? ((metadata.ml_pack_id as string) ?? null) : null,
     amount_cents: isSupportOrder ? (support.amount_cents ?? order.total ?? 0) : (order.total ?? 0),
