@@ -3,6 +3,11 @@ import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { toListingShape, isFeaturedPin } from '../_utils/listing'
 import { isHiddenCatalogProduct } from '../_utils/support'
+import {
+  carMake, carYear, carTransmission, carFuel,
+  matchesBrand, matchesModel, matchesYearFrom, matchesYearTo, matchesKmFrom, matchesKmTo,
+  toCarFacetPoolEntry,
+} from '../_utils/car-listing'
 
 const PAGE_SIZE = 24
 
@@ -73,6 +78,19 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     )
   }
   if (q.category) listings = listings.filter((l: any) => l.category === q.category)
+
+  // ── Facet pool (cars-vertical S1.1) ────────────────────────────────────────
+  // `?category=autos&facets=1` returns a compact per-car projection over the FULL
+  // visibility-filtered autos set (before the facet filters + pagination below),
+  // so the frontend's pure deriveCarFacets() can build the rail with honest
+  // full-catalog availability counts, uncapped by the 24/page limit. Short-circuit
+  // — the caller wants only the pool, not the heavy listing bodies.
+  if (q.facets === '1' && q.category === 'autos') {
+    const facet_pool = listings.map(toCarFacetPoolEntry)
+    res.json({ facet_pool, total: facet_pool.length })
+    return
+  }
+
   if (q.condition) listings = listings.filter((l: any) => l.condition === q.condition)
   if (q.state) listings = listings.filter((l: any) => l.state === q.state)
   if (q.municipio) {
@@ -96,14 +114,19 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // freshness (seleccion-pins-authoritative S2.1). Additive — absent param = unchanged.
   if (q.featured === 'true') listings = listings.filter(isFeaturedPin)
 
-  // Autos filters
-  if (q.brand) listings = listings.filter((l: any) => (l.metadata?.brand as string ?? '').toLowerCase().includes(q.brand.toLowerCase()))
-  if (q.year_from) listings = listings.filter((l: any) => parseInt(l.metadata?.year as string ?? '0') >= parseInt(q.year_from))
-  if (q.year_to) listings = listings.filter((l: any) => parseInt(l.metadata?.year as string ?? '9999') <= parseInt(q.year_to))
-  if (q.km_from) listings = listings.filter((l: any) => parseInt(l.metadata?.km as string ?? '0') >= parseInt(q.km_from))
-  if (q.km_to) listings = listings.filter((l: any) => parseInt(l.metadata?.km as string ?? '9999999') <= parseInt(q.km_to))
-  if (q.transmission) listings = listings.filter((l: any) => l.metadata?.transmission === q.transmission)
-  if (q.fuel) listings = listings.filter((l: any) => l.metadata?.fuel === q.fuel)
+  // Autos filters — reconciled across both metadata namespaces (cars-vertical
+  // S1.1): the accessors read the authoritative `attrs.*` (real seller cars)
+  // first, falling back to the legacy top-level keys (seeded cars). `model` is
+  // new (attrs-only; no legacy equivalent). transmission/fuel use the same
+  // attrs-first accessors so a seller-captured car's automatico/gasolina match.
+  if (q.brand) listings = listings.filter((l: any) => matchesBrand(l, q.brand))
+  if (q.model) listings = listings.filter((l: any) => matchesModel(l, q.model))
+  if (q.year_from) listings = listings.filter((l: any) => matchesYearFrom(l, parseInt(q.year_from)))
+  if (q.year_to) listings = listings.filter((l: any) => matchesYearTo(l, parseInt(q.year_to)))
+  if (q.km_from) listings = listings.filter((l: any) => matchesKmFrom(l, parseInt(q.km_from)))
+  if (q.km_to) listings = listings.filter((l: any) => matchesKmTo(l, parseInt(q.km_to)))
+  if (q.transmission) listings = listings.filter((l: any) => carTransmission(l) === q.transmission)
+  if (q.fuel) listings = listings.filter((l: any) => carFuel(l) === q.fuel)
 
   // Inmuebles filters
   if (q.rooms_min) listings = listings.filter((l: any) => parseInt(l.metadata?.rooms as string ?? '0') >= parseInt(q.rooms_min))
@@ -120,6 +143,15 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (sort === 'precio_asc') listings.sort((a: any, b: any) => (a.price_cents ?? 0) - (b.price_cents ?? 0))
   else if (sort === 'precio_desc') listings.sort((a: any, b: any) => (b.price_cents ?? 0) - (a.price_cents ?? 0))
   else if (sort === 'popular') listings.sort((a: any, b: any) => (b.views ?? 0) - (a.views ?? 0))
+  // Autos-parity sorts (cars-vertical S1.2) — año newest/oldest and marca A–Z.
+  // Cars with an unknown year/marca sort to the end so they never lead the grid.
+  else if (sort === 'year_desc') listings.sort((a: any, b: any) => (carYear(b) ?? -Infinity) - (carYear(a) ?? -Infinity))
+  else if (sort === 'year_asc') listings.sort((a: any, b: any) => (carYear(a) ?? Infinity) - (carYear(b) ?? Infinity))
+  else if (sort === 'marca') listings.sort((a: any, b: any) => {
+    const ma = carMake(a).toLowerCase(), mb = carMake(b).toLowerCase()
+    if (!ma !== !mb) return ma ? -1 : 1   // empties last
+    return ma.localeCompare(mb, 'es')
+  })
   else listings.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 
   // ── Step 6: Paginate ──────────────────────────────────────────────────────
