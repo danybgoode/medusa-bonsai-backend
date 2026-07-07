@@ -60,7 +60,9 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const { seller, error, status } = await resolveOwnership(req, id)
   if (!seller) return res.status(status).json({ message: error })
 
-  const result = await updateSellerProduct(req.scope, id, req.body as SellerProductUpdateBody)
+  const result = await updateSellerProduct(
+    req.scope, id, req.body as SellerProductUpdateBody, { id: seller.id, slug: seller.slug },
+  )
   if (!result.ok) return res.status(result.status).json({ message: result.message })
 
   res.json({ product_id: id, updated: true })

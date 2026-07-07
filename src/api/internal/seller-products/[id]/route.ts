@@ -49,7 +49,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     return res.status(403).json({ message: 'Product not found in this shop' })
   }
 
-  const result = await updateSellerProduct(req.scope, id, body)
+  const result = await updateSellerProduct(req.scope, id, body, { id: seller.id, slug: seller.slug })
   if (!result.ok) return res.status(result.status).json({ message: result.message })
 
   res.json({ product_id: id, updated: true, ...(result.images ? { images: result.images } : {}) })
