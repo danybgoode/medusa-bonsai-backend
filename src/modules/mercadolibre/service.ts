@@ -21,6 +21,7 @@ import {
   relistMlItem,
   predictCategory,
   getListingPrices,
+  ML_DEFAULT_LISTING_TYPE,
   type MlImportItem,
   type MlCategoryCandidate,
   type MlOrder,
@@ -301,6 +302,33 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
   }
 
   /**
+   * The fee estimate for a product's LINKED ML item, resolving the category
+   * from the existing product↔ML link (Sprint 2 · US-4) — the caller (a
+   * route) only needs to know which Medusa product it's asking about, never
+   * ML category/listing-type internals. Returns `null` when the product has
+   * no ML link, the link belongs to a different seller, or it was never
+   * assigned a category (defense in depth — a route should never act on a
+   * cross-seller link). The actual listing_type ML priced the linked item
+   * at isn't persisted on the link today, so this uses the same
+   * `ML_DEFAULT_LISTING_TYPE` `buildMlItemPayload` falls back to at publish
+   * time — a documented approximation, not a live lookup.
+   */
+  async getFeeEstimateForProduct(
+    sellerId: string,
+    args: { productId: string; referencePriceCents: number },
+  ): Promise<{ feePct: number; fixedFeeCents: number; currency: string } | null> {
+    const link = await this.getLinkByProduct(args.productId)
+    if (!link || link.seller_id !== sellerId) return null
+    const categoryId = (link.metadata as Record<string, unknown> | null)?.ml_category_id
+    if (typeof categoryId !== 'string' || !categoryId) return null
+    return this.getFeeRate(sellerId, {
+      categoryId,
+      listingTypeId: ML_DEFAULT_LISTING_TYPE,
+      referencePriceCents: args.referencePriceCents,
+    })
+  }
+
+  /**
    * ML's fee rate (percentage + fixed fee) for a category/listing-type, cached
    * for `LISTING_PRICE_CACHE_TTL_MS` so the frontend's target-margin slider can
    * recompute `solveForPrice` locally without a network call per tick (Sprint 2
@@ -310,7 +338,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
    * Returns `null` on any failure (no connection, ML error) so the route can
    * degrade to an "estimate unavailable" state rather than throw.
    */
-  async getFeeEstimate(
+  async getFeeRate(
     sellerId: string,
     args: { categoryId: string; listingTypeId: string; referencePriceCents: number },
   ): Promise<{ feePct: number; fixedFeeCents: number; currency: string } | null> {

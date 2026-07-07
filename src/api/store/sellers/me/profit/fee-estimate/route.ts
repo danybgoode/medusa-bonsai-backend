@@ -5,11 +5,13 @@ import { MERCADOLIBRE_MODULE } from '../../../../../../modules/mercadolibre'
 import type MercadolibreModuleService from '../../../../../../modules/mercadolibre/service'
 
 /**
- * GET /store/sellers/me/profit/fee-estimate?category_id=&listing_type_id=&price_cents=
- * — ML's fee rate (percentage + fixed fee) for a category/listing-type, the
- * input the frontend's `solveForPrice` suggester needs (Sprint 2 · US-4).
- * Cached in the module service; degrades to `{ available: false }` on any ML
- * error or missing connection rather than failing the whole dashboard.
+ * GET /store/sellers/me/profit/fee-estimate?product_id=&price_cents=
+ * — ML's fee rate (percentage + fixed fee) for a product's LINKED ML item,
+ * the input the frontend's `solveForPrice` suggester needs (Sprint 2 · US-4).
+ * The category is resolved from the existing product↔ML link server-side —
+ * the caller only names the product, never an ML category/listing-type.
+ * Degrades to `{ available: false }` on no link / no connection / any ML
+ * error, rather than failing the whole dashboard.
  *
  * Gate order: flag → auth (LEARNINGS — same as the rest of the epic).
  */
@@ -21,17 +23,15 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerAuth = await resolveSeller(req)
   if (!sellerAuth) return res.status(401).json({ message: 'Unauthorized' })
 
-  const categoryId = String(req.query.category_id ?? '').trim()
-  const listingTypeId = String(req.query.listing_type_id ?? '').trim()
+  const productId = String(req.query.product_id ?? '').trim()
   const priceCents = Number(req.query.price_cents)
-  if (!categoryId || !listingTypeId || !Number.isFinite(priceCents) || priceCents <= 0) {
-    return res.status(422).json({ message: 'category_id, listing_type_id and a positive price_cents are required' })
+  if (!productId || !Number.isFinite(priceCents) || priceCents <= 0) {
+    return res.status(422).json({ message: 'product_id and a positive price_cents are required' })
   }
 
   const ml = req.scope.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
-  const estimate = await ml.getFeeEstimate(sellerAuth.sellerId, {
-    categoryId,
-    listingTypeId,
+  const estimate = await ml.getFeeEstimateForProduct(sellerAuth.sellerId, {
+    productId,
     referencePriceCents: priceCents,
   })
 
