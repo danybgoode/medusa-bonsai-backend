@@ -18,6 +18,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
+import { deriveProofRestatement } from '../../../../../../../lib/proof-restatement'
 
 async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   const sellerAuth = await resolveSeller(req)
@@ -67,10 +68,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   // The restatement — the buyer-facing "what am I approving" — always comes
   // from the order's OWN line item, never the request body.
-  const size = (item.variant_title as string) ?? (item.subtitle as string) ?? (item.product_title as string) ?? item.title
-  const quantity = Number(item.quantity) || 1
-  const unitPriceCents = Math.round(Number(item.unit_price) || 0)
-  const priceCents = unitPriceCents * quantity
+  const { size, quantity, priceCents } = deriveProofRestatement(item)
 
   const meta = (order.metadata ?? {}) as Record<string, unknown>
   const now = new Date().toISOString()
