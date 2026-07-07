@@ -134,16 +134,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
     return res.status(200).json(result)
   } catch (e) {
-    const err = e as { code?: string; message?: string }
+    const err = e as { code?: string; message?: string; mlCode?: string | null; mlMessage?: string | null }
     await ml.recordSyncEvent({
       sellerId: seller.id, kind: 'publish', outcome: 'fail', productId: product_id,
-      code: err.code ?? null, message: err.message,
+      code: err.code ?? err.mlCode ?? null, message: err.message,
     })
     if (err.code === 'ML_REAUTH_REQUIRED') return res.status(409).json({ message: 'MercadoLibre re-authorization required', code: 'ML_REAUTH_REQUIRED' })
     if (err.code === 'ML_NOT_CONNECTED') return res.status(409).json({ message: 'No active MercadoLibre connection', code: 'ML_NOT_CONNECTED' })
     if (err.code === 'ML_NO_CATEGORY') return res.status(422).json({ message: 'A category is required to publish', code: 'ML_NO_CATEGORY' })
     if (err.code === 'ML_INVALID_PRODUCT') return res.status(422).json({ message: 'Product needs a title and a price to publish', code: 'ML_INVALID_PRODUCT' })
     if (err.code === 'ML_LINK_CONFLICT') return res.status(409).json({ message: 'Product or ML item is already linked', code: 'ML_LINK_CONFLICT' })
-    return res.status(502).json({ message: err.message ?? 'Failed to publish to Mercado Libre' })
+    // ML's own rejection reason (e.g. a price change blocked by an active
+    // promotion) — surfaced honestly rather than a generic failure (US-5).
+    return res.status(502).json({
+      message: err.mlMessage ?? err.message ?? 'Failed to publish to Mercado Libre',
+      code: err.mlCode ?? null,
+    })
   }
 }

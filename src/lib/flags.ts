@@ -38,6 +38,7 @@ export type FlagKey =
   | 'ml.orders_enabled'
   | 'ml.sync_paywall_enabled'
   | 'ops.profit_enabled'
+  | 'ml.publish_enabled'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -76,6 +77,14 @@ export type FlagKey =
  *    reused here for order materialization, ml-orders-native S2 · US-6). A
  *    flag-read outage must not silently ungate a paid feature, so this fails to
  *    "paywall off" (today's — pre-paywall — behavior), not to "everyone entitled."
+ *  - ENABLEMENT (`ml.publish_enabled`): default `false`, mirrors the frontend's
+ *    own key of the same name (mercadolibre-sync epic Sprint 3) — until now
+ *    only ever checked on the FRONTEND before it called the internal publish
+ *    route. Apply-price (profit-analyzer S2 · US-5) checks it directly on the
+ *    backend too, since it calls `publishOrSyncProduct` in-process rather
+ *    than through that frontend-gated route — a flag-read outage must not
+ *    silently push a price to Mercado Libre, so this fails to "publish rail
+ *    off" (no ML write), never to "always push."
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
@@ -84,6 +93,7 @@ const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'ml.orders_enabled': false,
   'ml.sync_paywall_enabled': false,
   'ops.profit_enabled': false,
+  'ml.publish_enabled': false,
 }
 
 const TABLE = 'platform_flags'

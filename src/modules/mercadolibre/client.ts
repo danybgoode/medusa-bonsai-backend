@@ -329,7 +329,39 @@ export async function publishItem(accessToken: string, item: MlItemPayload): Pro
   return res.json()
 }
 
-/** Update mutable fields of an existing ML item. PUT /items/{id}. */
+/**
+ * ML's error body shape on a rejected write (e.g. `{ message, error, cause:
+ * [{ code, message }] }` — a price change ML blocks for an active promotion
+ * comes back this way). Best-effort parse: any shape mismatch degrades to
+ * `null` rather than throwing while already handling an error.
+ */
+async function parseMlErrorBody(res: Response): Promise<{ message: string | null; code: string | null } | null> {
+  try {
+    const body = (await res.json()) as {
+      message?: unknown
+      error?: unknown
+      cause?: Array<{ code?: unknown; message?: unknown }>
+    }
+    const firstCause = Array.isArray(body.cause) ? body.cause[0] : null
+    const message = typeof body.message === 'string' ? body.message
+      : typeof firstCause?.message === 'string' ? firstCause.message
+      : null
+    const code = typeof firstCause?.code === 'string' ? firstCause.code
+      : typeof body.error === 'string' ? body.error
+      : null
+    if (!message && !code) return null
+    return { message, code }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Update mutable fields of an existing ML item. PUT /items/{id}. A rejection
+ * (e.g. price change blocked by an active promotion) surfaces ML's own
+ * message/code on the thrown error's `.mlCode`/`.mlMessage` — Apply-price
+ * (Sprint 2 · US-5) reports this honestly rather than a generic failure.
+ */
 export async function updateMlItem(
   accessToken: string,
   itemId: string,
@@ -340,7 +372,11 @@ export async function updateMlItem(
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(partial),
   })
-  if (!res.ok) throw new Error(`ML item update failed: ${res.status}`)
+  if (!res.ok) {
+    const parsed = await parseMlErrorBody(res)
+    const err = new Error(parsed?.message ? `ML item update rejected: ${parsed.message}` : `ML item update failed: ${res.status}`)
+    throw Object.assign(err, { mlCode: parsed?.code ?? null, mlMessage: parsed?.message ?? null })
+  }
   return res.json()
 }
 
@@ -415,6 +451,50 @@ export async function predictCategory(
   } catch {
     return []
   }
+}
+
+// ── Fee estimate (Sprint 2 · US-4, profit-analyzer) ──────────────────────────
+// The suggester needs ML's OWN fee rate for a category/listing-type so the
+// solve-for-price formula uses a real, not guessed, fee%. GET
+// /sites/{site}/listing_prices returns the fee breakdown for a given
+// category + listing type (+ a reference price ML evaluates it at).
+
+/** The fee breakdown `GET /sites/{site}/listing_prices` returns for one listing type. */
+export type MlListingPrice = {
+  listing_type_id?: string
+  listing_type_name?: string
+  currency_id?: string
+  sale_fee_amount?: number
+  sale_fee_details?: {
+    percentage_fee?: number
+    fixed_fee?: number
+  }
+}
+
+/**
+ * Fetch ML's fee breakdown for a category/listing-type at a reference price.
+ * GET /sites/{site}/listing_prices?price=&category_id=&listing_type_id=.
+ * ML returns EITHER a single object (when `listing_type_id` is given) or an
+ * array of per-listing-type objects (when it's omitted) — normalise to the
+ * single object the caller asked for (or the first array entry as a
+ * fallback, defensively, since the exact shape is unconfirmed against a live
+ * sandbox — see LEARNINGS on ML raw-payload verification).
+ */
+export async function getListingPrices(
+  accessToken: string,
+  siteId: string,
+  opts: { price: number; categoryId: string; listingTypeId: string },
+): Promise<MlListingPrice> {
+  const url =
+    `${ML_API}/sites/${encodeURIComponent(siteId)}/listing_prices` +
+    `?price=${encodeURIComponent(String(opts.price))}` +
+    `&category_id=${encodeURIComponent(opts.categoryId)}` +
+    `&listing_type_id=${encodeURIComponent(opts.listingTypeId)}`
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+  if (!res.ok) throw new Error(`ML listing_prices failed: ${res.status}`)
+  const data = await res.json()
+  if (Array.isArray(data)) return (data[0] ?? {}) as MlListingPrice
+  return (data ?? {}) as MlListingPrice
 }
 
 /** Narrow a raw ML item detail (+ description, link flag) to the wire shape. */
