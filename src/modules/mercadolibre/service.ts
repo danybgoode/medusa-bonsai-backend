@@ -342,7 +342,6 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     sellerId: string,
     args: { categoryId: string; listingTypeId: string; referencePriceCents: number },
   ): Promise<{ feePct: number; fixedFeeCents: number; currency: string } | null> {
-    const key = buildListingPriceCacheKey('_site_pending_', args.categoryId, args.listingTypeId)
     try {
       const conn = await this.getConnection(sellerId)
       if (!conn || conn.status !== 'connected') return null
@@ -373,7 +372,10 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       listingPriceCache.set(cacheKey, { feePct, fixedFeeCents, currency, fetchedAt: Date.now() })
       return { feePct, fixedFeeCents, currency }
     } catch (e) {
-      console.error('[ml] getFeeEstimate failed (degrading to unavailable):', e instanceof Error ? e.message : e, key)
+      console.error(
+        '[ml] getFeeEstimate failed (degrading to unavailable):', e instanceof Error ? e.message : e,
+        { categoryId: args.categoryId, listingTypeId: args.listingTypeId },
+      )
       return null
     }
   }
