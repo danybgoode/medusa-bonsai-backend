@@ -62,7 +62,6 @@ const BRAND_ALIAS_TO_KEY: Record<string, string> = {
   mercedesbenz: 'mercedes-benz',
   'general motors': 'gmc',
   'great wall': 'gwm',
-  'land rover': 'land rover',
 }
 
 function normalizeBrand(input: string): string {
