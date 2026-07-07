@@ -138,6 +138,31 @@ describe('reorderSellerCollections', () => {
     const orders = updateCalls.map((c) => [c.id, (c.data as { metadata: { sort_order: number } }).metadata.sort_order])
     expect(orders).toEqual(expect.arrayContaining([['cat_b', 0], ['cat_a', 1]]))
   })
+
+  it('rejects a PARTIAL list — a live smoke test found this silently collides sort_order with the omitted item', async () => {
+    const { scope } = fakeScope({
+      ownedCategories: [
+        { id: 'cat_a', handle: 'miyagiprints-a', name: 'A', metadata: { sort_order: 0 } },
+        { id: 'cat_b', handle: 'miyagiprints-b', name: 'B', metadata: { sort_order: 1 } },
+        { id: 'cat_c', handle: 'miyagiprints-c', name: 'C', metadata: { sort_order: 2 } },
+      ],
+    })
+    // Omits cat_c entirely.
+    const result = await reorderSellerCollections(scope as any, 'seller_1', ['cat_b', 'cat_a'])
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.status).toBe(422)
+  })
+
+  it('rejects a list with a duplicate id', async () => {
+    const { scope } = fakeScope({
+      ownedCategories: [
+        { id: 'cat_a', handle: 'miyagiprints-a', name: 'A' },
+        { id: 'cat_b', handle: 'miyagiprints-b', name: 'B' },
+      ],
+    })
+    const result = await reorderSellerCollections(scope as any, 'seller_1', ['cat_a', 'cat_a'])
+    expect(result.ok).toBe(false)
+  })
 })
 
 describe('deleteSellerCollection', () => {

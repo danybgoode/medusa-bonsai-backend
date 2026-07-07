@@ -136,7 +136,15 @@ export async function renameSellerCollection(
   return { ok: true }
 }
 
-/** Batch-writes sort_order for every collection this seller owns, in the given order. Ownership-checked; rejects if any id isn't owned. */
+/**
+ * Batch-writes sort_order for every collection this seller owns, in the
+ * given order. `orderedIds` must be exactly this seller's full owned set —
+ * rejects on a foreign id AND on a partial list (a live-verified smoke test
+ * found that omitting an owned id leaves its old sort_order untouched, which
+ * can silently collide with a newly-assigned index from the partial list).
+ * The manage UI always sends the complete array (`move()` reorders the full
+ * `collections` state), so this is a defense-in-depth guard, not a UX limit.
+ */
 export async function reorderSellerCollections(
   scope: import('@medusajs/framework/http').MedusaRequest['scope'],
   sellerId: string,
@@ -145,6 +153,9 @@ export async function reorderSellerCollections(
   const owned = await resolveOwnedCollectionIds(scope, sellerId)
   if (orderedIds.some((id) => !owned.has(id))) {
     return { ok: false, status: 403, message: 'No puedes reordenar una colección que no es tuya.' }
+  }
+  if (orderedIds.length !== owned.size || new Set(orderedIds).size !== orderedIds.length) {
+    return { ok: false, status: 422, message: 'El reordenamiento debe incluir cada colección exactamente una vez.' }
   }
 
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
