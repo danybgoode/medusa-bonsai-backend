@@ -329,7 +329,39 @@ export async function publishItem(accessToken: string, item: MlItemPayload): Pro
   return res.json()
 }
 
-/** Update mutable fields of an existing ML item. PUT /items/{id}. */
+/**
+ * ML's error body shape on a rejected write (e.g. `{ message, error, cause:
+ * [{ code, message }] }` — a price change ML blocks for an active promotion
+ * comes back this way). Best-effort parse: any shape mismatch degrades to
+ * `null` rather than throwing while already handling an error.
+ */
+async function parseMlErrorBody(res: Response): Promise<{ message: string | null; code: string | null } | null> {
+  try {
+    const body = (await res.json()) as {
+      message?: unknown
+      error?: unknown
+      cause?: Array<{ code?: unknown; message?: unknown }>
+    }
+    const firstCause = Array.isArray(body.cause) ? body.cause[0] : null
+    const message = typeof body.message === 'string' ? body.message
+      : typeof firstCause?.message === 'string' ? firstCause.message
+      : null
+    const code = typeof firstCause?.code === 'string' ? firstCause.code
+      : typeof body.error === 'string' ? body.error
+      : null
+    if (!message && !code) return null
+    return { message, code }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Update mutable fields of an existing ML item. PUT /items/{id}. A rejection
+ * (e.g. price change blocked by an active promotion) surfaces ML's own
+ * message/code on the thrown error's `.mlCode`/`.mlMessage` — Apply-price
+ * (Sprint 2 · US-5) reports this honestly rather than a generic failure.
+ */
 export async function updateMlItem(
   accessToken: string,
   itemId: string,
@@ -340,7 +372,11 @@ export async function updateMlItem(
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(partial),
   })
-  if (!res.ok) throw new Error(`ML item update failed: ${res.status}`)
+  if (!res.ok) {
+    const parsed = await parseMlErrorBody(res)
+    const err = new Error(parsed?.message ? `ML item update rejected: ${parsed.message}` : `ML item update failed: ${res.status}`)
+    throw Object.assign(err, { mlCode: parsed?.code ?? null, mlMessage: parsed?.message ?? null })
+  }
   return res.json()
 }
 
