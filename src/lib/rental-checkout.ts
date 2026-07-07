@@ -21,6 +21,7 @@
 import {
   toRatePeriod,
   nightsBetween,
+  isValidYmd,
   readDepositCents,
   computeRentalTotal,
   type RatePeriod,
@@ -52,6 +53,10 @@ export interface RentalCheckoutInput {
   rateCents: number
   /** The product's `metadata.attrs` (rate_period + deposit-in-pesos live here). */
   attrs: Record<string, unknown> | null | undefined
+  /** Number of distinct line items in the cart (rentals are single-item). Default 1. */
+  itemCount?: number
+  /** Quantity on the rental line item (a rental books ONE unit for a date range). Default 1. */
+  quantity?: number
 }
 
 export type RentalCheckoutResult =
@@ -76,9 +81,24 @@ export function resolveRentalCheckout(input: RentalCheckoutInput): RentalCheckou
   if (input.listingType !== 'rental') {
     return { ok: false, code: 'RENTAL_NOT_RENTAL_LISTING', message: COORDINATE }
   }
+  // Rentals book ONE unit for a date range. The computed total replaces the whole
+  // item subtotal, so a multi-item or multi-quantity cart would mischarge (drop the
+  // other items, or bill one unit for many) — reject it rather than charge wrong.
+  if ((input.itemCount ?? 1) !== 1 || (input.quantity ?? 1) !== 1) {
+    return { ok: false, code: 'RENTAL_CART_UNSUPPORTED', message: COORDINATE }
+  }
 
-  const checkIn = typeof input.rental?.check_in === 'string' ? input.rental.check_in : null
-  const checkOut = typeof input.rental?.check_out === 'string' ? input.rental.check_out : null
+  const checkIn = input.rental?.check_in
+  const checkOut = input.rental?.check_out
+  // Strict calendar validity FIRST — `nightsBetween` would otherwise silently accept a
+  // rolled-over impossible date (2026-06-31 → Jul 1) and charge a phantom night.
+  if (!isValidYmd(checkIn) || !isValidYmd(checkOut)) {
+    return {
+      ok: false,
+      code: 'RENTAL_INVALID_DATES',
+      message: 'Selecciona una fecha de entrada y una de salida válidas para reservar.',
+    }
+  }
   const nights = nightsBetween(checkIn, checkOut)
   if (nights <= 0) {
     return {

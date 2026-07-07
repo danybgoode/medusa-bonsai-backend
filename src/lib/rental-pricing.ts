@@ -60,6 +60,20 @@ export function nightsBetween(checkIn: string | null | undefined, checkOut: stri
   return nights > 0 ? nights : 0
 }
 
+/**
+ * Strict `YYYY-MM-DD` calendar validity. `Date.parse` silently NORMALISES impossible
+ * day-of-month values (`2026-06-31` → Jul 1, `2026-02-30` → Mar 2), so on the money
+ * path `nightsBetween` alone would charge a phantom night and stamp a nonsense date.
+ * This round-trips the parsed date to reject anything that rolled over. (Out-of-range
+ * MONTHS already parse to NaN; this closes the day-of-month gap.)
+ */
+export function isValidYmd(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const [y, m, d] = value.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+}
+
 /** Billed units for a night count at a given period (ceil — a partial period bills whole). */
 export function rentalUnits(nights: number, period: RatePeriod): number {
   if (nights <= 0) return 0

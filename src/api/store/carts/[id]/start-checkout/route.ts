@@ -316,8 +316,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // listing's variant price. Behind checkout.rental_pricing_enabled (default OFF
   // ⇒ 422 → today's coordination flow). A client-sent amount can NEVER influence
   // this — resolveRentalCheckout takes no amount parameter (tamper guarantee).
+  // Trigger on the fulfillment method (not mere `body.rental` presence) so a stray
+  // `rental` field on a NORMAL product can never divert its checkout.
   let rentalBooking: RentalBooking | null = null
-  if (body.rental) {
+  if (body.fulfillment_method === 'rental') {
     const listingType =
       (productRecord as any)?.type?.value ??
       (productMetadata.listing_type as string | undefined) ??
@@ -329,6 +331,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       rental: body.rental,
       rateCents: Math.round(Number((item as any).unit_price ?? 0)),
       attrs: (productMetadata.attrs as Record<string, unknown>) ?? {},
+      itemCount: (cart.items ?? []).length,
+      quantity: Math.round(Number((item as any).quantity ?? 1)),
     })
     if (!rentalResult.ok) {
       return res.status(422).json({ message: rentalResult.message, code: rentalResult.code })

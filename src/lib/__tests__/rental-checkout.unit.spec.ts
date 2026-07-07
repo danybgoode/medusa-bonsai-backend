@@ -88,6 +88,21 @@ describe('resolveRentalCheckout · 422 ladder', () => {
       .toEqual(expect.objectContaining({ ok: false, code: 'RENTAL_INVALID_DATES' }))
   })
 
+  it('impossible calendar dates (that Date.parse would roll over) → RENTAL_INVALID_DATES', () => {
+    // 2026-06-31 would silently normalize to Jul 1 and charge a phantom night.
+    expect(resolveRentalCheckout(base({ rental: { check_in: '2026-06-15', check_out: '2026-06-31' } })))
+      .toEqual(expect.objectContaining({ ok: false, code: 'RENTAL_INVALID_DATES' }))
+    expect(resolveRentalCheckout(base({ rental: { check_in: '2026-02-30', check_out: '2026-03-05' } })))
+      .toEqual(expect.objectContaining({ ok: false, code: 'RENTAL_INVALID_DATES' }))
+  })
+
+  it('multi-item / multi-quantity cart → RENTAL_CART_UNSUPPORTED', () => {
+    expect(resolveRentalCheckout(base({ itemCount: 2 })))
+      .toEqual(expect.objectContaining({ ok: false, code: 'RENTAL_CART_UNSUPPORTED' }))
+    expect(resolveRentalCheckout(base({ quantity: 2 })))
+      .toEqual(expect.objectContaining({ ok: false, code: 'RENTAL_CART_UNSUPPORTED' }))
+  })
+
   it('missing / zero rate → RENTAL_RATE_UNAVAILABLE', () => {
     expect(resolveRentalCheckout(base({ rateCents: 0 })))
       .toEqual(expect.objectContaining({ ok: false, code: 'RENTAL_RATE_UNAVAILABLE' }))

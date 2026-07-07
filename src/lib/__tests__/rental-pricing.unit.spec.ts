@@ -7,6 +7,7 @@ import {
   toRatePeriod,
   formatRentalCents,
   readDepositCents,
+  isValidYmd,
 } from '../rental-pricing'
 
 /**
@@ -111,6 +112,29 @@ describe('rental-pricing · labels', () => {
     expect(ratePeriodLabel('dia')).toBe('día')
     expect(ratePeriodLabel('semana')).toBe('semana')
     expect(ratePeriodLabel('mes')).toBe('mes')
+  })
+})
+
+describe('rental-pricing · isValidYmd (strict calendar validity)', () => {
+  it('accepts real YYYY-MM-DD dates', () => {
+    expect(isValidYmd('2026-06-15')).toBe(true)
+    expect(isValidYmd('2028-02-29')).toBe(true) // 2028 is a leap year
+  })
+
+  it('rejects impossible day-of-month that Date.parse would roll over', () => {
+    expect(isValidYmd('2026-06-31')).toBe(false) // → would roll to Jul 1
+    expect(isValidYmd('2026-02-30')).toBe(false) // → would roll to Mar 2
+    expect(isValidYmd('2026-02-29')).toBe(false) // 2026 not a leap year
+  })
+
+  it('rejects out-of-range months, bad shapes, and non-strings', () => {
+    expect(isValidYmd('2026-13-01')).toBe(false)
+    expect(isValidYmd('2026-00-10')).toBe(false)
+    expect(isValidYmd('2026-6-15')).toBe(false) // not zero-padded
+    expect(isValidYmd('06/15/2026')).toBe(false)
+    expect(isValidYmd('')).toBe(false)
+    expect(isValidYmd(null)).toBe(false)
+    expect(isValidYmd(20260615)).toBe(false)
   })
 })
 
