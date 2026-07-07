@@ -20,10 +20,17 @@ import {
   setMlItemStatus,
   relistMlItem,
   predictCategory,
+  getListingPrices,
+  ML_DEFAULT_LISTING_TYPE,
   type MlImportItem,
   type MlCategoryCandidate,
   type MlOrder,
 } from './client'
+import {
+  buildListingPriceCacheKey,
+  isListingPriceEntryStale,
+  type ListingPriceCacheEntry,
+} from './listing-price-cache'
 import {
   encryptToken,
   decryptToken,
@@ -47,6 +54,12 @@ import { clampAvailable, shouldPushStock, isUniqueViolationError } from './sync-
  * access token is only ever materialised in-memory by `getAccessTokenForSeller`,
  * never logged, never returned over the wire.
  */
+// Module-level fee-estimate cache (Sprint 2 · US-4) — keyed by
+// site:category:listingType, since the fee RATE is stable across price
+// points but varies per category/listing-type. Not per-seller: two sellers
+// asking about the same category/listing-type get the same ML-quoted rate.
+const listingPriceCache = new Map<string, ListingPriceCacheEntry>()
+
 class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlLink, MlSyncEvent, MlAppliedOrder }) {
   // ── Sprint 5 · US-13: sync activity log (append-only, best-effort) ──────────────
 
@@ -286,6 +299,85 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       throw Object.assign(new Error('Failed to load any ML item detail'), { code: 'ML_FETCH_FAILED' })
     }
     return { items, paging: page.paging, skipped }
+  }
+
+  /**
+   * The fee estimate for a product's LINKED ML item, resolving the category
+   * from the existing product↔ML link (Sprint 2 · US-4) — the caller (a
+   * route) only needs to know which Medusa product it's asking about, never
+   * ML category/listing-type internals. Returns `null` when the product has
+   * no ML link, the link belongs to a different seller, or it was never
+   * assigned a category (defense in depth — a route should never act on a
+   * cross-seller link). The actual listing_type ML priced the linked item
+   * at isn't persisted on the link today, so this uses the same
+   * `ML_DEFAULT_LISTING_TYPE` `buildMlItemPayload` falls back to at publish
+   * time — a documented approximation, not a live lookup.
+   */
+  async getFeeEstimateForProduct(
+    sellerId: string,
+    args: { productId: string; referencePriceCents: number },
+  ): Promise<{ feePct: number; fixedFeeCents: number; currency: string } | null> {
+    const link = await this.getLinkByProduct(args.productId)
+    if (!link || link.seller_id !== sellerId) return null
+    const categoryId = (link.metadata as Record<string, unknown> | null)?.ml_category_id
+    if (typeof categoryId !== 'string' || !categoryId) return null
+    return this.getFeeRate(sellerId, {
+      categoryId,
+      listingTypeId: ML_DEFAULT_LISTING_TYPE,
+      referencePriceCents: args.referencePriceCents,
+    })
+  }
+
+  /**
+   * ML's fee rate (percentage + fixed fee) for a category/listing-type, cached
+   * for `LISTING_PRICE_CACHE_TTL_MS` so the frontend's target-margin slider can
+   * recompute `solveForPrice` locally without a network call per tick (Sprint 2
+   * · US-4). `referencePriceCents` is only the price ML evaluates the rate AT —
+   * the fee rate itself is what's cached and reused across prices in the
+   * suggester; Apply (US-5) re-validates against ML directly at write time.
+   * Returns `null` on any failure (no connection, ML error) so the route can
+   * degrade to an "estimate unavailable" state rather than throw.
+   */
+  async getFeeRate(
+    sellerId: string,
+    args: { categoryId: string; listingTypeId: string; referencePriceCents: number },
+  ): Promise<{ feePct: number; fixedFeeCents: number; currency: string } | null> {
+    try {
+      const conn = await this.getConnection(sellerId)
+      if (!conn || conn.status !== 'connected') return null
+      const siteId = mlSiteForCountry(conn.country_code)
+      const cacheKey = buildListingPriceCacheKey(siteId, args.categoryId, args.listingTypeId)
+      const cached = listingPriceCache.get(cacheKey)
+      if (!isListingPriceEntryStale(cached, Date.now())) {
+        return { feePct: cached!.feePct, fixedFeeCents: cached!.fixedFeeCents, currency: cached!.currency }
+      }
+      const token = await this.getAccessTokenForSeller(sellerId)
+      const referencePrice = Math.max(1, Math.round(args.referencePriceCents / 100))
+      const raw = await getListingPrices(token, siteId, {
+        price: referencePrice,
+        categoryId: args.categoryId,
+        listingTypeId: args.listingTypeId,
+      })
+      const details = raw.sale_fee_details
+      // Prefer the rate breakdown; fall back to a single-point-derived
+      // percentage (fixed fee unknown ⇒ 0) if ML only returns a flat amount.
+      const feePct = typeof details?.percentage_fee === 'number'
+        ? details.percentage_fee / 100
+        : typeof raw.sale_fee_amount === 'number' && referencePrice > 0
+          ? raw.sale_fee_amount / referencePrice
+          : null
+      if (feePct == null || !Number.isFinite(feePct)) return null
+      const fixedFeeCents = typeof details?.fixed_fee === 'number' ? Math.round(details.fixed_fee * 100) : 0
+      const currency = raw.currency_id ?? 'MXN'
+      listingPriceCache.set(cacheKey, { feePct, fixedFeeCents, currency, fetchedAt: Date.now() })
+      return { feePct, fixedFeeCents, currency }
+    } catch (e) {
+      console.error(
+        '[ml] getFeeEstimate failed (degrading to unavailable):', e instanceof Error ? e.message : e,
+        { categoryId: args.categoryId, listingTypeId: args.listingTypeId },
+      )
+      return null
+    }
   }
 
   // ── Sprint 3: publish / sync (the reconcile seam) ────────────────────────────────

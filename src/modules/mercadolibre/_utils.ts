@@ -247,6 +247,7 @@ export const SYNC_EVENT_KINDS = [
   'sale_applied',
   'reconcile',
   'import',
+  'price_apply',
 ] as const
 export type SyncEventKind = (typeof SYNC_EVENT_KINDS)[number]
 export type SyncEventOutcome = 'ok' | 'fail'
