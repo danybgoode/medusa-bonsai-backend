@@ -258,6 +258,17 @@ export function normalizeMedusaOrder(
     buyer_clerk_user_id: null,
     // Per-line-item buyer personalization (empty array when none).
     personalization,
+    // Lightweight proof-of-print sign-off (custom-print-products S4 · 4.1):
+    // a durable order-metadata flag pair, same curation discipline as
+    // `tags`/`refund_state` above. Advisory only — never gates shipping.
+    proof_sent: metadata.proof_sent === true,
+    proof_sent_at: (metadata.proof_sent_at as string) ?? null,
+    proof_image_url: (metadata.proof_image_url as string) ?? null,
+    proof_size: (metadata.proof_size as string) ?? null,
+    proof_quantity: typeof metadata.proof_quantity === 'number' ? metadata.proof_quantity : null,
+    proof_price_cents: typeof metadata.proof_price_cents === 'number' ? metadata.proof_price_cents : null,
+    proof_approved: metadata.proof_approved === true,
+    proof_approved_at: (metadata.proof_approved_at as string) ?? null,
     support: isSupportOrder ? support : null,
     created_at: order.created_at,
     updated_at: order.updated_at,
