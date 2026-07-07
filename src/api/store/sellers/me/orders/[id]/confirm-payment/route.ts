@@ -42,7 +42,13 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
     filters: { id: sellerAuth.sellerId },
   })
   const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
-  const owns = productIds.some((pid: string) => sellerProductIds.has(pid))
+  // Require ownership of EVERY item, not just one — capturing payment is an
+  // ORDER-level action, so a seller who owns only some items must not be
+  // able to trigger it for the whole order (cross-agent review catch,
+  // 2026-07-07). A cart can only ever hold one seller's items in normal use
+  // (lib/cart.ts on the frontend enforces this at checkout), so this is a
+  // no-op for every real order today — pure defense-in-depth.
+  const owns = productIds.every((pid: string) => sellerProductIds.has(pid))
   if (!owns) return { order: null, sellerId: null, code: 403 as const }
 
   return { order, sellerId: sellerAuth.sellerId, code: 200 as const }
