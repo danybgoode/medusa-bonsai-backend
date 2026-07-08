@@ -103,16 +103,31 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     .filter((product: { metadata?: unknown }) => !isHiddenCatalogProduct(product.metadata))
     .map((product) => ({ raw: product, listing: toListingShape(product, seller) }))
 
+  // Always resolved (not just when `channel` filters) — every row's channel
+  // badge needs it, read-only in S1 (no publish/unpublish toggle; that's S2.2).
+  const mlService: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
+  const mlLinks = await mlService.listProductMlLinks({ product_id: pairs.map((p) => p.listing.id) })
+  const mlLinkedIds = new Set(mlLinks.map((link: { product_id: string }) => link.product_id))
+
   if (channel === 'ml' || channel === 'miyagi') {
-    const mlService: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
-    const links = await mlService.listProductMlLinks({ product_id: pairs.map((p) => p.listing.id) })
-    const mlLinkedIds = new Set(links.map((link: { product_id: string }) => link.product_id))
     pairs = pairs.filter((p) => (channel === 'ml' ? mlLinkedIds.has(p.listing.id) : !mlLinkedIds.has(p.listing.id)))
   }
 
   if (stock === 'in_stock') pairs = pairs.filter((p) => p.listing.in_stock)
   else if (stock === 'agotado') pairs = pairs.filter((p) => p.listing.manage_inventory && !p.listing.in_stock)
   else if (stock === 'unlimited') pairs = pairs.filter((p) => !p.listing.manage_inventory)
+
+  // Counts per state — computed BEFORE the status filter narrows `pairs`, so a
+  // seller sees "3 activos, 1 pausado" for whatever channel/stock/search filters
+  // are active, not just the currently-selected status. Mirrors the fine-split
+  // rule in the frontend's lib/catalog-status.ts (`deriveCatalogStatus`) — kept
+  // in lockstep by hand since the two repos don't share a module.
+  const statusCounts = { activo: 0, agotado: 0, borrador: 0, pausado: 0 }
+  for (const p of pairs) {
+    if (p.listing.status === 'paused') statusCounts.pausado++
+    else if (p.listing.status === 'active') statusCounts[p.listing.in_stock ? 'activo' : 'agotado']++
+    else statusCounts.borrador++
+  }
 
   if (statusParam === 'activo') pairs = pairs.filter((p) => p.listing.status === 'active' && p.listing.in_stock)
   else if (statusParam === 'agotado') pairs = pairs.filter((p) => p.listing.status === 'active' && !p.listing.in_stock)
@@ -131,9 +146,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   res.json({
     seller,
-    listings: page.map((p) => p.listing),
+    listings: page.map((p) => ({
+      ...p.listing,
+      channels: mlLinkedIds.has(p.listing.id) ? ['miyagi', 'ml'] : ['miyagi'],
+    })),
     products: page.map((p) => p.raw),
     count,
+    status_counts: statusCounts,
     limit,
     offset,
   })
