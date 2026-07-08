@@ -33,6 +33,13 @@ export interface CouponInput {
   expiry?: string | null
   /** Max total redemptions; null/undefined = unlimited. */
   usage_limit?: number | null
+  /**
+   * When set, the coupon is PRODUCT-SCOPED: it only discounts this product's
+   * line-item subtotal and is rejected on a cart that doesn't contain it
+   * (bookshop-launchpad S3.3 — the 50% print unlock is scoped to ONE CPP
+   * listing, never shop-wide). Stored in promotion `metadata.scoped_product_id`.
+   */
+  scoped_product_id?: string | null
 }
 
 /** Shape returned to the backoffice UI. */
@@ -45,6 +52,8 @@ export interface CouponView {
   expiry: string | null
   usage_limit: number | null
   uses: number
+  /** Product this coupon is scoped to, or null for a shop-wide coupon. */
+  scoped_product_id: string | null
 }
 
 export function resolvePromotionService(scope: { resolve: (k: string) => unknown }): IPromotionModuleService {
@@ -72,6 +81,13 @@ type RawPromotion = {
   status?: string
   application_method?: { type?: string; value?: number } | null
   campaign?: { ends_at?: string | Date | null; budget?: { type?: string; limit?: number | null; used?: number | null } | null } | null
+  metadata?: Record<string, unknown> | null
+}
+
+/** Read the product-scope off a promotion's metadata (null = shop-wide). */
+export function scopedProductIdOf(p: { metadata?: Record<string, unknown> | null }): string | null {
+  const raw = (p.metadata ?? {})['scoped_product_id']
+  return typeof raw === 'string' && raw.trim() ? raw : null
 }
 
 function toView(p: RawPromotion): CouponView {
@@ -87,6 +103,7 @@ function toView(p: RawPromotion): CouponView {
     expiry: endsAt ? new Date(endsAt).toISOString() : null,
     usage_limit: budget?.limit ?? null,
     uses: Number(budget?.used ?? 0),
+    scoped_product_id: scopedProductIdOf(p),
   }
 }
 
@@ -125,8 +142,14 @@ export async function createSellerCoupon(
         : {}),
     },
     // metadata is supported by the promotion model even though the create DTO
-    // omits it — stamp ownership/traceability (we don't depend on it for scoping).
-    metadata: { seller_id: sellerId, created_by_clerk_user_id: clerkUserId },
+    // omits it — stamp ownership/traceability + the optional product scope, which
+    // `resolveCouponForCheckout` DOES enforce (a product-scoped coupon only
+    // discounts that product and is rejected on a cart without it).
+    metadata: {
+      seller_id: sellerId,
+      created_by_clerk_user_id: clerkUserId,
+      ...(input.scoped_product_id ? { scoped_product_id: input.scoped_product_id } : {}),
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any])
 
@@ -182,19 +205,35 @@ export async function deleteSellerCoupon(promo: IPromotionModuleService, id: str
 }
 
 export type CouponResolution =
-  | { ok: true; promotion_id: string; code: string; discount_cents: number }
-  | { ok: false; reason: 'not_found' | 'foreign_seller' | 'inactive' | 'expired' | 'depleted' }
+  | { ok: true; promotion_id: string; code: string; discount_cents: number; scoped_product_id: string | null }
+  | { ok: false; reason: 'not_found' | 'foreign_seller' | 'inactive' | 'expired' | 'depleted' | 'foreign_product' }
+
+/**
+ * Optional cart context for PRODUCT-SCOPED coupons. When a coupon carries a
+ * `scoped_product_id`, the discount applies to ONLY that product's subtotal, and
+ * the coupon is rejected on a cart that doesn't contain the product. The caller
+ * (start-checkout) supplies the cart's product ids + per-product cent subtotals;
+ * the lightweight preview passes what it has (ids + a best-effort scoped base).
+ */
+export interface CartScopeContext {
+  productIds?: string[]
+  /** product_id → that product's line-item subtotal in cents. */
+  productSubtotals?: Record<string, number>
+}
 
 /**
  * Validate a code for a specific seller + item subtotal and compute the discount.
  * Used by the real-time validate endpoint and (authoritatively) at start-checkout.
- * `allowedIds` = the resolved seller's metadata.coupon_ids.
+ * `allowedIds` = the resolved seller's metadata.coupon_ids. For a product-scoped
+ * coupon, pass `cart` so the scope can be enforced (else a scoped coupon on a cart
+ * whose products are unknown is rejected as `foreign_product`, fail-closed).
  */
 export async function resolveCouponForCheckout(
   promo: IPromotionModuleService,
   code: string,
   allowedIds: string[],
   baseCents: number,
+  cart?: CartScopeContext,
 ): Promise<CouponResolution> {
   const normalized = normalizeCode(code)
   const [match] = await promo.listPromotions({ code: [normalized] }, { relations: RELATIONS })
@@ -212,8 +251,25 @@ export async function resolveCouponForCheckout(
   }
 
   const type: CouponDiscountType = p.application_method?.type === 'percentage' ? 'percentage' : 'fixed'
-  const discount = computeCouponDiscountCents(type, Number(p.application_method?.value ?? 0), baseCents)
-  return { ok: true, promotion_id: p.id, code: normalized, discount_cents: discount }
+
+  // Product scope: discount only the scoped product's subtotal; reject a cart
+  // that doesn't contain it. Fail-closed — if the caller can't tell us which
+  // products are in the cart, a scoped coupon is refused rather than applied wide.
+  const scopedProductId = scopedProductIdOf(p)
+  let discountBase = baseCents
+  if (scopedProductId) {
+    const ids = cart?.productIds
+    if (!ids || !ids.includes(scopedProductId)) {
+      return { ok: false, reason: 'foreign_product' }
+    }
+    // Base = that product's own subtotal (falls back to baseCents only when the
+    // caller didn't break it down, e.g. a single-line cart in the preview).
+    discountBase = cart?.productSubtotals?.[scopedProductId] ?? baseCents
+    if (discountBase <= 0) return { ok: false, reason: 'foreign_product' }
+  }
+
+  const discount = computeCouponDiscountCents(type, Number(p.application_method?.value ?? 0), discountBase)
+  return { ok: true, promotion_id: p.id, code: normalized, discount_cents: discount, scoped_product_id: scopedProductId }
 }
 
 /** es-MX buyer-facing message for a failed resolution. */
@@ -223,6 +279,7 @@ export function couponErrorMessage(reason: Exclude<CouponResolution, { ok: true 
     case 'depleted': return 'Este cupón alcanzó su límite de usos.'
     case 'inactive': return 'Este cupón no está disponible.'
     case 'foreign_seller': return 'Este cupón no aplica a esta tienda.'
+    case 'foreign_product': return 'Este cupón solo aplica a un producto específico que no está en tu carrito.'
     default: return 'Cupón no válido.'
   }
 }

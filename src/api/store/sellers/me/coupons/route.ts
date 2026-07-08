@@ -72,7 +72,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   try {
     coupon = await createSellerCoupon(
       promo,
-      { code, type: body.type, value, expiry: body.expiry ?? null, usage_limit: body.usage_limit ?? null },
+      { code, type: body.type, value, expiry: body.expiry ?? null, usage_limit: body.usage_limit ?? null, scoped_product_id: body.scoped_product_id ?? null },
       seller.id,
       clerkUserId,
     )
