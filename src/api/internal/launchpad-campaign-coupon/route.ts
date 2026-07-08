@@ -20,20 +20,40 @@ import SellerModuleService from '../../../modules/seller/service'
 import {
   resolvePromotionService,
   createSellerCoupon,
-  listSellerCoupons,
+  findSellerCouponByCode,
   normalizeCode,
 } from '../../store/_utils/coupons'
 
+// Fail CLOSED: a coupon-minting route must never be callable when the shared
+// secret is unset (a misconfigured env is treated as unauthorized, not open).
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
   const got = req.headers['x-internal-secret'] as string | undefined
-  return !!expected && got !== expected
+  return !expected || got !== expected
 }
 
 function couponIdsOf(seller: { metadata?: unknown }): string[] {
   const meta = (seller.metadata ?? {}) as Record<string, unknown>
   const ids = meta.coupon_ids
   return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []
+}
+
+/**
+ * Append a coupon id to a seller's `coupon_ids` index, re-reading the seller
+ * FIRST so a concurrent mint for the same seller can't clobber the other's ids
+ * (narrows the read-modify-write race). Idempotent — a no-op if already present.
+ */
+async function appendCouponId(
+  sellerService: SellerModuleService,
+  sellerId: string,
+  couponId: string,
+): Promise<void> {
+  const [fresh] = await sellerService.listSellers({ id: sellerId } as never, { take: 1 })
+  if (!fresh) return
+  const ids = couponIdsOf(fresh)
+  if (ids.includes(couponId)) return
+  const meta = (fresh.metadata ?? {}) as Record<string, unknown>
+  await sellerService.updateSellers({ id: sellerId, metadata: { ...meta, coupon_ids: [...ids, couponId] } })
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
@@ -63,12 +83,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (!seller) return res.status(404).json({ message: 'Vendedor no encontrado.' })
 
   const promo = resolvePromotionService(req.scope)
-  const existingIds = couponIdsOf(seller)
 
-  // Idempotent: a replay returns the already-minted coupon, never a duplicate.
-  const mine = await listSellerCoupons(promo, existingIds)
-  const already = mine.find((c) => c.code === code)
-  if (already) return res.status(200).json({ coupon: already, created: false })
+  // Idempotent by CODE (globally unique), not just via the seller's id index —
+  // so a prior PARTIAL mint (promotion created but never appended to coupon_ids,
+  // e.g. an updateSellers failure) is repaired on replay instead of stranding the
+  // campaign behind a permanent 409.
+  const existing = await findSellerCouponByCode(promo, code)
+  if (existing) {
+    if (existing.ownerSellerId && existing.ownerSellerId !== seller.id) {
+      // Someone else already owns this globally-unique code — a real conflict.
+      return res.status(409).json({ message: 'Este código ya está en uso.' })
+    }
+    await appendCouponId(sellerService, seller.id, existing.view.id) // repair index if missing
+    return res.status(200).json({ coupon: existing.view, created: false })
+  }
 
   let coupon
   try {
@@ -79,22 +107,23 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       'launchpad',
     )
   } catch (e: unknown) {
-    // Globally-unique code already exists (a prior partial mint). Re-read the
-    // seller's coupons and return it if present, else surface the conflict.
+    // Lost a create race on the globally-unique code — re-resolve by code and
+    // return it (repairing the index) if it's ours, else surface the conflict.
     const msg = e instanceof Error ? e.message : ''
     if (/unique|already exists|duplicate/i.test(msg)) {
-      const retry = (await listSellerCoupons(promo, couponIdsOf(seller))).find((c) => c.code === code)
-      if (retry) return res.status(200).json({ coupon: retry, created: false })
+      const raced = await findSellerCouponByCode(promo, code)
+      if (raced && (!raced.ownerSellerId || raced.ownerSellerId === seller.id)) {
+        await appendCouponId(sellerService, seller.id, raced.view.id)
+        return res.status(200).json({ coupon: raced.view, created: false })
+      }
       return res.status(409).json({ message: 'Este código ya está en uso.' })
     }
     throw e
   }
 
-  const meta = (seller.metadata ?? {}) as Record<string, unknown>
-  await sellerService.updateSellers({
-    id: seller.id,
-    metadata: { ...meta, coupon_ids: [...existingIds, coupon.id] },
-  })
+  // Re-read-before-append so a concurrent mint for the same seller can't clobber
+  // this coupon id out of the index.
+  await appendCouponId(sellerService, seller.id, coupon.id)
 
   res.status(201).json({ coupon, created: true })
 }

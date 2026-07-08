@@ -158,6 +158,26 @@ export async function createSellerCoupon(
   return toView(full as unknown as RawPromotion)
 }
 
+/**
+ * Find a seller's coupon by CODE globally (promotion codes are globally unique),
+ * scoped to this seller via `metadata.seller_id`. Used to make minting idempotent
+ * even when a prior attempt created the promotion but failed to append it to the
+ * seller's `coupon_ids` index (a partial mint) — the caller can then repair the
+ * index. Returns null if no promotion with that code exists, or it belongs to a
+ * DIFFERENT seller (a real conflict the caller surfaces as 409).
+ */
+export async function findSellerCouponByCode(
+  promo: IPromotionModuleService,
+  code: string,
+): Promise<{ view: CouponView; ownerSellerId: string | null } | null> {
+  const normalized = normalizeCode(code)
+  const [match] = await promo.listPromotions({ code: [normalized] }, { relations: RELATIONS })
+  if (!match) return null
+  const p = match as unknown as RawPromotion
+  const ownerSellerId = ((p.metadata ?? {})['seller_id'] as string | undefined) ?? null
+  return { view: toView(p), ownerSellerId }
+}
+
 /** List a seller's coupons (with live usage) from their id index. */
 export async function listSellerCoupons(
   promo: IPromotionModuleService,
