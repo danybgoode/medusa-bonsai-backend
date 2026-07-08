@@ -86,7 +86,7 @@ export async function listOrdersForSeller(
       fields: [
         'id', 'status', 'payment_status', 'fulfillment_status',
         'total', 'subtotal', 'currency_code', 'email', 'metadata', 'created_at', 'updated_at',
-        'items.*', 'shipping_address.*', 'customer.*', 'fulfillments.*',
+        'items.*', 'shipping_address.*', 'customer.*', 'customer.metadata', 'fulfillments.*',
       ],
       filters: { id: orderIds },
     })
@@ -227,6 +227,15 @@ export function normalizeMedusaOrder(
     ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
     : null
 
+  // Buyer's Clerk id (buyer-notifications-money-path S1.1) — stamped on the Medusa
+  // customer at checkout (resolveOrCreateBuyerCustomer, start-checkout/route.ts) as
+  // customer.metadata.clerk_user_id. null for guest orders (no customer link).
+  const customerMetadata = (customer as unknown as { metadata?: Record<string, unknown> } | undefined)?.metadata
+  const rawBuyerClerkUserId = customerMetadata?.clerk_user_id
+  const buyerClerkUserId = typeof rawBuyerClerkUserId === 'string' && rawBuyerClerkUserId.length > 0
+    ? rawBuyerClerkUserId
+    : null
+
   // Which marketplace sold this (ml-orders-native S1 · US-3) — a DIFFERENT axis
   // from any buyer-traffic `channel` concept: this is "Mercado Libre vs Miyagi",
   // stamped by `materializeMlOrder` at order-creation time. `metadata` is already
@@ -282,7 +291,7 @@ export function normalizeMedusaOrder(
     event_tickets: Array.isArray(metadata.event_tickets) ? metadata.event_tickets : [],
     buyer_name: buyerName,
     buyer_email: (order.email as string) ?? customer?.email ?? null,
-    buyer_clerk_user_id: null,
+    buyer_clerk_user_id: buyerClerkUserId,
     // Per-line-item buyer personalization (empty array when none).
     personalization,
     // Raw per-item ids/qty/personalization for reorder (custom-print-products S4 · 4.3).
