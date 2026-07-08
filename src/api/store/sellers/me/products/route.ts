@@ -17,14 +17,17 @@ import { isHiddenCatalogProduct } from '../../../_utils/support'
 // (category handle), `channel` (miyagi|ml), `stock` (in_stock|agotado|unlimited),
 // `sort` (recent|title|price_asc|price_desc).
 //
-// `id`, and `status`'s coarse published/draft split, `title` search, and
-// `categories.handle` are pushed down to the DB filter on the seller's linked
-// products — real filtering, not "fetch everything then slice." Stock-state,
-// the ML channel badge, and the hidden-catalog exclusion are computed /
-// cross-module fields that can't be expressed as a remoteQuery filter; those
-// run in-memory on this already seller-scoped, DB-narrowed batch (never the
-// full store catalog) before the final offset/limit slice + count, so a page
-// is never short a row. Pushing `id: linkedIds` down also fixes a latent bug
+// `id`, `title` search, and `categories.handle` are pushed down to the DB
+// filter on the seller's linked products — real filtering, not "fetch
+// everything then slice." `status` is deliberately NOT pushed to the DB: the
+// per-state counts must reflect every status for whatever q/category/channel/
+// stock filters are active, not just the currently-selected one, so the status
+// split (native published/draft + the fine agotado/pausado distinction) stays
+// in-memory alongside stock-state, the ML channel badge, and the hidden-catalog
+// exclusion — all computed/cross-module concerns that run on this already
+// seller-scoped, DB-narrowed batch (never the full store catalog) before the
+// final offset/limit slice + count, so a page is never short a row. Pushing
+// `id: linkedIds` down also fixes a latent bug
 // in the old unconditional `pagination: { take: 2000, skip: 0 }` fetch: with
 // no id filter, `remoteQuery.graph` pulled an unscoped global page of products
 // and intersected with this seller's ids in JS — in a store with 2000+ total
@@ -51,13 +54,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const stock = req.query.stock as string | undefined // 'in_stock' | 'agotado' | 'unlimited'
   const sort = (req.query.sort as string | undefined) ?? 'recent'
   const statusParam = req.query.status as string | undefined // 'activo'|'agotado'|'borrador'|'pausado'
-  // Coarse native-status pushdown; the fine activo/agotado/borrador/pausado
-  // split (stock + metadata.paused) happens in-memory below.
-  const nativeStatus = statusParam === 'activo' || statusParam === 'agotado'
-    ? 'published'
-    : statusParam === 'borrador' || statusParam === 'pausado'
-      ? 'draft'
-      : undefined
 
   const { data: rows } = await remoteQuery.graph({
     entity: 'seller',
@@ -73,7 +69,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const dbFilters: Record<string, unknown> = { id: linkedIds }
-  if (nativeStatus) dbFilters.status = nativeStatus
   if (q) dbFilters.title = { $ilike: `%${q}%` }
   if (category) dbFilters.categories = { handle: category }
 
