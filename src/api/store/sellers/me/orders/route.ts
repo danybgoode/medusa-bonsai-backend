@@ -86,7 +86,7 @@ export async function listOrdersForSeller(
       fields: [
         'id', 'status', 'payment_status', 'fulfillment_status',
         'total', 'subtotal', 'currency_code', 'email', 'metadata', 'created_at', 'updated_at',
-        'items.*', 'shipping_address.*', 'customer.*', 'fulfillments.*',
+        'items.*', 'shipping_address.*', 'customer.*', 'customer.metadata', 'fulfillments.*',
       ],
       filters: { id: orderIds },
     })

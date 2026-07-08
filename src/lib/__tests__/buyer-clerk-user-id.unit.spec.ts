@@ -6,8 +6,9 @@ import { normalizeMedusaOrder } from '../../api/store/sellers/me/orders/route'
  * Proves normalizeMedusaOrder resolves the buyer's Clerk id from
  * customer.metadata.clerk_user_id (the existing checkout-time stamp — see
  * resolveOrCreateBuyerCustomer in start-checkout/route.ts), null-safely for
- * guest orders and malformed metadata, and leaves the rest of the shape
- * byte-for-byte unchanged.
+ * guest orders and malformed metadata, and spot-checks a few unrelated
+ * fields to confirm the rest of the shape isn't disturbed (not exhaustive —
+ * see rental-booking.unit.spec.ts for the same discipline on this function).
  */
 
 const baseOrder = (customer?: Record<string, unknown>) => ({
