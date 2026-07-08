@@ -199,7 +199,16 @@ export function toListingShape(product: any, seller?: any): ListingShape {
       alt: (img.metadata?.alt as string) ?? null,
     })),
     tags: (product.tags ?? []).map((t: any) => t.value as string),
-    status: product.status === 'published' ? 'active' : (product.status as string),
+    // A paused listing stays Medusa-native `status: 'draft'` (pausing never
+    // unpublishes into a *different* native status) — `metadata.paused` is the
+    // only thing that distinguishes it from a never-published draft. Set/cleared
+    // by the seller PATCH route (`app/api/sell/listing/[id]/route.ts`) in the
+    // same call that flips `status`, so the two can't drift apart.
+    status: product.status === 'published'
+      ? 'active'
+      : product.status === 'draft' && meta.paused === true
+        ? 'paused'
+        : (product.status as string),
     source_platform: (meta.source_platform as string) ?? null,
     source_url: (meta.source_url as string) ?? null,
     views: (meta.views as number) ?? 0,
