@@ -171,6 +171,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       // of `status`/pause: this only affects `/l` browse, never the seller's
       // OWN storefront or this table itself.
       miyagi_visible: (p.raw.metadata as Record<string, unknown> | undefined)?.miyagi_visible !== false,
+      // ML price override (catalog-management S2 · 2.3) — seller-private,
+      // single-variant scope (matches unit_cost_cents' existing limitation).
+      // "table shows both prices" acceptance criterion.
+      ml_price_cents: (() => {
+        const v = (p.raw.variants as any[] | undefined)?.[0]?.metadata?.ml_price_cents
+        return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null
+      })(),
     })),
     products: page.map((p) => p.raw),
     count,

@@ -64,6 +64,25 @@ describe('buildMlItemPayload', () => {
       buildMlItemPayload(makeInput(), { categoryId: 'C', listingTypeId: 'gold_special' }).listing_type_id,
     ).toBe('gold_special')
   })
+
+  // catalog-management epic, Sprint 2 · Story 2.3 — the ML price override.
+  describe('ml_price_cents override (Story 2.3)', () => {
+    it('absent override → falls back to price_cents exactly (today\'s pre-2.3 behavior, unchanged)', () => {
+      expect(buildMlItemPayload(makeInput(), { categoryId: 'C' }).price).toBe(1850)
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: undefined }), { categoryId: 'C' }).price).toBe(1850)
+    })
+    it('null override → falls back to price_cents (explicit "cleared" state)', () => {
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: null }), { categoryId: 'C' }).price).toBe(1850)
+    })
+    it('present override → takes precedence over price_cents', () => {
+      // 220000 centavos = $2,200.00 — higher than the $1,850 Miyagi price,
+      // covering ML's fees without raising the Miyagi-channel price.
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: 220000 }), { categoryId: 'C' }).price).toBe(2200)
+    })
+    it('override of 0 is a real, distinct value from "absent" — still overrides (not treated as falsy-absent)', () => {
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: 0, price_cents: 185000 }), { categoryId: 'C' }).price).toBe(0)
+    })
+  })
 })
 
 describe('decidePublishAction', () => {

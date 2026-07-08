@@ -102,6 +102,18 @@ export interface SellerProductUpdateBody {
    */
   unit_cost_cents?: number | null
   /**
+   * Optional Mercado Libre-specific price override, in integer centavos MXN,
+   * for the targeted variant (catalog-management epic, Sprint 2 · Story 2.3)
+   * — so ML's fees don't force the Miyagi price up. Stored on
+   * `variant.metadata.ml_price_cents`, following the exact `unit_cost_cents`
+   * precedent: seller-private (never on the public `ListingShape` — read
+   * only via the seller-scoped GET and the internal ML-publish route),
+   * `null` clears it (absent override = same price as Miyagi, today's
+   * behavior, via `buildMlItemPayload`'s `ml_price_cents ?? price_cents`
+   * fallback). Gated behind `catalog.inventory_channels_enabled`.
+   */
+  ml_price_cents?: number | null
+  /**
    * Inventory mode for the targeted variant (`variant_id`, or the sole
    * variant) — catalog-management epic, Sprint 2 · Story 2.1. Translates to
    * the two native Medusa variant flags server-side (one place, not
@@ -312,11 +324,11 @@ export async function updateSellerProduct(
   if (body.option_dimensions !== undefined
     && (body.price_cents !== undefined || body.quantity !== undefined || body.variant_tiers !== undefined
       || body.unit_cost_cents !== undefined || body.inventory_mode !== undefined
-      || body.dispatch_estimate !== undefined)) {
+      || body.dispatch_estimate !== undefined || body.ml_price_cents !== undefined)) {
     return {
       ok: false,
       status: 422,
-      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents/inventory_mode/dispatch_estimate en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles, el costo y el modo de inventario se ajustan en una solicitud aparte con variant_id.',
+      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents/inventory_mode/dispatch_estimate/ml_price_cents en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles, el costo y el modo de inventario se ajustan en una solicitud aparte con variant_id.',
     }
   }
 
@@ -593,6 +605,36 @@ export async function updateSellerProduct(
     const nextMeta: Record<string, unknown> = { ...currentMeta }
     if (body.unit_cost_cents === null) delete nextMeta.unit_cost_cents
     else nextMeta.unit_cost_cents = body.unit_cost_cents
+    await (productService as any).updateProductVariants(variant.id, { metadata: nextMeta })
+  }
+
+  // ── ML price override — variant.metadata.ml_price_cents (S2 · 2.3) ───────
+  if (body.ml_price_cents !== undefined) {
+    if (body.ml_price_cents !== null
+      && (!Number.isInteger(body.ml_price_cents) || body.ml_price_cents < 0)) {
+      return { ok: false, status: 422, message: 'El precio de Mercado Libre debe ser un entero en centavos de 0 o más.' }
+    }
+    if (!(await isEnabled('catalog.inventory_channels_enabled'))) {
+      return { ok: false, status: 423, message: 'Esta función aún no está disponible.' }
+    }
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['variants.id', 'variants.metadata'],
+      filters: { id },
+    })
+    const variants: any[] = (rows?.[0] as any)?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
+    const currentMeta = ((variant.metadata ?? {}) as Record<string, unknown>)
+    const nextMeta: Record<string, unknown> = { ...currentMeta }
+    if (body.ml_price_cents === null) delete nextMeta.ml_price_cents
+    else nextMeta.ml_price_cents = body.ml_price_cents
     await (productService as any).updateProductVariants(variant.id, { metadata: nextMeta })
   }
 

@@ -156,6 +156,14 @@ export type MlPublishInput = {
   condition: string | null
   available_quantity: number | null
   images: { url: string }[]
+  /**
+   * Optional Mercado Libre-specific price override in centavos
+   * (catalog-management epic, Sprint 2 · Story 2.3) — takes precedence over
+   * `price_cents` when present; absent/null falls back to `price_cents`
+   * (today's exact behavior, zero change for every product without an
+   * override).
+   */
+  ml_price_cents?: number | null
 }
 
 /**
@@ -170,8 +178,12 @@ export function buildMlItemPayload(
   opts: { categoryId: string; listingTypeId?: string },
 ): MlItemPayload {
   const title = (input.title ?? '').trim()
-  const price = input.price_cents != null && Number.isFinite(input.price_cents)
-    ? Math.round((input.price_cents / 100) * 100) / 100
+  // Prefer the ML-specific override; absent/null reduces to the exact
+  // pre-2.3 line (`input.price_cents`) — zero behavior change for every
+  // product that never sets an override.
+  const effectivePriceCents = input.ml_price_cents ?? input.price_cents
+  const price = effectivePriceCents != null && Number.isFinite(effectivePriceCents)
+    ? Math.round((effectivePriceCents / 100) * 100) / 100
     : 0
   const qty = input.available_quantity != null && Number.isFinite(input.available_quantity)
     ? Math.max(1, Math.trunc(input.available_quantity))

@@ -256,14 +256,16 @@ export function toListingShape(product: any, seller?: any): ListingShape {
 
 /**
  * Seller-private variant-metadata keys that must never reach a PUBLIC read.
- * `unit_cost_cents` is the seller's COGS (profit-analyzer S1 · US-1) — only
- * the Clerk-authed seller-scoped GET may return it. Any route that serializes
- * RAW variants (rather than through `toListingShape`, which never emits
- * variant metadata) must pass its products through
+ * `unit_cost_cents` is the seller's COGS (profit-analyzer S1 · US-1);
+ * `ml_price_cents` is the optional Mercado Libre price override
+ * (catalog-management epic, Sprint 2 · Story 2.3) — only the Clerk-authed
+ * seller-scoped GET and the internal ML-publish route may read it. Any route
+ * that serializes RAW variants (rather than through `toListingShape`, which
+ * never emits variant metadata) must pass its products through
  * `stripPrivateVariantMetadata` before responding. Add future private keys
  * here, not at call sites.
  */
-const PRIVATE_VARIANT_METADATA_KEYS = ['unit_cost_cents'] as const
+const PRIVATE_VARIANT_METADATA_KEYS = ['unit_cost_cents', 'ml_price_cents'] as const
 
 /**
  * Deep-copy-free scrub of seller-private keys from every variant's metadata

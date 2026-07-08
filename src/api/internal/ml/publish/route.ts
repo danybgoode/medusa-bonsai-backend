@@ -104,6 +104,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (!product) return res.status(404).json({ message: 'Product not found' })
 
   const listing = toListingShape(product, seller)
+  // ML price override (catalog-management S2 · 2.3) — read off the targeted
+  // (or sole) variant's private metadata; `variants.*` above already fetches
+  // it. Absent/null → `buildMlItemPayload` falls back to `listing.price_cents`.
+  const productVariants: any[] = (product as any).variants ?? []
+  const targetVariant = variant_id
+    ? productVariants.find((v) => v.id === variant_id)
+    : productVariants.length <= 1 ? productVariants[0] : undefined
+  const mlPriceCentsRaw = (targetVariant?.metadata as Record<string, unknown> | undefined)?.ml_price_cents
+  const mlPriceCents = typeof mlPriceCentsRaw === 'number' && Number.isInteger(mlPriceCentsRaw) && mlPriceCentsRaw >= 0
+    ? mlPriceCentsRaw
+    : null
   const input: MlPublishInput = {
     title: listing.title,
     price_cents: listing.price_cents,
@@ -112,6 +123,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     condition: listing.condition,
     available_quantity: listing.available_quantity,
     images: listing.images.map((i) => ({ url: i.url })),
+    ml_price_cents: mlPriceCents,
   }
 
   // Per-product ML toggle (catalog-management S2 · 2.2) — absent metadata key
