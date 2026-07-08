@@ -70,6 +70,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   let coupon
   try {
+    // NOTE: product-scoped coupons are minted only via the internal launchpad
+    // route (which validates the product), never from this seller-facing path —
+    // so we deliberately do NOT accept scoped_product_id here.
     coupon = await createSellerCoupon(
       promo,
       { code, type: body.type, value, expiry: body.expiry ?? null, usage_limit: body.usage_limit ?? null },

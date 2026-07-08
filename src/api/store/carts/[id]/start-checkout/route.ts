@@ -434,7 +434,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (body.coupon_code && !body.offer_amount_cents && !supportCheckout && !rentalBooking) {
     const couponIds = Array.isArray((sellerMeta as any).coupon_ids) ? (sellerMeta as any).coupon_ids as string[] : []
     const promotionService = req.scope.resolve(Modules.PROMOTION) as IPromotionModuleService
-    const resolution = await resolveCouponForCheckout(promotionService, body.coupon_code, couponIds, postBundleBase)
+    // Cart product context so a PRODUCT-SCOPED coupon (bookshop-launchpad S3.3)
+    // discounts only its own product's subtotal and is rejected on a cart that
+    // doesn't contain it. Non-scoped coupons ignore this.
+    const productSubtotals: Record<string, number> = {}
+    for (const i of (cart.items ?? []) as any[]) {
+      const pid = i.product_id ?? i.variant?.product_id
+      if (!pid) continue
+      productSubtotals[pid] = (productSubtotals[pid] ?? 0) + Math.round(Number(i.unit_price ?? 0) * Number(i.quantity ?? 1))
+    }
+    const resolution = await resolveCouponForCheckout(promotionService, body.coupon_code, couponIds, postBundleBase, {
+      productIds: Object.keys(productSubtotals),
+      productSubtotals,
+    })
     if (!resolution.ok) {
       return res.status(422).json({ message: couponErrorMessage(resolution.reason), code: 'COUPON_INVALID' })
     }

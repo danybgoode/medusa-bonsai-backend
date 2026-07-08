@@ -39,8 +39,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const meta = (seller.metadata ?? {}) as Record<string, unknown>
   const couponIds = Array.isArray(meta.coupon_ids) ? (meta.coupon_ids as string[]) : []
 
+  // Optional cart product ids (comma-separated) so a PRODUCT-SCOPED coupon is
+  // previewed honestly — present ⇒ its discount; absent ⇒ foreign_product. The
+  // authoritative per-product-subtotal check still runs at start-checkout; here
+  // the whole item subtotal is the best-effort base for the scoped preview.
+  const productIds = ((req.query.product_ids as string) || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)
+  const cartScope = productIds.length
+    ? { productIds, productSubtotals: Object.fromEntries(productIds.map((id) => [id, itemsCents])) }
+    : undefined
+
   const promotionService = req.scope.resolve(Modules.PROMOTION) as IPromotionModuleService
-  const resolution = await resolveCouponForCheckout(promotionService, code, couponIds, itemsCents)
+  const resolution = await resolveCouponForCheckout(promotionService, code, couponIds, itemsCents, cartScope)
 
   if (!resolution.ok) {
     return res.json({ valid: false, reason: resolution.reason, message: couponErrorMessage(resolution.reason) })
