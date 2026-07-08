@@ -205,18 +205,35 @@ export type MlPublishAction = 'create' | 'update' | 'close' | 'relist' | 'noop'
  * authoritative reconcile decision (US-7 + US-8); the Sprint-4 inventory
  * subscriber will drive the same outbound seam.
  *
- *  - not linked            → create (publish)
- *  - linked, Miyagi closed → close the ML item (archive/draft propagates)
- *  - linked, ML closed, Miyagi active → relist
- *  - linked, both active   → update (title/price/images propagate)
+ *  - not linked            → create (publish) — unless the seller has since
+ *    turned the per-product ML toggle off (`mlEnabled: false`), a reachable
+ *    state since catalog-management S2 · 2.2 introduced it: clean no-op, not
+ *    a validation error surfaced as if it were a mistake.
+ *  - linked, effectively unpublished (Miyagi closed OR ml_enabled:false)
+ *                           → close the ML item (archive/draft propagates)
+ *  - linked, ML closed, effectively published → relist
+ *  - linked, both active    → update (title/price/images propagate)
+ *
+ * `mlEnabled` defaults to `true` when omitted — preserves every call site's
+ * existing behavior (today's product-status-only coupling) until a caller
+ * explicitly threads the new per-product toggle (catalog-management S2 · 2.2).
+ * `productPublished && mlEnabled !== false` composes the two independent
+ * signals with an AND, so "Miyagi paused always force-closes ML" falls out
+ * for free — no special-casing needed (a paused product has
+ * `productPublished: false` regardless of the toggle's value).
  */
 export function decidePublishAction(args: {
   linked: boolean
   mlStatus?: string | null
   productPublished: boolean
+  mlEnabled?: boolean
 }): MlPublishAction {
-  if (!args.linked) return 'create'
-  if (!args.productPublished) {
+  // Not-yet-linked + explicitly toggled off is the ONE new reachable state
+  // (S2 · 2.2) — every other `!linked` case (including `productPublished:
+  // false`) preserves today's EXACT 'create' behavior, unchanged.
+  if (!args.linked) return args.mlEnabled === false ? 'noop' : 'create'
+  const effectivelyPublished = args.productPublished && args.mlEnabled !== false
+  if (!effectivelyPublished) {
     return args.mlStatus === 'closed' ? 'noop' : 'close'
   }
   if (args.mlStatus === 'closed') return 'relist'

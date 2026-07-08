@@ -129,6 +129,28 @@ export interface SellerProductUpdateBody {
    */
   dispatch_estimate?: string | null
   /**
+   * Marketplace-browse (`/l`, `/store/listings`) visibility toggle
+   * (catalog-management epic, Sprint 2 · Story 2.2) — independent of
+   * `status`/pause: a shop's OWN storefront (`/store/sellers/[slug]/products`)
+   * and this seller's own catalog table are UNAFFECTED by this toggle, only
+   * marketplace browse is. Absent metadata key = `true` (today's behavior).
+   * Gated behind `catalog.inventory_channels_enabled`.
+   */
+  miyagi_visible?: boolean
+  /**
+   * Per-product Mercado Libre publish toggle (catalog-management epic,
+   * Sprint 2 · Story 2.2) — independent of `status`: a paused/draft Miyagi
+   * product still force-closes on ML regardless of this value (see
+   * `decidePublishAction`'s `effectivelyPublished` AND). Absent metadata key
+   * = `true` (today's coupled-to-status behavior, unchanged for every
+   * product linked before this sprint). Gated behind
+   * `catalog.inventory_channels_enabled`. This field only flips the stored
+   * toggle — it does NOT itself call Mercado Libre; the caller (frontend PUT
+   * proxy) reconciles the live ML listing via the existing publish/close
+   * bridge right after a successful write, same as the pause/delete cascade.
+   */
+  ml_enabled?: boolean
+  /**
    * Full replacement set of seller-owned collection ids this product should
    * belong to (own-shop-premium-presentation S2). Requires the `seller`
    * context param on `updateSellerProduct` (the seller-UI + MCP-agent call
@@ -627,6 +649,23 @@ export async function updateSellerProduct(
       else nextMeta.dispatch_estimate = body.dispatch_estimate
       await (productService as any).updateProducts(id, { metadata: nextMeta })
     }
+  }
+
+  // ── Channel toggles: miyagi_visible / ml_enabled — catalog-management S2 · 2.2 ──
+  if (body.miyagi_visible !== undefined || body.ml_enabled !== undefined) {
+    if (!(await isEnabled('catalog.inventory_channels_enabled'))) {
+      return { ok: false, status: 423, message: 'Esta función aún no está disponible.' }
+    }
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['metadata'],
+      filters: { id },
+    })
+    const current = ((rows?.[0] as any)?.metadata ?? {}) as Record<string, unknown>
+    const nextMeta: Record<string, unknown> = { ...current }
+    if (body.miyagi_visible !== undefined) nextMeta.miyagi_visible = body.miyagi_visible
+    if (body.ml_enabled !== undefined) nextMeta.ml_enabled = body.ml_enabled
+    await (productService as any).updateProducts(id, { metadata: nextMeta })
   }
 
   // ── Stock / restock (managed physical products) ──────────────────────────────

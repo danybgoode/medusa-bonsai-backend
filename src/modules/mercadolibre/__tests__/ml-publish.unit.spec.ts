@@ -81,6 +81,25 @@ describe('decidePublishAction', () => {
   it('linked + ML closed + Miyagi active → relist', () => {
     expect(decidePublishAction({ linked: true, mlStatus: 'closed', productPublished: true })).toBe('relist')
   })
+
+  // catalog-management epic, Sprint 2 · Story 2.2 — the new per-product
+  // mlEnabled toggle, independent of Miyagi's own publish state.
+  it('not linked + mlEnabled:false → noop (toggled off before ever publishing, not an error)', () => {
+    expect(decidePublishAction({ linked: false, productPublished: true, mlEnabled: false })).toBe('noop')
+    expect(decidePublishAction({ linked: false, productPublished: false, mlEnabled: false })).toBe('noop')
+  })
+  it('linked + Miyagi active + mlEnabled:false → close (the toggle alone can close it)', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'active', productPublished: true, mlEnabled: false })).toBe('close')
+  })
+  it('linked + Miyagi PAUSED (productPublished:false) always force-closes regardless of mlEnabled:true', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'active', productPublished: false, mlEnabled: true })).toBe('close')
+  })
+  it('linked + already closed + mlEnabled:false stays noop (not relist)', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'closed', productPublished: true, mlEnabled: false })).toBe('noop')
+  })
+  it('linked + Miyagi active + mlEnabled:true (explicit) + ML closed → relist, same as mlEnabled omitted', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'closed', productPublished: true, mlEnabled: true })).toBe('relist')
+  })
 })
 
 describe('mlSiteForCountry', () => {

@@ -99,10 +99,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     .map((product) => ({ raw: product, listing: toListingShape(product, seller) }))
 
   // Always resolved (not just when `channel` filters) — every row's channel
-  // badge needs it, read-only in S1 (no publish/unpublish toggle; that's S2.2).
+  // badge needs it. S2.2 adds real per-channel toggles; the badge itself is
+  // fixed here to respect `ml_status` — a CLOSED link no longer shows the ML
+  // badge (Sprint 1's read-only badge checked existence only, a known/
+  // accepted gap noted in that sprint's README — fixed as a byproduct of this
+  // story's channel-badge work, not new gated behavior).
   const mlService: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
   const mlLinks = await mlService.listProductMlLinks({ product_id: pairs.map((p) => p.listing.id) })
-  const mlLinkedIds = new Set(mlLinks.map((link: { product_id: string }) => link.product_id))
+  const mlLinkedIds = new Set(
+    mlLinks
+      .filter((link: { metadata?: Record<string, unknown> | null }) => link.metadata?.ml_status !== 'closed')
+      .map((link: { product_id: string }) => link.product_id),
+  )
 
   if (channel === 'ml' || channel === 'miyagi') {
     pairs = pairs.filter((p) => (channel === 'ml' ? mlLinkedIds.has(p.listing.id) : !mlLinkedIds.has(p.listing.id)))
@@ -158,6 +166,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     listings: page.map((p) => ({
       ...p.listing,
       channels: mlLinkedIds.has(p.listing.id) ? ['miyagi', 'ml'] : ['miyagi'],
+      // Marketplace-browse visibility toggle (catalog-management S2 · 2.2) —
+      // absent metadata key = today's behavior (always visible). Independent
+      // of `status`/pause: this only affects `/l` browse, never the seller's
+      // OWN storefront or this table itself.
+      miyagi_visible: (p.raw.metadata as Record<string, unknown> | undefined)?.miyagi_visible !== false,
     })),
     products: page.map((p) => p.raw),
     count,
