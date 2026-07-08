@@ -102,6 +102,33 @@ export interface SellerProductUpdateBody {
    */
   unit_cost_cents?: number | null
   /**
+   * Inventory mode for the targeted variant (`variant_id`, or the sole
+   * variant) — catalog-management epic, Sprint 2 · Story 2.1. Translates to
+   * the two native Medusa variant flags server-side (one place, not
+   * duplicated in the frontend): `tracked` → `manage_inventory:true,
+   * allow_backorder:false` (today's default physical-product behavior,
+   * always allowed regardless of the flag below); `unlimited` →
+   * `manage_inventory:false` (never blocks, no quantity tracked — never
+   * tears down an existing inventory item/reservations, just flips the
+   * flag); `backorder` → `manage_inventory:true, allow_backorder:true`
+   * ("sobre pedido" — Medusa's own `reserveInventoryStep`/
+   * `completeCartWorkflow` already honor `allow_backorder` natively, no
+   * custom checkout code needed). `unlimited`/`backorder` are gated behind
+   * `catalog.inventory_channels_enabled` (423 while OFF); `tracked` is
+   * always allowed.
+   */
+  inventory_mode?: 'tracked' | 'unlimited' | 'backorder'
+  /**
+   * Seller's estimated dispatch note for a backorder listing (e.g. '1-3d'),
+   * stored on PRODUCT metadata (`metadata.dispatch_estimate`) — distinct
+   * from `unit_cost_cents`'s variant-metadata scope since it's a per-listing,
+   * not per-variant, concept. Only meaningful when the listing's effective
+   * inventory mode (this request's `inventory_mode`, or the variant's current
+   * flags when `inventory_mode` is absent) is `backorder`; `null` clears it.
+   * Catalog-management epic, Sprint 2 · Story 2.1.
+   */
+  dispatch_estimate?: string | null
+  /**
    * Full replacement set of seller-owned collection ids this product should
    * belong to (own-shop-premium-presentation S2). Requires the `seller`
    * context param on `updateSellerProduct` (the seller-UI + MCP-agent call
@@ -262,11 +289,12 @@ export async function updateSellerProduct(
   // (re-fetch the price-grid for the new variant ids first).
   if (body.option_dimensions !== undefined
     && (body.price_cents !== undefined || body.quantity !== undefined || body.variant_tiers !== undefined
-      || body.unit_cost_cents !== undefined)) {
+      || body.unit_cost_cents !== undefined || body.inventory_mode !== undefined
+      || body.dispatch_estimate !== undefined)) {
     return {
       ok: false,
       status: 422,
-      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles y el costo se ajustan en una solicitud aparte con variant_id.',
+      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents/inventory_mode/dispatch_estimate en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles, el costo y el modo de inventario se ajustan en una solicitud aparte con variant_id.',
     }
   }
 
@@ -544,6 +572,61 @@ export async function updateSellerProduct(
     if (body.unit_cost_cents === null) delete nextMeta.unit_cost_cents
     else nextMeta.unit_cost_cents = body.unit_cost_cents
     await (productService as any).updateProductVariants(variant.id, { metadata: nextMeta })
+  }
+
+  // ── Inventory mode + dispatch estimate — catalog-management S2 · 2.1 ─────
+  // Handled together (not two independent blocks) so "dispatch_estimate only
+  // valid in backorder mode" can be validated against either the mode THIS
+  // request is setting, or — when only the estimate is sent — the variant's
+  // CURRENT flags.
+  if (body.inventory_mode !== undefined || body.dispatch_estimate !== undefined) {
+    if (body.inventory_mode !== undefined
+      && !['tracked', 'unlimited', 'backorder'].includes(body.inventory_mode)) {
+      return { ok: false, status: 422, message: 'inventory_mode inválido.' }
+    }
+    if (!(await isEnabled('catalog.inventory_channels_enabled'))
+      && body.inventory_mode !== undefined && body.inventory_mode !== 'tracked') {
+      return { ok: false, status: 423, message: 'Este modo de inventario aún no está disponible.' }
+    }
+
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['metadata', 'variants.id', 'variants.manage_inventory', 'variants.allow_backorder'],
+      filters: { id },
+    })
+    const productRow = rows?.[0] as any
+    const variants: any[] = productRow?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
+
+    const effectiveMode = body.inventory_mode
+      ?? (variant.allow_backorder ? 'backorder' : variant.manage_inventory ? 'tracked' : 'unlimited')
+    if (body.dispatch_estimate != null && effectiveMode !== 'backorder') {
+      return { ok: false, status: 422, message: 'dispatch_estimate solo aplica al modo sobre pedido.' }
+    }
+
+    if (body.inventory_mode !== undefined) {
+      const nextFlags = body.inventory_mode === 'tracked'
+        ? { manage_inventory: true, allow_backorder: false }
+        : body.inventory_mode === 'unlimited'
+          ? { manage_inventory: false, allow_backorder: false }
+          : { manage_inventory: true, allow_backorder: true }
+      await (productService as any).updateProductVariants(variant.id, nextFlags)
+    }
+
+    if (body.dispatch_estimate !== undefined) {
+      const currentMeta = ((productRow?.metadata ?? {}) as Record<string, unknown>)
+      const nextMeta: Record<string, unknown> = { ...currentMeta }
+      if (body.dispatch_estimate === null) delete nextMeta.dispatch_estimate
+      else nextMeta.dispatch_estimate = body.dispatch_estimate
+      await (productService as any).updateProducts(id, { metadata: nextMeta })
+    }
   }
 
   // ── Stock / restock (managed physical products) ──────────────────────────────

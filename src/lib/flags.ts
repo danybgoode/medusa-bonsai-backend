@@ -40,6 +40,7 @@ export type FlagKey =
   | 'ml.sync_paywall_enabled'
   | 'ops.profit_enabled'
   | 'ml.publish_enabled'
+  | 'catalog.inventory_channels_enabled'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -86,6 +87,22 @@ export type FlagKey =
  *    than through that frontend-gated route — a flag-read outage must not
  *    silently push a price to Mercado Libre, so this fails to "publish rail
  *    off" (no ML write), never to "always push."
+ *  - ENABLEMENT (`catalog.inventory_channels_enabled`): default `false`
+ *    (catalog-management epic, Sprint 2). Gates the whole S2 mutation surface:
+ *    the sin-límite/sobre-pedido inventory-mode write (`unlimited`/`backorder`
+ *    values only — `tracked` is always allowed, it's today's behavior), the
+ *    buyer-facing backorder-unblocks-the-buy-box behavior, the
+ *    `miyagi_visible` marketplace-browse filter + its toggle write, the
+ *    per-product `ml_enabled` toggle write, and the `ml_price_cents`
+ *    override write. Reading any of the new fields (`allow_backorder`,
+ *    `reserved_quantity`, `dispatch_estimate`, channel badges) is NEVER
+ *    gated — only mutating/acting on them is. A flag-read outage must not
+ *    silently unlock an unreviewed backorder-purchase path or an unreviewed
+ *    ML mass-unpublish/republish surface, so this fails to "today's exact
+ *    behavior" (tracked-only inventory, coupled ML publish state, no price
+ *    override). Flip ON only after Daniel's live money-path smoke (buy a
+ *    sin-límite + a sobre-pedido product end-to-end) and an ML toggle
+ *    round-trip on a real ML test listing both pass.
  *  - ENABLEMENT (`checkout.rental_pricing_enabled`): default `false`
  *    (rental-backend-line-item-pricing epic, Sprint 1). Gates the start-checkout
  *    rental branch that charges a server-recomputed nights × rate + deposit total.
@@ -102,6 +119,7 @@ const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'ml.sync_paywall_enabled': false,
   'ops.profit_enabled': false,
   'ml.publish_enabled': false,
+  'catalog.inventory_channels_enabled': false,
 }
 
 const TABLE = 'platform_flags'

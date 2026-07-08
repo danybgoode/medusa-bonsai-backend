@@ -53,7 +53,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const channel = req.query.channel as string | undefined // 'miyagi' | 'ml'
   const stock = req.query.stock as string | undefined // 'in_stock' | 'agotado' | 'unlimited'
   const sort = (req.query.sort as string | undefined) ?? 'recent'
-  const statusParam = req.query.status as string | undefined // 'activo'|'agotado'|'borrador'|'pausado'
+  const statusParam = req.query.status as string | undefined // 'activo'|'agotado'|'borrador'|'pausado'|'sobre_pedido'
 
   const { data: rows } = await remoteQuery.graph({
     entity: 'seller',
@@ -117,16 +117,30 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // are active, not just the currently-selected status. Mirrors the fine-split
   // rule in the frontend's lib/catalog-status.ts (`deriveCatalogStatus`) — kept
   // in lockstep by hand since the two repos don't share a module.
-  const statusCounts = { activo: 0, agotado: 0, borrador: 0, pausado: 0 }
+  // Hand-mirrors the frontend's deriveCatalogStatus() (lib/catalog-status.ts)
+  // — the two must stay in lockstep by hand, no shared package between repos
+  // (documented fragility, Sprint 1). Sprint 2 · Story 2.1 adds a 5th bucket:
+  // a backorder ("sobre pedido") listing is ALWAYS `sobre_pedido`, regardless
+  // of in_stock, checked before the agotado branch — the whole point of the
+  // story is that qty 0 stops meaning "vanished" for a backorder item.
+  const isSobrePedido = (l: { manage_inventory: boolean; allow_backorder: boolean }) =>
+    l.manage_inventory && l.allow_backorder
+  const statusCounts = { activo: 0, agotado: 0, borrador: 0, pausado: 0, sobre_pedido: 0 }
   for (const p of pairs) {
     if (p.listing.status === 'paused') statusCounts.pausado++
-    else if (p.listing.status === 'active') statusCounts[p.listing.in_stock ? 'activo' : 'agotado']++
-    else statusCounts.borrador++
+    else if (p.listing.status === 'active') {
+      if (isSobrePedido(p.listing)) statusCounts.sobre_pedido++
+      else statusCounts[p.listing.in_stock ? 'activo' : 'agotado']++
+    } else statusCounts.borrador++
   }
 
-  if (statusParam === 'activo') pairs = pairs.filter((p) => p.listing.status === 'active' && p.listing.in_stock)
-  else if (statusParam === 'agotado') pairs = pairs.filter((p) => p.listing.status === 'active' && !p.listing.in_stock)
-  else if (statusParam === 'borrador') pairs = pairs.filter((p) => p.listing.status === 'draft')
+  if (statusParam === 'activo') {
+    pairs = pairs.filter((p) => p.listing.status === 'active' && p.listing.in_stock && !isSobrePedido(p.listing))
+  } else if (statusParam === 'agotado') {
+    pairs = pairs.filter((p) => p.listing.status === 'active' && !p.listing.in_stock && !isSobrePedido(p.listing))
+  } else if (statusParam === 'sobre_pedido') {
+    pairs = pairs.filter((p) => p.listing.status === 'active' && isSobrePedido(p.listing))
+  } else if (statusParam === 'borrador') pairs = pairs.filter((p) => p.listing.status === 'draft')
   else if (statusParam === 'pausado') pairs = pairs.filter((p) => p.listing.status === 'paused')
 
   pairs.sort((a, b) => {
