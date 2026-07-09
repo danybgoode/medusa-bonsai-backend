@@ -172,6 +172,22 @@ export interface SellerProductUpdateBody {
    * category (if any) is always preserved untouched.
    */
   collection_ids?: string[]
+  /**
+   * Change the product's PLATFORM-taxonomy category, addressed by HANDLE
+   * (e.g. "autos", "moda" — the same `CATEGORIES` keys the catalog filter's
+   * `category` query param already uses, NOT an internal Medusa category id
+   * — this codebase addresses platform categories by handle everywhere else,
+   * so this field matches that convention) — catalog-management epic,
+   * Sprint 3 · Story 3.2's bulk "category" action. Distinct from
+   * `collection_ids` (the seller's own collections, unlimited per product):
+   * every product has at most ONE platform category. Validated against
+   * `splitCategories`'s own prefix convention — a seller-collection-
+   * namespaced handle (`${seller.slug}-…`) is rejected (422), so this can
+   * never be used to smuggle a collection into the single platform-category
+   * slot. Preserves the product's current collections untouched, mirroring
+   * how `collection_ids` alone preserves the current platform category.
+   */
+  category_handle?: string
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -347,10 +363,15 @@ export async function updateSellerProduct(
     baseUpdate.weight = Math.round(body.weight_grams)
   }
 
-  // ── Collection assignment (own-shop-premium-presentation S2) ─────────────
-  if (body.collection_ids !== undefined) {
+  // ── Collection assignment (own-shop-premium-presentation S2) + platform
+  // category change (catalog-management S3 · 3.2) — share one categories
+  // fetch/split since both resolve to the same `category_ids` field, and a
+  // bulk category-change action needs the CURRENT collections preserved
+  // exactly like the collection_ids-only path already preserves the current
+  // platform category.
+  if (body.collection_ids !== undefined || body.category_handle !== undefined) {
     if (!seller) {
-      return { ok: false, status: 422, message: 'collection_ids requiere contexto de vendedor.' }
+      return { ok: false, status: 422, message: 'collection_ids/category_handle requiere contexto de vendedor.' }
     }
     const { data: rows } = await remoteQuery.graph({
       entity: 'product',
@@ -358,23 +379,44 @@ export async function updateSellerProduct(
       filters: { id },
     })
     const currentCategories = ((rows?.[0] as any)?.categories ?? []) as Array<{ id: string; handle: string }>
-    const { platformCategory } = splitCategories(currentCategories, seller.slug)
-    const ownedIds = await resolveOwnedCollectionIds(scope, seller.id)
-    // A foreign/typo/deleted id is REJECTED outright (422), not silently
-    // dropped — a partial-success write here would let a seller believe a
-    // product was assigned to a collection when the id was actually
-    // discarded (cross-agent review catch, 2026-07-07).
-    const unknownIds = body.collection_ids.filter((cid) => !ownedIds.has(cid))
-    if (unknownIds.length > 0) {
-      return {
-        ok: false,
-        status: 422,
-        message: `Colección(es) no válida(s) o no pertenecen a tu tienda: ${unknownIds.join(', ')}`,
+    const { platformCategory, collections: currentCollections } = splitCategories(currentCategories, seller.slug)
+
+    let nextPlatformCategoryId: string | null = platformCategory?.id ?? null
+    if (body.category_handle !== undefined) {
+      if (body.category_handle.startsWith(`${seller.slug}-`)) {
+        return { ok: false, status: 422, message: 'category_handle debe ser una categoría de plataforma, no una colección propia.' }
       }
+      const { data: catRows } = await remoteQuery.graph({
+        entity: 'product_category',
+        fields: ['id', 'handle'],
+        filters: { handle: [body.category_handle] },
+      })
+      const cat = (catRows?.[0] as { id: string; handle: string } | undefined)
+      if (!cat) return { ok: false, status: 422, message: 'Categoría no encontrada.' }
+      nextPlatformCategoryId = cat.id
     }
+
+    let nextCollectionIds: string[] = currentCollections.map((c) => c.id)
+    if (body.collection_ids !== undefined) {
+      const ownedIds = await resolveOwnedCollectionIds(scope, seller.id)
+      // A foreign/typo/deleted id is REJECTED outright (422), not silently
+      // dropped — a partial-success write here would let a seller believe a
+      // product was assigned to a collection when the id was actually
+      // discarded (cross-agent review catch, 2026-07-07).
+      const unknownIds = body.collection_ids.filter((cid) => !ownedIds.has(cid))
+      if (unknownIds.length > 0) {
+        return {
+          ok: false,
+          status: 422,
+          message: `Colección(es) no válida(s) o no pertenecen a tu tienda: ${unknownIds.join(', ')}`,
+        }
+      }
+      nextCollectionIds = body.collection_ids
+    }
+
     baseUpdate.category_ids = [
-      ...(platformCategory ? [platformCategory.id] : []),
-      ...body.collection_ids,
+      ...(nextPlatformCategoryId ? [nextPlatformCategoryId] : []),
+      ...nextCollectionIds,
     ]
   }
 

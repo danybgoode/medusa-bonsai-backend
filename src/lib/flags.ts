@@ -41,6 +41,7 @@ export type FlagKey =
   | 'ops.profit_enabled'
   | 'ml.publish_enabled'
   | 'catalog.inventory_channels_enabled'
+  | 'catalog.bulk_enabled'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -109,6 +110,16 @@ export type FlagKey =
  *    A flag-read outage must never let a rental charge a computed multi-night total
  *    unsupervised, so it fails to OFF ⇒ the request 422s and the buyer is routed to
  *    today's coordination flow (AskSeller). Enabling is the deliberate action.
+ *  - KILL-SWITCH, FAIL-CLOSED (`catalog.bulk_enabled`): default `false`
+ *    (catalog-management epic, Sprint 3). Gates `bulk-stage`/`bulk-apply` and
+ *    the MCP `stage_bulk_action`/`apply_bulk_action` tools — a bulk action can
+ *    mutate hundreds of products in one call, so this follows `ml.sync_enabled`'s
+ *    fail-CLOSED shape (not the usual kill-switch default-`true`): the blast
+ *    radius of bulk mutations running unsupervised (a bad staged batch applying
+ *    itself, or an agent bulk-editing without the flag having been deliberately
+ *    flipped) is worse than the feature being off. Enabling is the deliberate
+ *    action, done only after Daniel's live smoke (50+ product bulk price change
+ *    incl. one deliberately invalid row, idempotent re-apply, MCP agent flow).
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
@@ -120,6 +131,7 @@ const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'ops.profit_enabled': false,
   'ml.publish_enabled': false,
   'catalog.inventory_channels_enabled': false,
+  'catalog.bulk_enabled': false,
 }
 
 const TABLE = 'platform_flags'
