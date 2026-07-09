@@ -27,3 +27,6 @@ build
 
 # Supabase CLI local cache (machine-specific linked-project state; never committed)
 supabase/.temp/
+
+# git worktrees cut for feature/fix branches (own checkouts, not repo content)
+.worktrees/
