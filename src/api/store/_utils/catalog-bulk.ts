@@ -27,6 +27,11 @@ export type BulkActionPayload =
   | { type: 'price_set'; price_cents: number }
   | { type: 'price_pct'; percent: number } // e.g. 10 = +10%, -10 = -10%
   | { type: 'pause_activate'; status: 'active' | 'paused' }
+  | { type: 'publish_channel'; channel: 'miyagi' | 'ml'; enabled: boolean }
+  | { type: 'category'; category_id: string; category_label: string }
+  | { type: 'collection_assign'; collection_ids: string[]; collection_labels: string[] }
+  | { type: 'inventory_mode'; mode: 'tracked' | 'unlimited' | 'backorder'; dispatch_estimate?: string | null }
+  | { type: 'delete' }
 
 export interface BulkDiffItem {
   id: string
@@ -132,6 +137,87 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
           status: action.status === 'paused' ? 'draft' : 'published',
           metadata: { paused: action.status === 'paused' },
         },
+        valid: true,
+        error: null,
+      }
+    }
+    case 'publish_channel': {
+      const currentlyOn = action.channel === 'ml' ? pair.mlLinked : (pair.raw.metadata as Record<string, unknown> | undefined)?.miyagi_visible !== false
+      if (currentlyOn === action.enabled) {
+        return {
+          ...base,
+          before: { [action.channel]: currentlyOn },
+          after: { [action.channel]: currentlyOn },
+          patch: null,
+          valid: false,
+          error: action.enabled ? 'Ya está publicado en este canal.' : 'Ya está oculto en este canal.',
+        }
+      }
+      return {
+        ...base,
+        before: { [action.channel]: currentlyOn },
+        after: { [action.channel]: action.enabled },
+        patch: action.channel === 'miyagi' ? { miyagi_visible: action.enabled } : { ml_enabled: action.enabled },
+        valid: true,
+        error: null,
+      }
+    }
+    case 'category': {
+      return {
+        ...base,
+        before: { category: listing.category ?? '—' },
+        after: { category: action.category_label },
+        patch: { category_id: action.category_id },
+        valid: true,
+        error: null,
+      }
+    }
+    case 'collection_assign': {
+      return {
+        ...base,
+        before: { collections: listing.collections.length > 0 ? listing.collections.join(', ') : '—' },
+        after: { collections: action.collection_labels.length > 0 ? action.collection_labels.join(', ') : '—' },
+        patch: { collection_ids: action.collection_ids },
+        valid: true,
+        error: null,
+      }
+    }
+    case 'inventory_mode': {
+      const modeLabel = { tracked: 'Rastreado', unlimited: 'Sin límite', backorder: 'Sobre pedido' }
+      const currentMode = !listing.manage_inventory ? 'unlimited' : listing.allow_backorder ? 'backorder' : 'tracked'
+      if (currentMode === action.mode) {
+        return {
+          ...base,
+          before: { modo: modeLabel[currentMode] },
+          after: { modo: modeLabel[currentMode] },
+          patch: null,
+          valid: false,
+          error: 'Ya está en este modo de inventario.',
+        }
+      }
+      return {
+        ...base,
+        before: { modo: modeLabel[currentMode] },
+        after: { modo: modeLabel[action.mode] },
+        patch: {
+          inventory_mode: action.mode,
+          ...(action.mode === 'backorder' && { dispatch_estimate: action.dispatch_estimate ?? null }),
+        },
+        valid: true,
+        error: null,
+      }
+    }
+    case 'delete': {
+      // No SellerProductUpdateBody patch — soft-delete has no field-patch
+      // shape (`productService.softDeleteProducts`, a different call
+      // entirely). `patch: null` here is a signal to the caller: this batch's
+      // apply step must route through the delete path, not the generic
+      // patch-apply one (see the Sprint 3 plan's frontend-orchestration note).
+      return {
+        ...base,
+        before: { status: listing.status },
+        after: { status: 'eliminado' },
+        patch: null,
         valid: true,
         error: null,
       }

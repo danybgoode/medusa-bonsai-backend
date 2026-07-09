@@ -35,6 +35,10 @@ export interface CatalogFilterParams {
 export interface CatalogPair {
   raw: any
   listing: ListingShape
+  /** Whether this product has a live (non-closed) Mercado Libre link — lets a
+   * bulk `publish_channel` action for the 'ml' channel show an accurate
+   * before-state (catalog-management S3 · 3.2). */
+  mlLinked: boolean
 }
 
 export type CatalogStatusCounts = {
@@ -108,7 +112,7 @@ export async function querySellerCatalog(
 
   let pairs: CatalogPair[] = (matchedProductsRaw ?? [])
     .filter((product: { metadata?: unknown }) => !isHiddenCatalogProduct(product.metadata))
-    .map((product) => ({ raw: product, listing: toListingShape(product, seller) }))
+    .map((product) => ({ raw: product, listing: toListingShape(product, seller), mlLinked: false }))
 
   const mlService: MercadolibreModuleService = scope.resolve(MERCADOLIBRE_MODULE)
   const mlLinks = await mlService.listProductMlLinks({ product_id: pairs.map((p) => p.listing.id) })
@@ -117,6 +121,7 @@ export async function querySellerCatalog(
       .filter((link: { metadata?: Record<string, unknown> | null }) => link.metadata?.ml_status !== 'closed')
       .map((link: { product_id: string }) => link.product_id),
   )
+  pairs = pairs.map((p) => ({ ...p, mlLinked: mlLinkedIds.has(p.listing.id) }))
 
   if (filters.channel === 'ml' || filters.channel === 'miyagi') {
     pairs = pairs.filter((p) => (filters.channel === 'ml' ? mlLinkedIds.has(p.listing.id) : !mlLinkedIds.has(p.listing.id)))
