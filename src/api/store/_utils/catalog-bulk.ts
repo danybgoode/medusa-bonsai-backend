@@ -28,7 +28,7 @@ export type BulkActionPayload =
   | { type: 'price_pct'; percent: number } // e.g. 10 = +10%, -10 = -10%
   | { type: 'pause_activate'; status: 'active' | 'paused' }
   | { type: 'publish_channel'; channel: 'miyagi' | 'ml'; enabled: boolean }
-  | { type: 'category'; category_id: string; category_label: string }
+  | { type: 'category'; category_handle: string; category_label: string }
   | { type: 'collection_assign'; collection_ids: string[]; collection_labels: string[] }
   | { type: 'inventory_mode'; mode: 'tracked' | 'unlimited' | 'backorder'; dispatch_estimate?: string | null }
   | { type: 'delete' }
@@ -167,7 +167,7 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
         ...base,
         before: { category: listing.category ?? '—' },
         after: { category: action.category_label },
-        patch: { category_id: action.category_id },
+        patch: { category_handle: action.category_handle },
         valid: true,
         error: null,
       }

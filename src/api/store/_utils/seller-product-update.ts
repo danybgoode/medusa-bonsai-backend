@@ -173,17 +173,21 @@ export interface SellerProductUpdateBody {
    */
   collection_ids?: string[]
   /**
-   * Change the product's PLATFORM-taxonomy category (e.g. "Autos", "Moda") —
-   * catalog-management epic, Sprint 3 · Story 3.2's bulk "category" action.
-   * Distinct from `collection_ids` (the seller's own collections, unlimited
-   * per product): every product has at most ONE platform category. Validated
-   * against `splitCategories`'s own prefix convention — a seller-collection-
+   * Change the product's PLATFORM-taxonomy category, addressed by HANDLE
+   * (e.g. "autos", "moda" — the same `CATEGORIES` keys the catalog filter's
+   * `category` query param already uses, NOT an internal Medusa category id
+   * — this codebase addresses platform categories by handle everywhere else,
+   * so this field matches that convention) — catalog-management epic,
+   * Sprint 3 · Story 3.2's bulk "category" action. Distinct from
+   * `collection_ids` (the seller's own collections, unlimited per product):
+   * every product has at most ONE platform category. Validated against
+   * `splitCategories`'s own prefix convention — a seller-collection-
    * namespaced handle (`${seller.slug}-…`) is rejected (422), so this can
    * never be used to smuggle a collection into the single platform-category
    * slot. Preserves the product's current collections untouched, mirroring
    * how `collection_ids` alone preserves the current platform category.
    */
-  category_id?: string
+  category_handle?: string
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -365,9 +369,9 @@ export async function updateSellerProduct(
   // bulk category-change action needs the CURRENT collections preserved
   // exactly like the collection_ids-only path already preserves the current
   // platform category.
-  if (body.collection_ids !== undefined || body.category_id !== undefined) {
+  if (body.collection_ids !== undefined || body.category_handle !== undefined) {
     if (!seller) {
-      return { ok: false, status: 422, message: 'collection_ids/category_id requiere contexto de vendedor.' }
+      return { ok: false, status: 422, message: 'collection_ids/category_handle requiere contexto de vendedor.' }
     }
     const { data: rows } = await remoteQuery.graph({
       entity: 'product',
@@ -378,17 +382,17 @@ export async function updateSellerProduct(
     const { platformCategory, collections: currentCollections } = splitCategories(currentCategories, seller.slug)
 
     let nextPlatformCategoryId: string | null = platformCategory?.id ?? null
-    if (body.category_id !== undefined) {
+    if (body.category_handle !== undefined) {
+      if (body.category_handle.startsWith(`${seller.slug}-`)) {
+        return { ok: false, status: 422, message: 'category_handle debe ser una categoría de plataforma, no una colección propia.' }
+      }
       const { data: catRows } = await remoteQuery.graph({
         entity: 'product_category',
         fields: ['id', 'handle'],
-        filters: { id: [body.category_id] },
+        filters: { handle: [body.category_handle] },
       })
       const cat = (catRows?.[0] as { id: string; handle: string } | undefined)
       if (!cat) return { ok: false, status: 422, message: 'Categoría no encontrada.' }
-      if (cat.handle.startsWith(`${seller.slug}-`)) {
-        return { ok: false, status: 422, message: 'category_id debe ser una categoría de plataforma, no una colección propia.' }
-      }
       nextPlatformCategoryId = cat.id
     }
 

@@ -113,10 +113,10 @@ describe('computeBulkDiff · publish_channel', () => {
 })
 
 describe('computeBulkDiff · category', () => {
-  it('produces a category_id patch', () => {
-    const result = computeBulkDiff(pair(), { type: 'category', category_id: 'cat_autos', category_label: 'Autos' })
+  it('produces a category_handle patch', () => {
+    const result = computeBulkDiff(pair(), { type: 'category', category_handle: 'autos', category_label: 'Autos' })
     expect(result.valid).toBe(true)
-    expect(result.patch).toEqual({ category_id: 'cat_autos' })
+    expect(result.patch).toEqual({ category_handle: 'autos' })
     expect(result.after).toEqual({ category: 'Autos' })
   })
 })
