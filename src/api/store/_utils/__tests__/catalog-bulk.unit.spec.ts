@@ -1,4 +1,4 @@
-import { computeBulkDiff } from '../catalog-bulk'
+import { computeBulkDiff, rejectOrchestrationOnlyPatch } from '../catalog-bulk'
 import type { CatalogPair } from '../seller-catalog-query'
 
 function pair(
@@ -66,6 +66,20 @@ describe('computeBulkDiff · price_pct', () => {
 
   it('rejects when the resulting price would be $0 or less', () => {
     const result = computeBulkDiff(pair({ price_cents: 100 }), { type: 'price_pct', percent: -100 })
+    expect(result.valid).toBe(false)
+  })
+
+  it('rejects a non-finite percent (NaN/Infinity) rather than producing a NaN patch', () => {
+    const nan = computeBulkDiff(pair({ price_cents: 10000 }), { type: 'price_pct', percent: NaN })
+    expect(nan.valid).toBe(false)
+    expect(nan.patch).toBeNull()
+    const inf = computeBulkDiff(pair({ price_cents: 10000 }), { type: 'price_pct', percent: Infinity })
+    expect(inf.valid).toBe(false)
+    expect(inf.patch).toBeNull()
+  })
+
+  it('rejects percent: 0 (a true no-op, matches the "distinct from 0" UI validation)', () => {
+    const result = computeBulkDiff(pair({ price_cents: 10000 }), { type: 'price_pct', percent: 0 })
     expect(result.valid).toBe(false)
   })
 })
@@ -160,5 +174,31 @@ describe('computeBulkDiff · delete', () => {
     expect(result.valid).toBe(true)
     expect(result.patch).toBeNull()
     expect(result.after).toEqual({ status: 'eliminado' })
+  })
+})
+
+describe('rejectOrchestrationOnlyPatch', () => {
+  it('rejects a null patch (delete signal)', () => {
+    expect(rejectOrchestrationOnlyPatch(null)).not.toBeNull()
+  })
+
+  it('rejects a patch with ml_enabled set (ML-channel-toggle signal — needs toggleMlChannel)', () => {
+    expect(rejectOrchestrationOnlyPatch({ ml_enabled: true })).not.toBeNull()
+    expect(rejectOrchestrationOnlyPatch({ ml_enabled: false })).not.toBeNull()
+  })
+
+  it('rejects a patch with metadata.paused set (pause_activate signal — needs setListingStatus)', () => {
+    expect(rejectOrchestrationOnlyPatch({ status: 'draft', metadata: { paused: true } })).not.toBeNull()
+  })
+
+  it('allows a plain field-patch (price/category/collection/inventory-mode) through', () => {
+    expect(rejectOrchestrationOnlyPatch({ price_cents: 5000 })).toBeNull()
+    expect(rejectOrchestrationOnlyPatch({ category_handle: 'autos' })).toBeNull()
+    expect(rejectOrchestrationOnlyPatch({ collection_ids: ['col_1'] })).toBeNull()
+    expect(rejectOrchestrationOnlyPatch({ inventory_mode: 'unlimited' })).toBeNull()
+  })
+
+  it('allows a metadata patch that is NOT the paused signal (e.g. custom_fields)', () => {
+    expect(rejectOrchestrationOnlyPatch({ metadata: { custom_fields: {} } })).toBeNull()
   })
 })

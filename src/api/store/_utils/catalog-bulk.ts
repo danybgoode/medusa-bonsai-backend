@@ -80,6 +80,22 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
       }
     }
     case 'price_pct': {
+      // Defense in depth: a malformed/non-numeric `percent` (e.g. sent
+      // directly to bulk-stage, bypassing the frontend's own Number.isFinite
+      // check) must never produce a NaN patch — NaN fails every `<= 0`
+      // comparison (always false), so a naive floor check alone would let it
+      // through and `updateSellerProduct` has no NaN guard of its own on
+      // `price_cents` (cross-agent review catch).
+      if (!Number.isFinite(action.percent) || action.percent === 0) {
+        return {
+          ...base,
+          before: { price_cents: listing.price_cents },
+          after: {},
+          patch: null,
+          valid: false,
+          error: 'Porcentaje inválido.',
+        }
+      }
       if (listing.price_cents === null) {
         return {
           ...base,
@@ -91,7 +107,7 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
         }
       }
       const nextCents = Math.round(listing.price_cents * (1 + action.percent / 100))
-      if (nextCents <= 0) {
+      if (!Number.isFinite(nextCents) || nextCents <= 0) {
         return {
           ...base,
           before: { price: centsToDisplay(listing.price_cents) },
@@ -232,4 +248,32 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
         error: 'Acción no reconocida.',
       }
   }
+}
+
+/**
+ * Guard for the generic `bulk-apply` routes (both the Clerk-authed store
+ * route and the internal agent route) — rejects a patch shaped like one of
+ * the THREE action types that need frontend-only orchestration
+ * (`pause_activate`'s `metadata.paused` write, `publish_channel`'s
+ * `ml_enabled` write, `delete`'s null patch) instead of silently applying
+ * it. Without this, any direct caller of the generic apply endpoint
+ * (bypassing the frontend's `lib/catalog-bulk.ts` routing that always sends
+ * these three through `setListingStatus()`/`toggleMlChannel()`/
+ * `deleteListing()` instead) could reintroduce exactly the bug those
+ * extractions exist to prevent — a pause that never syncs the Supabase
+ * mirror or closes the linked ML item, or an ML toggle that flips the
+ * stored flag without ever calling Mercado Libre (cross-agent review catch).
+ * Returns null when the patch is safe to apply generically.
+ */
+export function rejectOrchestrationOnlyPatch(patch: SellerProductUpdateBody | null): string | null {
+  if (patch === null) {
+    return 'Esta acción requiere el flujo de eliminación (delete) — no se puede aplicar como patch genérico.'
+  }
+  if (patch.ml_enabled !== undefined) {
+    return 'El cambio de canal Mercado Libre requiere el flujo de publicación dedicado — no se puede aplicar como patch genérico.'
+  }
+  if (patch.metadata && typeof patch.metadata === 'object' && 'paused' in patch.metadata) {
+    return 'Pausar/activar requiere el flujo de estado de anuncio dedicado — no se puede aplicar como patch genérico.'
+  }
+  return null
 }

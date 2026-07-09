@@ -3,11 +3,11 @@ import { SELLER_MODULE } from '../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../../_utils/clerk-auth'
 import { updateSellerProduct, type SellerProductUpdateBody } from '../../../../_utils/seller-product-update'
-import { MAX_BULK_ITEMS } from '../../../../_utils/catalog-bulk'
+import { MAX_BULK_ITEMS, rejectOrchestrationOnlyPatch } from '../../../../_utils/catalog-bulk'
 import { isEnabled } from '../../../../../../lib/flags'
 
 interface BulkApplyBody {
-  items: Array<{ id: string; patch: SellerProductUpdateBody }>
+  items: Array<{ id: string; patch: SellerProductUpdateBody | null }>
 }
 
 export type BulkApplyItemResult = { id: string; ok: boolean; error?: string }
@@ -51,8 +51,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const results: BulkApplyItemResult[] = []
   for (const item of body.items) {
+    const rejectReason = rejectOrchestrationOnlyPatch(item.patch)
+    if (rejectReason) {
+      results.push({ id: item.id, ok: false, error: rejectReason })
+      continue
+    }
     try {
-      const result = await updateSellerProduct(req.scope, item.id, item.patch, seller)
+      // rejectOrchestrationOnlyPatch already refused a null patch above (the
+      // `continue`), so item.patch is guaranteed non-null here.
+      const result = await updateSellerProduct(req.scope, item.id, item.patch!, seller)
       results.push(result.ok ? { id: item.id, ok: true } : { id: item.id, ok: false, error: result.message })
     } catch (e) {
       results.push({ id: item.id, ok: false, error: e instanceof Error ? e.message : 'Error inesperado.' })

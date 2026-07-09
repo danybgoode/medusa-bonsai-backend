@@ -39,8 +39,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(423).json({ message: 'Esta función aún no está disponible.' })
   }
 
-  const body = req.body as BulkStageBody
-  if (!body.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
+  const body = req.body as BulkStageBody | undefined
+  if (!body?.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
   if (!body?.action?.type) return res.status(422).json({ message: 'action es requerido.' })
   if (!body.ids?.length && !body.filter) {
     return res.status(422).json({ message: 'Debes indicar ids o un filtro.' })

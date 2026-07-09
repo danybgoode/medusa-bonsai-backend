@@ -22,7 +22,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { updateSellerProduct, type SellerProductUpdateBody } from '../../../store/_utils/seller-product-update'
-import { MAX_BULK_ITEMS } from '../../../store/_utils/catalog-bulk'
+import { MAX_BULK_ITEMS, rejectOrchestrationOnlyPatch } from '../../../store/_utils/catalog-bulk'
 import { isEnabled } from '../../../../lib/flags'
 
 function unauthorized(req: MedusaRequest): boolean {
@@ -33,7 +33,7 @@ function unauthorized(req: MedusaRequest): boolean {
 
 interface BulkApplyBody {
   seller_slug?: string
-  items: Array<{ id: string; patch: SellerProductUpdateBody }>
+  items?: Array<{ id: string; patch: SellerProductUpdateBody | null }>
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
@@ -43,8 +43,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(423).json({ message: 'Esta función aún no está disponible.' })
   }
 
-  const body = req.body as BulkApplyBody
-  if (!body.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
+  const body = req.body as BulkApplyBody | undefined
+  if (!body?.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
   if (!Array.isArray(body.items) || body.items.length === 0) {
     return res.status(422).json({ message: 'items es requerido.' })
   }
@@ -58,8 +58,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const results: Array<{ id: string; ok: boolean; error?: string }> = []
   for (const item of body.items) {
+    const rejectReason = rejectOrchestrationOnlyPatch(item.patch)
+    if (rejectReason) {
+      results.push({ id: item.id, ok: false, error: rejectReason })
+      continue
+    }
     try {
-      const result = await updateSellerProduct(req.scope, item.id, item.patch, seller)
+      // rejectOrchestrationOnlyPatch already refused a null patch above (the
+      // `continue`), so item.patch is guaranteed non-null here.
+      const result = await updateSellerProduct(req.scope, item.id, item.patch!, seller)
       results.push(result.ok ? { id: item.id, ok: true } : { id: item.id, ok: false, error: result.message })
     } catch (e) {
       results.push({ id: item.id, ok: false, error: e instanceof Error ? e.message : 'Error inesperado.' })
