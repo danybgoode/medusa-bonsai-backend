@@ -9,9 +9,36 @@
  *
  * Lazy singleton + missing-config stub mirror the frontend `lib/supabase.ts`, so a
  * build/runtime without the env vars degrades to "no rows" instead of crashing.
+ *
+ * `realtime.transport` stub: `createClient()` unconditionally constructs a
+ * `RealtimeClient` (a `SupabaseClient` constructor side effect with no opt-out),
+ * which looks up a native `WebSocket` global if no `transport` is given —
+ * absent on this Dockerfile's `node:20-slim` (native WebSocket landed in
+ * Node 22), so every call THROWS at client-construction time, caught by the
+ * lazy singleton's caller-side try/catch as "no rows" everywhere this client
+ * is used — including `src/lib/flags.ts`'s `platform_flags` read, which
+ * silently fell back to `DEFAULT_FLAGS` on every single request regardless
+ * of the live DB value (found live via the catalog-management epic's Sprint
+ * 3 smoke test — `catalog.bulk_enabled` stayed 423 even confirmed `true` in
+ * Supabase). This client never calls `.channel()`/`.subscribe()` anywhere in
+ * this codebase (grepped), so the realtime socket is never actually opened —
+ * a no-op transport stub satisfies the constructor's type + skips the
+ * WebSocket-constructor lookup entirely, with zero loss of real capability.
  */
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient, type WebSocketLikeConstructor } from '@supabase/supabase-js'
+
+/** Never actually connects (this client is select()-only) — exists solely
+ * to satisfy `RealtimeClientOptions.transport`'s type and skip the native-
+ * WebSocket lookup that throws on Node < 22. Exported so a unit test can
+ * assert this guard fires — if a future change ever adds `.channel()`/
+ * `.subscribe()` to this client, it should fail loudly here rather than
+ * silently no-op against a socket that's never actually open. */
+export class NoopWebSocketTransport {
+  constructor() {
+    throw new Error('NoopWebSocketTransport should never be instantiated — supabaseRead never opens a realtime channel.')
+  }
+}
 
 let _db: SupabaseClient | null = null
 
@@ -42,7 +69,10 @@ function getSupabase(): SupabaseClient {
     _db = { from: () => makeMissingConfigQuery() } as unknown as SupabaseClient
     return _db
   }
-  _db = createClient(url, key, { auth: { persistSession: false } })
+  _db = createClient(url, key, {
+    auth: { persistSession: false },
+    realtime: { transport: NoopWebSocketTransport as unknown as WebSocketLikeConstructor },
+  })
   return _db
 }
 
