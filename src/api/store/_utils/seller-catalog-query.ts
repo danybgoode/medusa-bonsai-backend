@@ -66,6 +66,21 @@ const isSobrePedido = (l: { manage_inventory: boolean; allow_backorder: boolean 
  * can enforce it per item too. `updateSellerProduct()` itself does NOT check
  * ownership (its own doc comment: "Callers are responsible for
  * authentication + ownership BEFORE calling this") — every call site must.
+ *
+ * Filters out null/undefined array entries before mapping: `remoteQuery`'s
+ * `seller → products.id` link can return a sparse array slot (not just omit
+ * the row) once a linked product's `deleted_at` is set by
+ * `productService.softDeleteProducts()` — the module link row itself
+ * survives the soft-delete, but the joined product entity resolves to
+ * null/undefined for that slot. A bare `.map((p) => p.id)` then throws
+ * "Cannot read properties of undefined (reading 'id')" on the very next
+ * catalog fetch after ANY soft-delete — a real, live production incident
+ * found via the catalog-management epic's Sprint 3 smoke test (this exact
+ * `.map()` shape pre-dates Sprint 3 as inline code in the S1 GET route; the
+ * extraction here didn't introduce the bug, just gave it one call site to
+ * fix instead of several. Confirmed identical latent shape in the
+ * single-row `resolveOwnership()` at `sellers/me/products/[id]/route.ts`
+ * and `internal/seller-products/[id]/route.ts` — same fix owed there).
  */
 export async function resolveSellerProductIds(scope: any, sellerId: string): Promise<Set<string>> {
   const remoteQuery = scope.resolve('remoteQuery')
@@ -74,8 +89,8 @@ export async function resolveSellerProductIds(scope: any, sellerId: string): Pro
     fields: ['id', 'products.id'],
     filters: { id: sellerId },
   })
-  const ids = (((rows?.[0] as { products?: Array<{ id: string }> } | undefined)?.products ?? [])
-    .map((product) => product.id))
+  const products = (rows?.[0] as { products?: Array<{ id: string } | null | undefined> } | undefined)?.products ?? []
+  const ids = products.filter((product): product is { id: string } => product != null).map((product) => product.id)
   return new Set(ids)
 }
 

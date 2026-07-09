@@ -18,6 +18,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { updateSellerProduct, type SellerProductUpdateBody } from '../../../store/_utils/seller-product-update'
+import { resolveSellerProductIds } from '../../../store/_utils/seller-catalog-query'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -37,15 +38,12 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const [seller] = await sellerService.listSellers({ slug } as never, { take: 1 })
   if (!seller) return res.status(404).json({ message: 'Seller not found' })
 
-  // Defense in depth: confirm the product belongs to this seller.
-  const remoteQuery = req.scope.resolve('remoteQuery')
-  const { data: rows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: seller.id },
-  })
-  const productIds = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id)
-  if (!productIds.includes(id)) {
+  // Defense in depth: confirm the product belongs to this seller. Shares
+  // resolveSellerProductIds() with the store-facing ownership check (see its
+  // doc comment) — guards against the same null-array-slot crash right after
+  // a soft-delete that broke this route's inline query pre-fix.
+  const productIds = await resolveSellerProductIds(req.scope, seller.id)
+  if (!productIds.has(id)) {
     return res.status(403).json({ message: 'Product not found in this shop' })
   }
 
