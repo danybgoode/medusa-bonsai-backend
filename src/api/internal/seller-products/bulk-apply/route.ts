@@ -23,6 +23,7 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { updateSellerProduct, type SellerProductUpdateBody } from '../../../store/_utils/seller-product-update'
 import { MAX_BULK_ITEMS, rejectOrchestrationOnlyPatch } from '../../../store/_utils/catalog-bulk'
+import { resolveSellerProductIds } from '../../../store/_utils/seller-catalog-query'
 import { isEnabled } from '../../../../lib/flags'
 
 function unauthorized(req: MedusaRequest): boolean {
@@ -56,8 +57,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const [seller] = await sellerService.listSellers({ slug: body.seller_slug } as never, { take: 1 })
   if (!seller) return res.status(404).json({ message: 'Seller not found' })
 
+  // Ownership: updateSellerProduct() does NOT check this itself — every
+  // single-row route (including this family's own sibling PATCH) already
+  // does, but this bulk route originally didn't, letting any holder of
+  // MEDUSA_INTERNAL_SECRET apply a patch to ANY product id + any seller_slug
+  // combination, not just that seller's own products (cross-agent review
+  // catch — a real cross-tenant write, not just a theoretical one, since the
+  // internal secret is shared across all sellers).
+  const ownedIds = await resolveSellerProductIds(req.scope, seller.id)
+
   const results: Array<{ id: string; ok: boolean; error?: string }> = []
   for (const item of body.items) {
+    if (!ownedIds.has(item.id)) {
+      results.push({ id: item.id, ok: false, error: 'Product not found in this shop' })
+      continue
+    }
     const rejectReason = rejectOrchestrationOnlyPatch(item.patch)
     if (rejectReason) {
       results.push({ id: item.id, ok: false, error: rejectReason })

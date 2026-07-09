@@ -4,6 +4,7 @@ import SellerModuleService from '../../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../../_utils/clerk-auth'
 import { updateSellerProduct, type SellerProductUpdateBody } from '../../../../_utils/seller-product-update'
 import { MAX_BULK_ITEMS, rejectOrchestrationOnlyPatch } from '../../../../_utils/catalog-bulk'
+import { resolveSellerProductIds } from '../../../../_utils/seller-catalog-query'
 import { isEnabled } from '../../../../../../lib/flags'
 
 interface BulkApplyBody {
@@ -49,8 +50,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(422).json({ message: `El máximo por lote es ${MAX_BULK_ITEMS}.` })
   }
 
+  // Ownership: updateSellerProduct() does NOT check this itself (its own doc
+  // comment says callers must) — every single-row route already does, but
+  // this bulk route originally didn't, letting a caller apply a patch to ANY
+  // product id, not just this seller's own (cross-agent review catch, a
+  // real IDOR the first review pass missed since it only checked bulk-stage,
+  // which IS correctly scoped via querySellerCatalog).
+  const ownedIds = await resolveSellerProductIds(req.scope, seller.id)
+
   const results: BulkApplyItemResult[] = []
   for (const item of body.items) {
+    if (!ownedIds.has(item.id)) {
+      results.push({ id: item.id, ok: false, error: 'Product not found in your shop' })
+      continue
+    }
     const rejectReason = rejectOrchestrationOnlyPatch(item.patch)
     if (rejectReason) {
       results.push({ id: item.id, ok: false, error: rejectReason })

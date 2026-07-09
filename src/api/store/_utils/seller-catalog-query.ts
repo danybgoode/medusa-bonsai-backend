@@ -59,21 +59,34 @@ export interface CatalogQueryResult {
 const isSobrePedido = (l: { manage_inventory: boolean; allow_backorder: boolean }) =>
   l.manage_inventory && l.allow_backorder
 
+/**
+ * The seller's own product ids — the SAME ownership check the single-row
+ * routes' `resolveOwnership()` runs (`sellers/me/products/[id]/route.ts`,
+ * `internal/seller-products/[id]/route.ts`), extracted so a bulk-apply route
+ * can enforce it per item too. `updateSellerProduct()` itself does NOT check
+ * ownership (its own doc comment: "Callers are responsible for
+ * authentication + ownership BEFORE calling this") — every call site must.
+ */
+export async function resolveSellerProductIds(scope: any, sellerId: string): Promise<Set<string>> {
+  const remoteQuery = scope.resolve('remoteQuery')
+  const { data: rows } = await remoteQuery.graph({
+    entity: 'seller',
+    fields: ['id', 'products.id'],
+    filters: { id: sellerId },
+  })
+  const ids = (((rows?.[0] as { products?: Array<{ id: string }> } | undefined)?.products ?? [])
+    .map((product) => product.id))
+  return new Set(ids)
+}
+
 export async function querySellerCatalog(
   scope: any,
   seller: { id: string; slug?: string },
   filters: CatalogFilterParams,
 ): Promise<CatalogQueryResult> {
   const remoteQuery = scope.resolve('remoteQuery')
-
-  const { data: rows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: seller.id },
-  })
-
-  const linkedIds = (((rows?.[0] as { products?: Array<{ id: string }> } | undefined)?.products ?? [])
-    .map((product) => product.id))
+  const linkedIdsSet = await resolveSellerProductIds(scope, seller.id)
+  const linkedIds = [...linkedIdsSet]
 
   if (linkedIds.length === 0) {
     return { pairs: [], mlLinkedIds: new Set(), statusCounts: { activo: 0, agotado: 0, borrador: 0, pausado: 0, sobre_pedido: 0 } }
@@ -82,8 +95,7 @@ export async function querySellerCatalog(
   let idFilter: string[]
   const dbFilters: Record<string, unknown> = {}
   if (filters.ids && filters.ids.length > 0) {
-    const linkedSet = new Set(linkedIds)
-    idFilter = filters.ids.filter((id) => linkedSet.has(id))
+    idFilter = filters.ids.filter((id) => linkedIdsSet.has(id))
     if (idFilter.length === 0) {
       return { pairs: [], mlLinkedIds: new Set(), statusCounts: { activo: 0, agotado: 0, borrador: 0, pausado: 0, sobre_pedido: 0 } }
     }
