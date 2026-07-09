@@ -3,6 +3,7 @@ import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { toListingShape, isFeaturedPin } from '../_utils/listing'
 import { isHiddenCatalogProduct } from '../_utils/support'
+import { isEnabled } from '../../../lib/flags'
 import {
   carMake, carYear, carTransmission, carFuel,
   matchesBrand, matchesModel, matchesYearFrom, matchesYearTo, matchesKmFrom, matchesKmTo,
@@ -70,6 +71,17 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // ── Step 4: Apply filters ─────────────────────────────────────────────────
   // Print-ad placements and support primitives are sold through dedicated flows only.
   listings = listings.filter((l: any) => !(l.metadata?.is_print_placement) && !isHiddenCatalogProduct(l.metadata))
+  // Marketplace-browse visibility toggle (catalog-management S2 · 2.2) — a
+  // NEW, narrowly-scoped filter, deliberately NOT folded into
+  // `isHiddenCatalogProduct` (that deriver's contract is "hidden everywhere,"
+  // reused by the PDP route and the seller's own storefront route too; this
+  // toggle must affect ONLY marketplace browse — a shop's own storefront
+  // always shows its own active products regardless). Gated: while the flag
+  // is OFF, `miyagi_visible` is never checked (today's behavior — nothing is
+  // ever filtered on it, since the write path can't set it false either).
+  if (await isEnabled('catalog.inventory_channels_enabled')) {
+    listings = listings.filter((l: any) => l.metadata?.miyagi_visible !== false)
+  }
   if (q.q) {
     const needle = q.q.toLowerCase()
     listings = listings.filter((l: any) =>

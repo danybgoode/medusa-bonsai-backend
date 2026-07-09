@@ -44,11 +44,16 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     filters: { id },
   })
   const variants = (((rows?.[0] as any)?.variants ?? []) as any[]).map((v) => {
-    const cost = (v?.metadata as Record<string, unknown> | null)?.unit_cost_cents
+    const meta = (v?.metadata as Record<string, unknown> | null)
+    const cost = meta?.unit_cost_cents
+    const mlPrice = meta?.ml_price_cents
     return {
       id: v.id as string,
       title: (v.title as string | null) ?? null,
       unit_cost_cents: typeof cost === 'number' && Number.isInteger(cost) && cost >= 0 ? cost : null,
+      // ML price override (catalog-management S2 · 2.3) — seller-private, same
+      // shape/validation as unit_cost_cents.
+      ml_price_cents: typeof mlPrice === 'number' && Number.isInteger(mlPrice) && mlPrice >= 0 ? mlPrice : null,
     }
   })
   res.json({ product_id: id, variants })

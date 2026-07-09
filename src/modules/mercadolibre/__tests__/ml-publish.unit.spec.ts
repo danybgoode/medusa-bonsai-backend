@@ -64,6 +64,25 @@ describe('buildMlItemPayload', () => {
       buildMlItemPayload(makeInput(), { categoryId: 'C', listingTypeId: 'gold_special' }).listing_type_id,
     ).toBe('gold_special')
   })
+
+  // catalog-management epic, Sprint 2 · Story 2.3 — the ML price override.
+  describe('ml_price_cents override (Story 2.3)', () => {
+    it('absent override → falls back to price_cents exactly (today\'s pre-2.3 behavior, unchanged)', () => {
+      expect(buildMlItemPayload(makeInput(), { categoryId: 'C' }).price).toBe(1850)
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: undefined }), { categoryId: 'C' }).price).toBe(1850)
+    })
+    it('null override → falls back to price_cents (explicit "cleared" state)', () => {
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: null }), { categoryId: 'C' }).price).toBe(1850)
+    })
+    it('present override → takes precedence over price_cents', () => {
+      // 220000 centavos = $2,200.00 — higher than the $1,850 Miyagi price,
+      // covering ML's fees without raising the Miyagi-channel price.
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: 220000 }), { categoryId: 'C' }).price).toBe(2200)
+    })
+    it('override of 0 is a real, distinct value from "absent" — still overrides (not treated as falsy-absent)', () => {
+      expect(buildMlItemPayload(makeInput({ ml_price_cents: 0, price_cents: 185000 }), { categoryId: 'C' }).price).toBe(0)
+    })
+  })
 })
 
 describe('decidePublishAction', () => {
@@ -80,6 +99,25 @@ describe('decidePublishAction', () => {
   })
   it('linked + ML closed + Miyagi active → relist', () => {
     expect(decidePublishAction({ linked: true, mlStatus: 'closed', productPublished: true })).toBe('relist')
+  })
+
+  // catalog-management epic, Sprint 2 · Story 2.2 — the new per-product
+  // mlEnabled toggle, independent of Miyagi's own publish state.
+  it('not linked + mlEnabled:false → noop (toggled off before ever publishing, not an error)', () => {
+    expect(decidePublishAction({ linked: false, productPublished: true, mlEnabled: false })).toBe('noop')
+    expect(decidePublishAction({ linked: false, productPublished: false, mlEnabled: false })).toBe('noop')
+  })
+  it('linked + Miyagi active + mlEnabled:false → close (the toggle alone can close it)', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'active', productPublished: true, mlEnabled: false })).toBe('close')
+  })
+  it('linked + Miyagi PAUSED (productPublished:false) always force-closes regardless of mlEnabled:true', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'active', productPublished: false, mlEnabled: true })).toBe('close')
+  })
+  it('linked + already closed + mlEnabled:false stays noop (not relist)', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'closed', productPublished: true, mlEnabled: false })).toBe('noop')
+  })
+  it('linked + Miyagi active + mlEnabled:true (explicit) + ML closed → relist, same as mlEnabled omitted', () => {
+    expect(decidePublishAction({ linked: true, mlStatus: 'closed', productPublished: true, mlEnabled: true })).toBe('relist')
   })
 })
 

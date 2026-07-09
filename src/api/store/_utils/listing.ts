@@ -44,8 +44,29 @@ export interface ListingShape {
   manage_inventory: boolean
   /** Available units (stocked − reserved) for managed items; null = unlimited. */
   available_quantity: number | null
+  /**
+   * Reserved units (in-flight orders) for managed items; null = unlimited.
+   * Raw, never clamped — catalog-management epic, Sprint 2 · Story 2.1
+   * ("tracked … available vs reservado").
+   */
+  reserved_quantity: number | null
   /** False only when a managed item has run out (reserved/sold). */
   in_stock: boolean
+  /**
+   * Native Medusa "sobre pedido" flag — orders past zero stock are still
+   * accepted (Medusa's own `reserveInventoryStep`/`completeCartWorkflow`
+   * already honor this natively, no custom checkout code needed). Only
+   * meaningful alongside `manage_inventory: true` (catalog-management S2 ·
+   * Story 2.1).
+   */
+  allow_backorder: boolean
+  /**
+   * Seller's estimated dispatch note for a backorder ("sobre pedido") listing
+   * — e.g. '1-3d'. Per-listing, distinct from the shop-wide "Tiempo de
+   * procesamiento" setting (`marketplace_shops.metadata.settings.orders`);
+   * null when not in backorder mode or unset (catalog-management S2 · 2.1).
+   */
+  dispatch_estimate: string | null
   created_at: string
   shop: SellerShape | null
 }
@@ -159,7 +180,9 @@ export function toListingShape(product: any, seller?: any): ListingShape {
   // items (services, autos pre-backfill, etc.) have no inventory item →
   // treated as unlimited / in stock.
   const manageInventory = variants.some((v: any) => !!v?.manage_inventory)
+  const allowBackorder = variants.some((v: any) => !!v?.allow_backorder)
   let availableQuantity: number | null = null
+  let reservedQuantity: number | null = null
   if (manageInventory) {
     const levels: any[] = variants
       .filter((v: any) => v?.manage_inventory)
@@ -170,7 +193,15 @@ export function toListingShape(product: any, seller?: any): ListingShape {
         sum + (Number(lvl?.stocked_quantity ?? 0) - Number(lvl?.reserved_quantity ?? 0)),
       0,
     )
+    reservedQuantity = levels.reduce(
+      (sum: number, lvl: any) => sum + Number(lvl?.reserved_quantity ?? 0),
+      0,
+    )
   }
+  // `in_stock`'s meaning is unchanged by backorder support — it's still the
+  // raw stocked-minus-reserved signal. A backorder ("sobre pedido") listing
+  // that hits in_stock:false is NOT hidden/blocked; that combination is what
+  // the frontend deriver reads as "sobre pedido," never "agotado" (S2 · 2.1).
   const inStock = !manageInventory || (availableQuantity ?? 0) > 0
 
   const { platformCategory, collections } = splitCategories(product.categories, seller?.slug)
@@ -214,7 +245,10 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     views: (meta.views as number) ?? 0,
     manage_inventory: manageInventory,
     available_quantity: availableQuantity,
+    reserved_quantity: reservedQuantity,
     in_stock: inStock,
+    allow_backorder: allowBackorder,
+    dispatch_estimate: (meta.dispatch_estimate as string) ?? null,
     created_at: product.created_at as string,
     shop: seller ? toSellerShape(seller) : null,
   }
@@ -222,14 +256,16 @@ export function toListingShape(product: any, seller?: any): ListingShape {
 
 /**
  * Seller-private variant-metadata keys that must never reach a PUBLIC read.
- * `unit_cost_cents` is the seller's COGS (profit-analyzer S1 · US-1) — only
- * the Clerk-authed seller-scoped GET may return it. Any route that serializes
- * RAW variants (rather than through `toListingShape`, which never emits
- * variant metadata) must pass its products through
+ * `unit_cost_cents` is the seller's COGS (profit-analyzer S1 · US-1);
+ * `ml_price_cents` is the optional Mercado Libre price override
+ * (catalog-management epic, Sprint 2 · Story 2.3) — only the Clerk-authed
+ * seller-scoped GET and the internal ML-publish route may read it. Any route
+ * that serializes RAW variants (rather than through `toListingShape`, which
+ * never emits variant metadata) must pass its products through
  * `stripPrivateVariantMetadata` before responding. Add future private keys
  * here, not at call sites.
  */
-const PRIVATE_VARIANT_METADATA_KEYS = ['unit_cost_cents'] as const
+const PRIVATE_VARIANT_METADATA_KEYS = ['unit_cost_cents', 'ml_price_cents'] as const
 
 /**
  * Deep-copy-free scrub of seller-private keys from every variant's metadata

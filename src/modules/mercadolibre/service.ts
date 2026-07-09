@@ -441,6 +441,18 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
     input: MlPublishInput
     productPublished: boolean
     categoryId?: string | null
+    /** Per-product ML toggle (catalog-management S2 · 2.2) — default `true` preserves every existing caller's behavior. */
+    mlEnabled?: boolean
+    /**
+     * `ml_sync` entitlement, pre-resolved by the caller (this class has no
+     * container access to resolve `resolveMlOrdersEntitlement` itself — the
+     * route/caller already has `req.scope`). Default `true` preserves every
+     * existing caller's behavior until threaded through (catalog-management
+     * S2 · 2.2). Gates only the ML-writing actions (create/update/relist) —
+     * closing must NEVER be entitlement-gated, so a seller who loses
+     * entitlement can still force-close a live ML listing.
+     */
+    entitled?: boolean
   }): Promise<{
     action: MlPublishAction
     created: boolean
@@ -461,6 +473,7 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       linked: !!link,
       mlStatus: (linkMeta.ml_status as string | undefined) ?? null,
       productPublished: args.productPublished,
+      mlEnabled: args.mlEnabled,
     })
 
     // A linked product reconciles via the stored category; a fresh publish needs one.
@@ -474,6 +487,13 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
         permalink: (linkMeta.permalink as string | undefined) ?? null,
         status: (linkMeta.ml_status as string | undefined) ?? null,
       }
+    }
+
+    // Entitlement gates only the ML-WRITING actions — 'close' must always be
+    // reachable regardless of entitlement (a seller who loses it can still
+    // unpublish a live ML listing).
+    if (action !== 'close' && args.entitled === false) {
+      throw Object.assign(new Error('This shop does not have the Mercado Libre sync add-on enabled'), { code: 'ML_NOT_ENTITLED' })
     }
 
     const token = await this.getAccessTokenForSeller(args.sellerId)

@@ -53,7 +53,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const channel = req.query.channel as string | undefined // 'miyagi' | 'ml'
   const stock = req.query.stock as string | undefined // 'in_stock' | 'agotado' | 'unlimited'
   const sort = (req.query.sort as string | undefined) ?? 'recent'
-  const statusParam = req.query.status as string | undefined // 'activo'|'agotado'|'borrador'|'pausado'
+  const statusParam = req.query.status as string | undefined // 'activo'|'agotado'|'borrador'|'pausado'|'sobre_pedido'
 
   const { data: rows } = await remoteQuery.graph({
     entity: 'seller',
@@ -99,10 +99,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     .map((product) => ({ raw: product, listing: toListingShape(product, seller) }))
 
   // Always resolved (not just when `channel` filters) — every row's channel
-  // badge needs it, read-only in S1 (no publish/unpublish toggle; that's S2.2).
+  // badge needs it. S2.2 adds real per-channel toggles; the badge itself is
+  // fixed here to respect `ml_status` — a CLOSED link no longer shows the ML
+  // badge (Sprint 1's read-only badge checked existence only, a known/
+  // accepted gap noted in that sprint's README — fixed as a byproduct of this
+  // story's channel-badge work, not new gated behavior).
   const mlService: MercadolibreModuleService = req.scope.resolve(MERCADOLIBRE_MODULE)
   const mlLinks = await mlService.listProductMlLinks({ product_id: pairs.map((p) => p.listing.id) })
-  const mlLinkedIds = new Set(mlLinks.map((link: { product_id: string }) => link.product_id))
+  const mlLinkedIds = new Set(
+    mlLinks
+      .filter((link: { metadata?: Record<string, unknown> | null }) => link.metadata?.ml_status !== 'closed')
+      .map((link: { product_id: string }) => link.product_id),
+  )
 
   if (channel === 'ml' || channel === 'miyagi') {
     pairs = pairs.filter((p) => (channel === 'ml' ? mlLinkedIds.has(p.listing.id) : !mlLinkedIds.has(p.listing.id)))
@@ -117,16 +125,30 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // are active, not just the currently-selected status. Mirrors the fine-split
   // rule in the frontend's lib/catalog-status.ts (`deriveCatalogStatus`) — kept
   // in lockstep by hand since the two repos don't share a module.
-  const statusCounts = { activo: 0, agotado: 0, borrador: 0, pausado: 0 }
+  // Hand-mirrors the frontend's deriveCatalogStatus() (lib/catalog-status.ts)
+  // — the two must stay in lockstep by hand, no shared package between repos
+  // (documented fragility, Sprint 1). Sprint 2 · Story 2.1 adds a 5th bucket:
+  // a backorder ("sobre pedido") listing is ALWAYS `sobre_pedido`, regardless
+  // of in_stock, checked before the agotado branch — the whole point of the
+  // story is that qty 0 stops meaning "vanished" for a backorder item.
+  const isSobrePedido = (l: { manage_inventory: boolean; allow_backorder: boolean }) =>
+    l.manage_inventory && l.allow_backorder
+  const statusCounts = { activo: 0, agotado: 0, borrador: 0, pausado: 0, sobre_pedido: 0 }
   for (const p of pairs) {
     if (p.listing.status === 'paused') statusCounts.pausado++
-    else if (p.listing.status === 'active') statusCounts[p.listing.in_stock ? 'activo' : 'agotado']++
-    else statusCounts.borrador++
+    else if (p.listing.status === 'active') {
+      if (isSobrePedido(p.listing)) statusCounts.sobre_pedido++
+      else statusCounts[p.listing.in_stock ? 'activo' : 'agotado']++
+    } else statusCounts.borrador++
   }
 
-  if (statusParam === 'activo') pairs = pairs.filter((p) => p.listing.status === 'active' && p.listing.in_stock)
-  else if (statusParam === 'agotado') pairs = pairs.filter((p) => p.listing.status === 'active' && !p.listing.in_stock)
-  else if (statusParam === 'borrador') pairs = pairs.filter((p) => p.listing.status === 'draft')
+  if (statusParam === 'activo') {
+    pairs = pairs.filter((p) => p.listing.status === 'active' && p.listing.in_stock && !isSobrePedido(p.listing))
+  } else if (statusParam === 'agotado') {
+    pairs = pairs.filter((p) => p.listing.status === 'active' && !p.listing.in_stock && !isSobrePedido(p.listing))
+  } else if (statusParam === 'sobre_pedido') {
+    pairs = pairs.filter((p) => p.listing.status === 'active' && isSobrePedido(p.listing))
+  } else if (statusParam === 'borrador') pairs = pairs.filter((p) => p.listing.status === 'draft')
   else if (statusParam === 'pausado') pairs = pairs.filter((p) => p.listing.status === 'paused')
 
   pairs.sort((a, b) => {
@@ -144,6 +166,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     listings: page.map((p) => ({
       ...p.listing,
       channels: mlLinkedIds.has(p.listing.id) ? ['miyagi', 'ml'] : ['miyagi'],
+      // Marketplace-browse visibility toggle (catalog-management S2 · 2.2) —
+      // absent metadata key = today's behavior (always visible). Independent
+      // of `status`/pause: this only affects `/l` browse, never the seller's
+      // OWN storefront or this table itself.
+      miyagi_visible: (p.raw.metadata as Record<string, unknown> | undefined)?.miyagi_visible !== false,
+      // ML price override (catalog-management S2 · 2.3) — seller-private,
+      // single-variant scope (matches unit_cost_cents' existing limitation).
+      // "table shows both prices" acceptance criterion.
+      ml_price_cents: (() => {
+        const v = (p.raw.variants as any[] | undefined)?.[0]?.metadata?.ml_price_cents
+        return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null
+      })(),
     })),
     products: page.map((p) => p.raw),
     count,

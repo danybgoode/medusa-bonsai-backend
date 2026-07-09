@@ -102,6 +102,67 @@ export interface SellerProductUpdateBody {
    */
   unit_cost_cents?: number | null
   /**
+   * Optional Mercado Libre-specific price override, in integer centavos MXN,
+   * for the targeted variant (catalog-management epic, Sprint 2 · Story 2.3)
+   * — so ML's fees don't force the Miyagi price up. Stored on
+   * `variant.metadata.ml_price_cents`, following the exact `unit_cost_cents`
+   * precedent: seller-private (never on the public `ListingShape` — read
+   * only via the seller-scoped GET and the internal ML-publish route),
+   * `null` clears it (absent override = same price as Miyagi, today's
+   * behavior, via `buildMlItemPayload`'s `ml_price_cents ?? price_cents`
+   * fallback). Gated behind `catalog.inventory_channels_enabled`.
+   */
+  ml_price_cents?: number | null
+  /**
+   * Inventory mode for the targeted variant (`variant_id`, or the sole
+   * variant) — catalog-management epic, Sprint 2 · Story 2.1. Translates to
+   * the two native Medusa variant flags server-side (one place, not
+   * duplicated in the frontend): `tracked` → `manage_inventory:true,
+   * allow_backorder:false` (today's default physical-product behavior,
+   * always allowed regardless of the flag below); `unlimited` →
+   * `manage_inventory:false` (never blocks, no quantity tracked — never
+   * tears down an existing inventory item/reservations, just flips the
+   * flag); `backorder` → `manage_inventory:true, allow_backorder:true`
+   * ("sobre pedido" — Medusa's own `reserveInventoryStep`/
+   * `completeCartWorkflow` already honor `allow_backorder` natively, no
+   * custom checkout code needed). `unlimited`/`backorder` are gated behind
+   * `catalog.inventory_channels_enabled` (423 while OFF); `tracked` is
+   * always allowed.
+   */
+  inventory_mode?: 'tracked' | 'unlimited' | 'backorder'
+  /**
+   * Seller's estimated dispatch note for a backorder listing (e.g. '1-3d'),
+   * stored on PRODUCT metadata (`metadata.dispatch_estimate`) — distinct
+   * from `unit_cost_cents`'s variant-metadata scope since it's a per-listing,
+   * not per-variant, concept. Only meaningful when the listing's effective
+   * inventory mode (this request's `inventory_mode`, or the variant's current
+   * flags when `inventory_mode` is absent) is `backorder`; `null` clears it.
+   * Catalog-management epic, Sprint 2 · Story 2.1.
+   */
+  dispatch_estimate?: string | null
+  /**
+   * Marketplace-browse (`/l`, `/store/listings`) visibility toggle
+   * (catalog-management epic, Sprint 2 · Story 2.2) — independent of
+   * `status`/pause: a shop's OWN storefront (`/store/sellers/[slug]/products`)
+   * and this seller's own catalog table are UNAFFECTED by this toggle, only
+   * marketplace browse is. Absent metadata key = `true` (today's behavior).
+   * Gated behind `catalog.inventory_channels_enabled`.
+   */
+  miyagi_visible?: boolean
+  /**
+   * Per-product Mercado Libre publish toggle (catalog-management epic,
+   * Sprint 2 · Story 2.2) — independent of `status`: a paused/draft Miyagi
+   * product still force-closes on ML regardless of this value (see
+   * `decidePublishAction`'s `effectivelyPublished` AND). Absent metadata key
+   * = `true` (today's coupled-to-status behavior, unchanged for every
+   * product linked before this sprint). Gated behind
+   * `catalog.inventory_channels_enabled`. This field only flips the stored
+   * toggle — it does NOT itself call Mercado Libre; the caller (frontend PUT
+   * proxy) reconciles the live ML listing via the existing publish/close
+   * bridge right after a successful write, same as the pause/delete cascade.
+   */
+  ml_enabled?: boolean
+  /**
    * Full replacement set of seller-owned collection ids this product should
    * belong to (own-shop-premium-presentation S2). Requires the `seller`
    * context param on `updateSellerProduct` (the seller-UI + MCP-agent call
@@ -262,11 +323,12 @@ export async function updateSellerProduct(
   // (re-fetch the price-grid for the new variant ids first).
   if (body.option_dimensions !== undefined
     && (body.price_cents !== undefined || body.quantity !== undefined || body.variant_tiers !== undefined
-      || body.unit_cost_cents !== undefined)) {
+      || body.unit_cost_cents !== undefined || body.inventory_mode !== undefined
+      || body.dispatch_estimate !== undefined || body.ml_price_cents !== undefined)) {
     return {
       ok: false,
       status: 422,
-      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles y el costo se ajustan en una solicitud aparte con variant_id.',
+      message: 'No combines option_dimensions con price_cents/quantity/variant_tiers/unit_cost_cents/inventory_mode/dispatch_estimate/ml_price_cents en la misma solicitud. Usa variant_prices para los precios; el stock, los niveles, el costo y el modo de inventario se ajustan en una solicitud aparte con variant_id.',
     }
   }
 
@@ -544,6 +606,118 @@ export async function updateSellerProduct(
     if (body.unit_cost_cents === null) delete nextMeta.unit_cost_cents
     else nextMeta.unit_cost_cents = body.unit_cost_cents
     await (productService as any).updateProductVariants(variant.id, { metadata: nextMeta })
+  }
+
+  // ── ML price override — variant.metadata.ml_price_cents (S2 · 2.3) ───────
+  if (body.ml_price_cents !== undefined) {
+    if (body.ml_price_cents !== null
+      && (!Number.isInteger(body.ml_price_cents) || body.ml_price_cents < 0)) {
+      return { ok: false, status: 422, message: 'El precio de Mercado Libre debe ser un entero en centavos de 0 o más.' }
+    }
+    if (!(await isEnabled('catalog.inventory_channels_enabled'))) {
+      return { ok: false, status: 423, message: 'Esta función aún no está disponible.' }
+    }
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['variants.id', 'variants.metadata'],
+      filters: { id },
+    })
+    const variants: any[] = (rows?.[0] as any)?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
+    const currentMeta = ((variant.metadata ?? {}) as Record<string, unknown>)
+    const nextMeta: Record<string, unknown> = { ...currentMeta }
+    if (body.ml_price_cents === null) delete nextMeta.ml_price_cents
+    else nextMeta.ml_price_cents = body.ml_price_cents
+    await (productService as any).updateProductVariants(variant.id, { metadata: nextMeta })
+  }
+
+  // ── Inventory mode + dispatch estimate — catalog-management S2 · 2.1 ─────
+  // Handled together (not two independent blocks) so "dispatch_estimate only
+  // valid in backorder mode" can be validated against either the mode THIS
+  // request is setting, or — when only the estimate is sent — the variant's
+  // CURRENT flags.
+  if (body.inventory_mode !== undefined || body.dispatch_estimate !== undefined) {
+    if (body.inventory_mode !== undefined
+      && !['tracked', 'unlimited', 'backorder'].includes(body.inventory_mode)) {
+      return { ok: false, status: 422, message: 'inventory_mode inválido.' }
+    }
+    if (body.dispatch_estimate !== undefined && body.dispatch_estimate !== null
+      && typeof body.dispatch_estimate !== 'string') {
+      return { ok: false, status: 422, message: 'dispatch_estimate debe ser texto.' }
+    }
+    if (!(await isEnabled('catalog.inventory_channels_enabled'))
+      && body.inventory_mode !== undefined && body.inventory_mode !== 'tracked') {
+      return { ok: false, status: 423, message: 'Este modo de inventario aún no está disponible.' }
+    }
+
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['metadata', 'variants.id', 'variants.manage_inventory', 'variants.allow_backorder'],
+      filters: { id },
+    })
+    const productRow = rows?.[0] as any
+    const variants: any[] = productRow?.variants ?? []
+    const variant = body.variant_id
+      ? variants.find((v) => v.id === body.variant_id)
+      : variants.length <= 1 ? variants[0] : undefined
+    if (!variant) {
+      return variants.length > 1
+        ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
+        : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
+    }
+
+    const effectiveMode = body.inventory_mode
+      ?? (variant.allow_backorder ? 'backorder' : variant.manage_inventory ? 'tracked' : 'unlimited')
+    if (body.dispatch_estimate != null && effectiveMode !== 'backorder') {
+      return { ok: false, status: 422, message: 'dispatch_estimate solo aplica al modo sobre pedido.' }
+    }
+
+    if (body.inventory_mode !== undefined) {
+      const nextFlags = body.inventory_mode === 'tracked'
+        ? { manage_inventory: true, allow_backorder: false }
+        : body.inventory_mode === 'unlimited'
+          ? { manage_inventory: false, allow_backorder: false }
+          : { manage_inventory: true, allow_backorder: true }
+      await (productService as any).updateProductVariants(variant.id, nextFlags)
+    }
+
+    if (body.dispatch_estimate !== undefined) {
+      const currentMeta = ((productRow?.metadata ?? {}) as Record<string, unknown>)
+      const nextMeta: Record<string, unknown> = { ...currentMeta }
+      if (body.dispatch_estimate === null) delete nextMeta.dispatch_estimate
+      else nextMeta.dispatch_estimate = body.dispatch_estimate
+      await (productService as any).updateProducts(id, { metadata: nextMeta })
+    }
+  }
+
+  // ── Channel toggles: miyagi_visible / ml_enabled — catalog-management S2 · 2.2 ──
+  if (body.miyagi_visible !== undefined || body.ml_enabled !== undefined) {
+    if (body.miyagi_visible !== undefined && typeof body.miyagi_visible !== 'boolean') {
+      return { ok: false, status: 422, message: 'miyagi_visible debe ser booleano.' }
+    }
+    if (body.ml_enabled !== undefined && typeof body.ml_enabled !== 'boolean') {
+      return { ok: false, status: 422, message: 'ml_enabled debe ser booleano.' }
+    }
+    if (!(await isEnabled('catalog.inventory_channels_enabled'))) {
+      return { ok: false, status: 423, message: 'Esta función aún no está disponible.' }
+    }
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['metadata'],
+      filters: { id },
+    })
+    const current = ((rows?.[0] as any)?.metadata ?? {}) as Record<string, unknown>
+    const nextMeta: Record<string, unknown> = { ...current }
+    if (body.miyagi_visible !== undefined) nextMeta.miyagi_visible = body.miyagi_visible
+    if (body.ml_enabled !== undefined) nextMeta.ml_enabled = body.ml_enabled
+    await (productService as any).updateProducts(id, { metadata: nextMeta })
   }
 
   // ── Stock / restock (managed physical products) ──────────────────────────────

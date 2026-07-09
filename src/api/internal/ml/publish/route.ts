@@ -20,6 +20,7 @@ import { MERCADOLIBRE_MODULE } from '../../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../../modules/mercadolibre/service'
 import { toListingShape } from '../../../store/_utils/listing'
 import type { MlPublishInput } from '../../../../modules/mercadolibre/_utils'
+import { resolveMlOrdersEntitlement } from '../../../../lib/ml-orders-entitlement'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -103,6 +104,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (!product) return res.status(404).json({ message: 'Product not found' })
 
   const listing = toListingShape(product, seller)
+  // ML price override (catalog-management S2 · 2.3) — read off the targeted
+  // (or sole) variant's private metadata; `variants.*` above already fetches
+  // it. Absent/null → `buildMlItemPayload` falls back to `listing.price_cents`.
+  const productVariants: any[] = (product as any).variants ?? []
+  const targetVariant = variant_id
+    ? productVariants.find((v) => v.id === variant_id)
+    : productVariants.length <= 1 ? productVariants[0] : undefined
+  const mlPriceCentsRaw = (targetVariant?.metadata as Record<string, unknown> | undefined)?.ml_price_cents
+  const mlPriceCents = typeof mlPriceCentsRaw === 'number' && Number.isInteger(mlPriceCentsRaw) && mlPriceCentsRaw >= 0
+    ? mlPriceCentsRaw
+    : null
   const input: MlPublishInput = {
     title: listing.title,
     price_cents: listing.price_cents,
@@ -111,7 +123,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     condition: listing.condition,
     available_quantity: listing.available_quantity,
     images: listing.images.map((i) => ({ url: i.url })),
+    ml_price_cents: mlPriceCents,
   }
+
+  // Per-product ML toggle (catalog-management S2 · 2.2) — absent metadata key
+  // = today's behavior (true), so every product linked before this sprint
+  // shipped keeps reconciling exactly as it did.
+  const mlEnabled = ((product as any).metadata as Record<string, unknown> | undefined)?.ml_enabled !== false
+  const entitlement = await resolveMlOrdersEntitlement(req.scope, seller.id)
 
   try {
     const result = await ml.publishOrSyncProduct({
@@ -121,6 +140,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       input,
       productPublished: (product as any).status === 'published',
       categoryId: category_id ?? null,
+      mlEnabled,
+      entitled: entitlement.entitled,
     })
     await ml.recordSyncEvent({
       sellerId: seller.id,
@@ -144,6 +165,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     if (err.code === 'ML_NO_CATEGORY') return res.status(422).json({ message: 'A category is required to publish', code: 'ML_NO_CATEGORY' })
     if (err.code === 'ML_INVALID_PRODUCT') return res.status(422).json({ message: 'Product needs a title and a price to publish', code: 'ML_INVALID_PRODUCT' })
     if (err.code === 'ML_LINK_CONFLICT') return res.status(409).json({ message: 'Product or ML item is already linked', code: 'ML_LINK_CONFLICT' })
+    if (err.code === 'ML_NOT_ENTITLED') return res.status(402).json({ message: 'This shop does not have the Mercado Libre sync add-on enabled', code: 'ML_NOT_ENTITLED' })
     // ML's own rejection reason (e.g. a price change blocked by an active
     // promotion) — surfaced honestly rather than a generic failure (US-5).
     return res.status(502).json({
