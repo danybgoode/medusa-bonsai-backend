@@ -30,8 +30,11 @@ import { createClient, type SupabaseClient, type WebSocketLikeConstructor } from
 
 /** Never actually connects (this client is select()-only) — exists solely
  * to satisfy `RealtimeClientOptions.transport`'s type and skip the native-
- * WebSocket lookup that throws on Node < 22. */
-class NoopWebSocketTransport {
+ * WebSocket lookup that throws on Node < 22. Exported so a unit test can
+ * assert this guard fires — if a future change ever adds `.channel()`/
+ * `.subscribe()` to this client, it should fail loudly here rather than
+ * silently no-op against a socket that's never actually open. */
+export class NoopWebSocketTransport {
   constructor() {
     throw new Error('NoopWebSocketTransport should never be instantiated — supabaseRead never opens a realtime channel.')
   }
