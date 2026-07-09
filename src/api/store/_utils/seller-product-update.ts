@@ -648,6 +648,10 @@ export async function updateSellerProduct(
       && !['tracked', 'unlimited', 'backorder'].includes(body.inventory_mode)) {
       return { ok: false, status: 422, message: 'inventory_mode inválido.' }
     }
+    if (body.dispatch_estimate !== undefined && body.dispatch_estimate !== null
+      && typeof body.dispatch_estimate !== 'string') {
+      return { ok: false, status: 422, message: 'dispatch_estimate debe ser texto.' }
+    }
     if (!(await isEnabled('catalog.inventory_channels_enabled'))
       && body.inventory_mode !== undefined && body.inventory_mode !== 'tracked') {
       return { ok: false, status: 423, message: 'Este modo de inventario aún no está disponible.' }
@@ -695,6 +699,12 @@ export async function updateSellerProduct(
 
   // ── Channel toggles: miyagi_visible / ml_enabled — catalog-management S2 · 2.2 ──
   if (body.miyagi_visible !== undefined || body.ml_enabled !== undefined) {
+    if (body.miyagi_visible !== undefined && typeof body.miyagi_visible !== 'boolean') {
+      return { ok: false, status: 422, message: 'miyagi_visible debe ser booleano.' }
+    }
+    if (body.ml_enabled !== undefined && typeof body.ml_enabled !== 'boolean') {
+      return { ok: false, status: 422, message: 'ml_enabled debe ser booleano.' }
+    }
     if (!(await isEnabled('catalog.inventory_channels_enabled'))) {
       return { ok: false, status: 423, message: 'Esta función aún no está disponible.' }
     }
