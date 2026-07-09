@@ -5,6 +5,7 @@ import { SELLER_MODULE } from '../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../../_utils/clerk-auth'
 import { updateSellerProduct, type SellerProductUpdateBody } from '../../../../_utils/seller-product-update'
+import { resolveSellerProductIds } from '../../../../_utils/seller-catalog-query'
 
 async function resolveOwnership(req: MedusaRequest, productId: string) {
   const clerkUserId = extractClerkUserId(req) ?? (req as any).auth_context?.actor_id
@@ -14,14 +15,14 @@ async function resolveOwnership(req: MedusaRequest, productId: string) {
   const [seller] = await sellerService.listSellers({ clerk_user_id: clerkUserId })
   if (!seller) return { seller: null, error: 'Seller not found', status: 404 }
 
-  const remoteQuery = req.scope.resolve('remoteQuery')
-  const { data: rows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: seller.id },
-  })
-  const productIds = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id)
-  if (!productIds.includes(productId)) {
+  // Shares resolveSellerProductIds() with the bulk-apply routes' ownership
+  // check (catalog-management S3) — also fixes a real live incident: this
+  // inline query used to throw "Cannot read properties of undefined
+  // (reading 'id')" on the request right after ANY product soft-delete
+  // (the seller→products link can return a sparse/null slot for a just-
+  // deleted product), which resolveSellerProductIds() now guards against.
+  const productIds = await resolveSellerProductIds(req.scope, seller.id)
+  if (!productIds.has(productId)) {
     return { seller: null, error: 'Product not found in your shop', status: 403 }
   }
 
