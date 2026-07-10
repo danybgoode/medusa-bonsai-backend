@@ -84,22 +84,12 @@ function deliveryLabel(days: number | null) {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open).
-  // When off, short-circuit BEFORE any Envía call to the graceful arranged-delivery
-  // fallback so checkout never hits an unfunded carrier. This is the real
-  // enforcement — UCP/MCP/agent + stale checkout pages proxying here inherit it.
-  if (enviaKillGate({ enviaEnabled: await isEnabled('shipping.envia_enabled') }).blocked) {
-    return res.json({ rates: [], package_count: 0, message: ENVIA_ARRANGED_DELIVERY_MESSAGE })
-  }
+  const enviaEnabled = await isEnabled('shipping.envia_enabled')
 
   const body = req.body as {
     listingId?: string
     items?: string[]
     address?: IncomingAddress
-  }
-
-  if (!body.address || !addressReady(body.address)) {
-    return res.status(422).json({ error: 'Completa la dirección de entrega.' })
   }
 
   const listingIds: string[] = body.items?.length
@@ -108,25 +98,30 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       ? [body.listingId]
       : []
 
-  if (!listingIds.length) {
-    return res.status(400).json({ error: 'listingId o items requerido.' })
-  }
-
   const remoteQuery = req.scope.resolve('remoteQuery') as any
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
-  // ── Resolve products from Medusa ──────────────────────────────────────────
+  // ── Resolve products + seller UP FRONT — Sprint 2 needs the seller's
+  // metadata.envia_grant before the kill-switch decision below, since a
+  // granted seller must ride Envía even while the platform flag is OFF. A
+  // malformed request (no listingId, unknown product) can't resolve a seller,
+  // so this silently no-ops and the route falls through to the platform-flag-
+  // only decision — preserving byte-identical OFF+ungranted fallback behavior
+  // regardless of request validity, same as before this widening. ─────────────
   let products: any[] = []
-  try {
-    const { data } = await remoteQuery.graph({
-      entity: 'product',
-      fields: ['id', 'title', 'metadata', 'variants.metadata', 'variants.prices.*'],
-      filters: { id: listingIds },
-    })
-    products = data ?? []
-  } catch (err) {
-    console.error('[envia/rates] product lookup failed:', err)
-    return res.status(404).json({ error: 'Anuncio no encontrado.' })
+  let productLookupFailed = false
+  if (listingIds.length) {
+    try {
+      const { data } = await remoteQuery.graph({
+        entity: 'product',
+        fields: ['id', 'title', 'metadata', 'variants.metadata', 'variants.prices.*'],
+        filters: { id: listingIds },
+      })
+      products = data ?? []
+    } catch (err) {
+      console.error('[envia/rates] product lookup failed:', err)
+      productLookupFailed = true
+    }
   }
 
   // Filter to physical products (listing_type = product)
@@ -136,29 +131,55 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return !t || t === 'product'
   })
 
-  if (!shippable.length) {
-    return res.status(422).json({ error: 'Ningún artículo requiere envío por paquetería.' })
-  }
-
   // ── Resolve seller + shipping settings via first product ──────────────────
   let sellerMeta: Record<string, unknown> = {}
-  try {
-    const allSellers = await sellerService.listSellers({}, { take: 1000 })
-    // Find which seller owns the first product
-    for (const seller of allSellers) {
-      const { data: rows } = await remoteQuery.graph({
-        entity: 'seller',
-        fields: ['id', 'products.id'],
-        filters: { id: seller.id },
-      })
-      const productIds = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
-      if (productIds.includes(shippable[0].id)) {
-        sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
-        break
+  if (shippable.length) {
+    try {
+      const allSellers = await sellerService.listSellers({}, { take: 1000 })
+      // Find which seller owns the first product
+      for (const seller of allSellers) {
+        const { data: rows } = await remoteQuery.graph({
+          entity: 'seller',
+          fields: ['id', 'products.id'],
+          filters: { id: seller.id },
+        })
+        const productIds = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
+        if (productIds.includes(shippable[0].id)) {
+          sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
+          break
+        }
       }
+    } catch (err) {
+      console.warn('[envia/rates] seller lookup failed:', err)
     }
-  } catch (err) {
-    console.warn('[envia/rates] seller lookup failed:', err)
+  }
+
+  const sellerGranted = Boolean(sellerMeta.envia_grant)
+
+  // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open),
+  // widened by a per-seller comp grant (Sprint 2: seller.metadata.envia_grant).
+  // When neither applies, short-circuit BEFORE any Envía call to the graceful
+  // arranged-delivery fallback so checkout never hits an unfunded carrier. This
+  // is the real enforcement — UCP/MCP/agent + stale checkout pages proxying
+  // here inherit it.
+  if (enviaKillGate({ enviaEnabled, sellerGranted }).blocked) {
+    return res.json({ rates: [], package_count: 0, message: ENVIA_ARRANGED_DELIVERY_MESSAGE })
+  }
+
+  if (!body.address || !addressReady(body.address)) {
+    return res.status(422).json({ error: 'Completa la dirección de entrega.' })
+  }
+
+  if (!listingIds.length) {
+    return res.status(400).json({ error: 'listingId o items requerido.' })
+  }
+
+  if (productLookupFailed) {
+    return res.status(404).json({ error: 'Anuncio no encontrado.' })
+  }
+
+  if (!shippable.length) {
+    return res.status(422).json({ error: 'Ningún artículo requiere envío por paquetería.' })
   }
 
   const settings = (sellerMeta.settings ?? {}) as Record<string, unknown>

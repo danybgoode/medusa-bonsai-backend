@@ -14,11 +14,11 @@ import {
 
 describe('enviaKillGate · shipping.envia_enabled', () => {
   it('passes through when the flag is ON', () => {
-    expect(enviaKillGate({ enviaEnabled: true })).toEqual({ blocked: false })
+    expect(enviaKillGate({ enviaEnabled: true, sellerGranted: false })).toEqual({ blocked: false })
   })
 
-  it('blocks when the flag is OFF (the fail-open default)', () => {
-    expect(enviaKillGate({ enviaEnabled: false })).toEqual({
+  it('blocks when the flag is OFF and the seller is not granted (the fail-open default)', () => {
+    expect(enviaKillGate({ enviaEnabled: false, sellerGranted: false })).toEqual({
       blocked: true,
       reason: 'platform_envia_disabled',
     })
@@ -27,5 +27,15 @@ describe('enviaKillGate · shipping.envia_enabled', () => {
   it('exposes es-MX fallback copy for the quote and label seams', () => {
     expect(ENVIA_ARRANGED_DELIVERY_MESSAGE).toMatch(/coordinar la entrega directamente/)
     expect(ENVIA_LABEL_DISABLED_MESSAGE).toMatch(/paquetería manual/)
+  })
+})
+
+describe('enviaKillGate · seller.metadata.envia_grant (comp-grant override)', () => {
+  it('passes through for a granted seller even when the platform flag is OFF', () => {
+    expect(enviaKillGate({ enviaEnabled: false, sellerGranted: true })).toEqual({ blocked: false })
+  })
+
+  it('passes through when both the flag is ON and the seller is granted', () => {
+    expect(enviaKillGate({ enviaEnabled: true, sellerGranted: true })).toEqual({ blocked: false })
   })
 })
