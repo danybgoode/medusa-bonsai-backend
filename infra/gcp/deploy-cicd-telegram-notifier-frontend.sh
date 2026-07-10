@@ -16,7 +16,7 @@
 # Function instances reading the same topic, filtering independently, is the established
 # "one function per trigger" shape this script already supports.
 #
-# Usage: bash apps/backend/infra/gcp/deploy-cicd-telegram-notifier-frontend.sh
+# Usage: bash infra/gcp/deploy-cicd-telegram-notifier-frontend.sh (run from this repo's root)
 # (Provisions real, billable GCP resources — a new Cloud Function + service account. Confirm
 # before running against prod.)
 

@@ -1,6 +1,6 @@
 // deploy-cicd-telegram-notifier-frontend.test.js — frontend-vercel-to-cloudrun Sprint 3,
 // Story 3.5: static drift guard for the frontend Telegram-notifier wrapper. Pure fs read,
-// zero deps, no live gcloud calls. Run: `node --test infra/gcp/test/` from apps/backend.
+// zero deps, no live gcloud calls. Run: `node --test infra/gcp/test/` from this repo's root.
 //
 // Locks in the "zero code duplication" decision: the wrapper must call the SAME shared
 // deploy-cicd-telegram-notifier.sh (index.js unmodified), only overriding env vars, rather
