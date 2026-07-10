@@ -239,6 +239,21 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
       }
     }
     case 'apply_suggested_price': {
+      // Defense in depth (cross-agent review catch): `items` is required by
+      // the TS type, but a malformed/adversarial request body isn't type-checked
+      // at runtime — an absent/non-array `items` must produce a clean invalid
+      // row per product, never an unhandled TypeError from `.find()`.
+      if (!Array.isArray(action.items)) {
+        return {
+          ...base,
+          before: { price: centsToDisplay(listing.price_cents) },
+          after: {},
+          patch: null,
+          valid: false,
+          error: 'Lote inválido — falta la lista de precios sugeridos.',
+          delta_cents: null,
+        }
+      }
       const item = action.items.find((i) => i.id === listing.id)
       if (!item) {
         return {

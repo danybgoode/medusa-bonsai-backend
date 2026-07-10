@@ -210,6 +210,15 @@ describe('computeBulkDiff · apply_suggested_price (S4 · 4.2)', () => {
     expect(result.error).toMatch(/precio sugerido/)
   })
 
+  it('rejects a malformed action with a non-array items (defense in depth — never an unhandled TypeError)', () => {
+    const result = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: undefined as unknown as never },
+    )
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/Lote inválido/)
+  })
+
   it('rejects a non-positive or non-integer suggested price', () => {
     const zero = computeBulkDiff(
       pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
