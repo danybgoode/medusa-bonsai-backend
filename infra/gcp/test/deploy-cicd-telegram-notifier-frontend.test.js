@@ -32,7 +32,12 @@ test('wrapper unsets BACKEND_TRIGGER_ID before invoking the shared script (env-l
 
 test('wrapper uses a distinct FUNCTION_NAME + SERVICE_ACCOUNT_NAME from the backend defaults', () => {
   assert.match(src, /FUNCTION_NAME="cicd-telegram-build-notifier-frontend"/)
-  assert.match(src, /SERVICE_ACCOUNT_NAME="cicd-telegram-notifier-frontend"/)
+  assert.match(src, /SERVICE_ACCOUNT_NAME="cicd-telegram-notif-frontend"/)
+  // GCP service account IDs are capped at 30 chars -- "cicd-telegram-notifier-frontend" (31) was
+  // rejected live (INVALID_ARGUMENT) before this was shortened to "-notif-".
+  const m = src.match(/SERVICE_ACCOUNT_NAME="([^"]+)"/)
+  assert.ok(m, 'expected a SERVICE_ACCOUNT_NAME value to check length against')
+  assert.ok(m[1].length <= 30, `SERVICE_ACCOUNT_NAME "${m[1]}" is ${m[1].length} chars, exceeds GCP's 30-char service-account-id limit`)
   assert.doesNotMatch(src, /FUNCTION_NAME="cicd-telegram-build-notifier"\s*$/m, 'must not reuse the backend function name — would collide/overwrite it')
 })
 

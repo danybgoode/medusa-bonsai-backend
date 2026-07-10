@@ -33,7 +33,7 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 unset BACKEND_TRIGGER_ID
 
 FUNCTION_NAME="cicd-telegram-build-notifier-frontend" \
-SERVICE_ACCOUNT_NAME="cicd-telegram-notifier-frontend" \
+SERVICE_ACCOUNT_NAME="cicd-telegram-notif-frontend" \
 BACKEND_REPO_OWNER="danybgoode" \
 BACKEND_REPO_NAME="miyagisanchezcommerce" \
 BACKEND_BRANCH_NAME="main" \
