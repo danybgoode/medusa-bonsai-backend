@@ -41,6 +41,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (!body.ids?.length && !body.filter) {
     return res.status(422).json({ message: 'Debes indicar ids o un filtro.' })
   }
+  // apply_suggested_price (S4 · 4.2) needs its own flag check — the other 7
+  // action types must keep working with ops.profit_enabled off, so this
+  // can't be a route-wide gate.
+  if (body.action.type === 'apply_suggested_price' && !(await isEnabled('ops.profit_enabled'))) {
+    return res.status(423).json({ message: 'Esta función aún no está disponible.' })
+  }
 
   const filters: CatalogFilterParams = body.ids?.length
     ? { ids: body.ids }

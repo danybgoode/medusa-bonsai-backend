@@ -177,6 +177,71 @@ describe('computeBulkDiff · delete', () => {
   })
 })
 
+describe('computeBulkDiff · apply_suggested_price (S4 · 4.2)', () => {
+  const singleVariantRaw = { variants: [{ id: 'variant_1' }] }
+  const multiVariantRaw = { variants: [{ id: 'variant_1' }, { id: 'variant_2' }] }
+
+  it('produces a valid patch with variant_id + delta_cents for a single-variant product', () => {
+    const result = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: [{ id: 'prod_1', price_cents: 12000 }] },
+    )
+    expect(result.valid).toBe(true)
+    expect(result.patch).toEqual({ variant_id: 'variant_1', price_cents: 12000 })
+    expect(result.delta_cents).toBe(2000)
+  })
+
+  it('rejects a multi-variant product — price_cents is a min-across-variants synthetic, not a real single price', () => {
+    const result = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: multiVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: [{ id: 'prod_1', price_cents: 12000 }] },
+    )
+    expect(result.valid).toBe(false)
+    expect(result.patch).toBeNull()
+    expect(result.error).toMatch(/varias variantes/)
+  })
+
+  it('rejects a product with no matching item in the action payload', () => {
+    const result = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: [{ id: 'prod_OTHER', price_cents: 12000 }] },
+    )
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/precio sugerido/)
+  })
+
+  it('rejects a malformed action with a non-array items (defense in depth — never an unhandled TypeError)', () => {
+    const result = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: undefined as unknown as never },
+    )
+    expect(result.valid).toBe(false)
+    expect(result.error).toMatch(/Lote inválido/)
+  })
+
+  it('rejects a non-positive or non-integer suggested price', () => {
+    const zero = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: [{ id: 'prod_1', price_cents: 0 }] },
+    )
+    expect(zero.valid).toBe(false)
+    const fractional = computeBulkDiff(
+      pair({ price_cents: 10000 }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: [{ id: 'prod_1', price_cents: 100.5 }] },
+    )
+    expect(fractional.valid).toBe(false)
+  })
+
+  it('delta_cents is null when the product has no fixed current price', () => {
+    const result = computeBulkDiff(
+      pair({ price_cents: null }, { raw: singleVariantRaw }),
+      { type: 'apply_suggested_price', target_margin_pct: 0.25, items: [{ id: 'prod_1', price_cents: 12000 }] },
+    )
+    expect(result.valid).toBe(true)
+    expect(result.delta_cents).toBeNull()
+  })
+})
+
 describe('rejectOrchestrationOnlyPatch', () => {
   it('rejects a null patch (delete signal)', () => {
     expect(rejectOrchestrationOnlyPatch(null)).not.toBeNull()
@@ -191,6 +256,10 @@ describe('rejectOrchestrationOnlyPatch', () => {
     expect(rejectOrchestrationOnlyPatch({ status: 'draft', metadata: { paused: true } })).not.toBeNull()
   })
 
+  it('rejects a patch with variant_id + price_cents together (apply_suggested_price signal — needs the profit-analyzer apply-price flow, S4 · 4.2)', () => {
+    expect(rejectOrchestrationOnlyPatch({ variant_id: 'variant_1', price_cents: 12000 })).not.toBeNull()
+  })
+
   it('allows a plain field-patch (price/category/collection/inventory-mode) through', () => {
     expect(rejectOrchestrationOnlyPatch({ price_cents: 5000 })).toBeNull()
     expect(rejectOrchestrationOnlyPatch({ category_handle: 'autos' })).toBeNull()
@@ -200,5 +269,9 @@ describe('rejectOrchestrationOnlyPatch', () => {
 
   it('allows a metadata patch that is NOT the paused signal (e.g. custom_fields)', () => {
     expect(rejectOrchestrationOnlyPatch({ metadata: { custom_fields: {} } })).toBeNull()
+  })
+
+  it('allows a plain variant_id patch alone (e.g. a future variant-scoped action with no price_cents)', () => {
+    expect(rejectOrchestrationOnlyPatch({ variant_id: 'variant_1' })).toBeNull()
   })
 })
