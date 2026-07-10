@@ -24,6 +24,14 @@ set -euo pipefail
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Defensive: BACKEND_TRIGGER_ID's default in the shared script is a LIVE lookup keyed on
+# BACKEND_TRIGGER_NAME (correctly resolves to the frontend trigger, since we set that below) --
+# but `${VAR:-default}` only applies when VAR is genuinely unset, so a BACKEND_TRIGGER_ID left
+# exported in the calling shell from an earlier backend-deploy invocation would silently win and
+# point this frontend-named function at the BACKEND's trigger instead (Codex cross-review
+# finding, PR #75). Unset it here so the lookup always runs fresh for this invocation.
+unset BACKEND_TRIGGER_ID
+
 FUNCTION_NAME="cicd-telegram-build-notifier-frontend" \
 SERVICE_ACCOUNT_NAME="cicd-telegram-notifier-frontend" \
 BACKEND_REPO_OWNER="danybgoode" \

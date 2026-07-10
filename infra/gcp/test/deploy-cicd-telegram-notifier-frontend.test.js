@@ -18,6 +18,18 @@ test('wrapper calls the shared deploy-cicd-telegram-notifier.sh, not a forked co
   assert.match(src, /bash "\$\{SOURCE_DIR\}\/deploy-cicd-telegram-notifier\.sh"/)
 })
 
+test('wrapper unsets BACKEND_TRIGGER_ID before invoking the shared script (env-leak guard)', () => {
+  // BACKEND_TRIGGER_ID's default in the shared script is a live lookup keyed on
+  // BACKEND_TRIGGER_NAME -- but `${VAR:-default}` only applies when VAR is genuinely unset, so a
+  // value left exported from an earlier backend-deploy invocation in the same shell would
+  // silently win and point this frontend function at the BACKEND's trigger instead. Regression
+  // guard for a real finding from Codex cross-review (PR #75).
+  const unsetIdx = src.indexOf('unset BACKEND_TRIGGER_ID')
+  const invokeIdx = src.indexOf('bash "${SOURCE_DIR}/deploy-cicd-telegram-notifier.sh"')
+  assert.ok(unsetIdx !== -1, 'expected an explicit `unset BACKEND_TRIGGER_ID`')
+  assert.ok(unsetIdx < invokeIdx, 'the unset must happen BEFORE the shared script is invoked')
+})
+
 test('wrapper uses a distinct FUNCTION_NAME + SERVICE_ACCOUNT_NAME from the backend defaults', () => {
   assert.match(src, /FUNCTION_NAME="cicd-telegram-build-notifier-frontend"/)
   assert.match(src, /SERVICE_ACCOUNT_NAME="cicd-telegram-notifier-frontend"/)
