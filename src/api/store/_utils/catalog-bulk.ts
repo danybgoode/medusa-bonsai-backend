@@ -32,6 +32,18 @@ export type BulkActionPayload =
   | { type: 'collection_assign'; collection_ids: string[]; collection_labels: string[] }
   | { type: 'inventory_mode'; mode: 'tracked' | 'unlimited' | 'backorder'; dispatch_estimate?: string | null }
   | { type: 'delete' }
+  // catalog-management S4 · Story 4.2. Unlike every other action type, the
+  // target price is NOT re-derived here — it's computed ONCE, frontend-side,
+  // via lib/profit.ts's solveForPrice() (the same seam the profit dashboard's
+  // PricingCard already uses for the single-item Apply control), from that
+  // page's own already-fetched ledger + a live ML fee-estimate call. This
+  // route intentionally does NOT re-implement solveForPrice — doing so here
+  // would be exactly the "forked formula" the sprint's acceptance forbids.
+  // Each `items[]` entry is one seller-approved suggested price; this diff
+  // step only validates + previews it (variant count, ownership, sanity),
+  // mirroring how /store/sellers/me/profit/apply-price ALREADY trusts a
+  // caller-computed `new_price_cents` with no server-side re-derivation.
+  | { type: 'apply_suggested_price'; target_margin_pct: number; items: Array<{ id: string; price_cents: number }> }
 
 export interface BulkDiffItem {
   id: string
@@ -41,6 +53,9 @@ export interface BulkDiffItem {
   patch: SellerProductUpdateBody | null
   valid: boolean
   error: string | null
+  /** Only set for `apply_suggested_price` (S4 · 4.2) — new minus old Miyagi
+   * price, for the confirm dialog's total. Null for every other action type. */
+  delta_cents?: number | null
 }
 
 function centsToDisplay(cents: number | null): string {
@@ -223,6 +238,60 @@ export function computeBulkDiff(pair: CatalogPair, action: BulkActionPayload): B
         error: null,
       }
     }
+    case 'apply_suggested_price': {
+      const item = action.items.find((i) => i.id === listing.id)
+      if (!item) {
+        return {
+          ...base,
+          before: { price: centsToDisplay(listing.price_cents) },
+          after: {},
+          patch: null,
+          valid: false,
+          error: 'No se encontró un precio sugerido para este producto.',
+          delta_cents: null,
+        }
+      }
+      // Multi-variant products' price_cents is the MIN across variants
+      // ("desde $X") — using it as "before," and writing a single price_cents
+      // patch with no variant_id, would silently mis-price every OTHER
+      // variant. Reject at stage time (visible in the preview) rather than
+      // failing invisibly at apply time — updateSellerProduct already 422s a
+      // multi-variant price patch with no variant_id, so this sharpens an
+      // existing gap rather than adding a new restriction.
+      const variants = (pair.raw?.variants ?? []) as Array<{ id: string }>
+      if (variants.length !== 1) {
+        return {
+          ...base,
+          before: { price: centsToDisplay(listing.price_cents) },
+          after: {},
+          patch: null,
+          valid: false,
+          error: 'Este producto tiene varias variantes — el precio sugerido no aplica a nivel producto.',
+          delta_cents: null,
+        }
+      }
+      if (!Number.isInteger(item.price_cents) || item.price_cents <= 0) {
+        return {
+          ...base,
+          before: { price: centsToDisplay(listing.price_cents) },
+          after: {},
+          patch: null,
+          valid: false,
+          error: 'El precio sugerido no es válido.',
+          delta_cents: null,
+        }
+      }
+      const deltaCents = listing.price_cents != null ? item.price_cents - listing.price_cents : null
+      return {
+        ...base,
+        before: { price: centsToDisplay(listing.price_cents) },
+        after: { price: centsToDisplay(item.price_cents) },
+        patch: { variant_id: variants[0].id, price_cents: item.price_cents },
+        valid: true,
+        error: null,
+        delta_cents: deltaCents,
+      }
+    }
     case 'delete': {
       // No SellerProductUpdateBody patch — soft-delete has no field-patch
       // shape (`productService.softDeleteProducts`, a different call
@@ -274,6 +343,16 @@ export function rejectOrchestrationOnlyPatch(patch: SellerProductUpdateBody | nu
   }
   if (patch.metadata && typeof patch.metadata === 'object' && 'paused' in patch.metadata) {
     return 'Pausar/activar requiere el flujo de estado de anuncio dedicado — no se puede aplicar como patch genérico.'
+  }
+  // apply_suggested_price (S4 · 4.2) is the ONLY action type whose patch
+  // carries both variant_id AND price_cents together — plain price_set/
+  // price_pct never set variant_id. A patch shaped like this must route
+  // through profit-analyzer's apply-price (Miyagi write + ML publish parity
+  // + audit event), never the generic bulk-apply path, or a staged
+  // suggested-price batch would silently Miyagi-only-apply and never push
+  // to Mercado Libre — the exact acceptance this story exists to satisfy.
+  if (patch.variant_id !== undefined && patch.price_cents !== undefined) {
+    return 'El precio sugerido requiere el flujo de aplicación de precios (con Mercado Libre) — no se puede aplicar como patch genérico.'
   }
   return null
 }

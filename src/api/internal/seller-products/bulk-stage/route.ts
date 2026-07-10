@@ -45,6 +45,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (!body.ids?.length && !body.filter) {
     return res.status(422).json({ message: 'Debes indicar ids o un filtro.' })
   }
+  // apply_suggested_price (S4 · 4.2) is not exposed to MCP agents this sprint
+  // (no agent-facing tool computes a suggested price — that math lives in
+  // the frontend's lib/profit.ts, which an MCP call has no access to) — the
+  // frontend's stageBulkActionAsAgent()/isAgentUnsupportedAction() already
+  // refuses it before ever reaching this route, but reject it here too as
+  // defense in depth against a direct internal-secret caller.
+  if (body.action.type === 'apply_suggested_price') {
+    return res.status(422).json({ message: 'El precio sugerido en bloque aún no está disponible por el agente — usa la app web.' })
+  }
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const [seller] = await sellerService.listSellers({ slug: body.seller_slug } as never, { take: 1 })
