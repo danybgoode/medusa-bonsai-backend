@@ -35,6 +35,7 @@ export type FlagKey =
   | 'checkout.stripe_enabled'
   | 'checkout.rental_pricing_enabled'
   | 'shipping.envia_enabled'
+  | 'shipping.correos_enabled'
   | 'ml.sync_enabled'
   | 'ml.orders_enabled'
   | 'ml.sync_paywall_enabled'
@@ -120,11 +121,22 @@ export type FlagKey =
  *    flipped) is worse than the feature being off. Enabling is the deliberate
  *    action, done only after Daniel's live smoke (50+ product bulk price change
  *    incl. one deliberately invalid row, idempotent re-apply, MCP agent flow).
+ *  - ENABLEMENT (`shipping.correos_enabled`): default `false`
+ *    (shipping-provider-expansion epic, Sprint 3). Gates the Correos de México
+ *    Impresos manual-economy rate at checkout (`envia/rates` + `checkout-options`
+ *    routes) — independent of `shipping.envia_enabled`/the Envía comp-grant (a
+ *    different provider, no funding gate, no grant). A flag-read outage must not
+ *    surface an unreviewed manual-economy rate at checkout, so this fails to OFF
+ *    (the option never appears, on web or via agents). Enabling is the
+ *    deliberate action, and additionally requires the seller's own per-shop
+ *    opt-in (`seller.metadata.settings.shipping.correos_enabled`) — see
+ *    `lib/correos-gate.ts`.
  */
 const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
   'checkout.stripe_enabled': true,
   'checkout.rental_pricing_enabled': false,
   'shipping.envia_enabled': false,
+  'shipping.correos_enabled': false,
   'ml.sync_enabled': false,
   'ml.orders_enabled': false,
   'ml.sync_paywall_enabled': false,
