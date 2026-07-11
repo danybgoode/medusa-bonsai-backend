@@ -13,6 +13,17 @@
  * and set `onlyCoordinated = true`. Everything else reproduces today's behavior
  * byte-for-byte — flag OFF or `deliveryMode` absent/`'carrier'` must yield an
  * identical result to before this seam existed.
+ *
+ * Sprint 2 · S2.2 — `isCoordinatedListing` is the canonical "must this listing pay
+ * manually" signal, now shared by `checkout-options` (below) AND `start-checkout`'s
+ * 422 guard, so both re-derive from the same product truth instead of the guard
+ * trusting client input. It is DELIBERATELY broader than `effectiveArranged`:
+ * service/rental listings are coordinated UNCONDITIONALLY (independent of the
+ * `arranged_only` flag) because `OPTION_KEY_BY_METHOD` has always routed their
+ * fulfillment to the `coord` option — card-payability for them was a pre-existing
+ * bug, not gated epic scope, so this branch closes it live on merge. The
+ * `delivery_mode === 'arranged'` branch stays flag-gated, preserving S1.1's
+ * "flag off ⇒ byte-identical to today" contract for the new capability.
  */
 
 export type DeliveryMode = 'carrier' | 'arranged'
@@ -62,12 +73,47 @@ export interface DeliveryCatalogResult {
 const COORD_LABEL = 'Entrega acordada con vendedor'
 const COORD_NOTE = 'Coordinas fecha, lugar y pago directamente con el vendedor.'
 
+/**
+ * Canonical "does this listing require manual (non-instant) payment" signal.
+ * See the file-header note (Sprint 2 · S2.2) for why service/rental is
+ * unconditional while `arranged` stays behind the kill-switch.
+ *
+ * Known cross-epic tension (flagged, not resolved here): the (dark, OFF)
+ * `checkout.rental_pricing_enabled` capability (Rental line-item pricing
+ * epic) was designed to let rentals be safely CARD-paid via a server-
+ * recomputed total (see `lib/rental-checkout.ts` / `app/api/ucp/checkout-
+ * session/route.ts`'s `rentalCheckoutUrl`/`mpAvailable`/`stripeAvailable`
+ * rental branches, frontend repo). This function's `rental` branch
+ * unconditionally requires manual payment instead — a deliberate scope
+ * choice from THIS epic's Sprint 2 story ("service and rental listings...
+ * enforce manual payment like any coordinated delivery"), confirmed with
+ * Daniel. Since `rental_pricing_enabled` is off/dark today this changes
+ * nothing live, but whoever activates that flag later must reconcile the
+ * two: either rentals stay manual-only (retire the card-rental branch) or
+ * this function needs a carve-out for a rental with a valid server quote.
+ */
+export function isCoordinatedListing(input: {
+  listingType: string
+  deliveryMode: DeliveryMode
+  arrangedOnlyEnabled: boolean
+  isDigital: boolean
+}): boolean {
+  const { listingType, deliveryMode, arrangedOnlyEnabled, isDigital } = input
+  if (isDigital) return false
+  if (listingType === 'service' || listingType === 'rental') return true
+  return deliveryMode === 'arranged' && arrangedOnlyEnabled
+}
+
 export function buildDeliveryCatalog(input: BuildDeliveryCatalogInput): DeliveryCatalogResult {
   const { listingType, isDigital, deliveryMode, arrangedOnlyEnabled, localPickup, pickupSpots, hasLiveShipping } = input
 
-  // A digital listing's delivery+payment path already works correctly — never
-  // let a stray/incorrect delivery_mode force it into manual-only payment.
+  // Drives the coord-method-push + carrier-shipping-suppression below — the
+  // NEW `arranged` capability only, gated by the kill-switch (unchanged from
+  // S1.1). Service/rental already get their own 'service'/'rental' delivery
+  // method entries further down, independent of this flag.
   const effectiveArranged = deliveryMode === 'arranged' && arrangedOnlyEnabled && !isDigital
+  // Drives `onlyCoordinated` (payment filtering) — the canonical, broader signal.
+  const onlyCoordinated = isCoordinatedListing({ listingType, deliveryMode, arrangedOnlyEnabled, isDigital })
 
   const deliveryMethods: DeliveryMethod[] = []
 
@@ -115,7 +161,7 @@ export function buildDeliveryCatalog(input: BuildDeliveryCatalogInput): Delivery
     deliveryMethods.push({ id: 'coord', label: COORD_LABEL, note: COORD_NOTE })
   }
 
-  return { deliveryMethods, onlyCoordinated: effectiveArranged }
+  return { deliveryMethods, onlyCoordinated }
 }
 
 export type ResolveDeliveryModeForWriteResult =
