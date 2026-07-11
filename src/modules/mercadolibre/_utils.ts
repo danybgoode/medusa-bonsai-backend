@@ -65,6 +65,53 @@ export function shouldRefresh(
   return exp - now < skewMs
 }
 
+// ── Token-refresh race/failure classification (Sprint 0 bug fix · re-auth churn) ─
+// `getAccessTokenForSeller` has no lock around the refresh-and-persist section, and
+// two identically-scheduled cron jobs (`reconcile-ml-order-status` +
+// `reconcile-ml-inventory`, both `*/30 * * * *`) can both decide to refresh the
+// SAME seller's connection in the same tick. ML's refresh grant is single-use, so
+// one of two concurrent callers is guaranteed a rejection — indistinguishable, to
+// the naive catch block, from a genuinely dead refresh token. These pure helpers
+// let the service classify a failure BEFORE ever flagging `needs_reauth`.
+
+/**
+ * True when a failed `refreshMlToken` call is worth retrying rather than treated
+ * as proof the refresh token is dead: a missing status (network error, no
+ * response) or a 5xx/429 from ML. A 400/401 is ML's own non-retryable rejection
+ * (bad/expired/already-used refresh token) and is NOT retryable.
+ */
+export function isRetryableMlRefreshStatus(status: number | null | undefined): boolean {
+  if (status == null) return true
+  return status >= 500 || status === 429
+}
+
+export type RefreshFailureContext = {
+  /** `refresh_token_enc` read BEFORE this attempt started calling ML. */
+  snapshotRefreshTokenEnc: string
+  /** `refresh_token_enc` read fresh, right after the ML call failed. */
+  latestRefreshTokenEnc: string
+  /** HTTP status of the failed ML refresh call, when known. */
+  httpStatus?: number | null
+}
+
+export type RefreshFailureDecision =
+  | { kind: 'use-latest' } // a concurrent caller already won and persisted a newer pair — not a real failure
+  | { kind: 'retry-later' } // a transient ML-side error — don't condemn a token that might still be fine
+  | { kind: 'flag-reauth' } // unchanged snapshot + a non-retryable rejection — the refresh token really is dead
+
+/**
+ * The single decision `getAccessTokenForSeller` makes on a failed refresh. A
+ * changed snapshot ALWAYS wins first — even a 400 is meaningless once we know a
+ * sibling caller already refreshed this connection (our copy of the refresh token
+ * was already stale before we even called ML with it). Only an unchanged
+ * snapshot + a non-retryable status is genuine evidence the refresh token is dead.
+ */
+export function decideRefreshFailure(ctx: RefreshFailureContext): RefreshFailureDecision {
+  if (ctx.latestRefreshTokenEnc !== ctx.snapshotRefreshTokenEnc) return { kind: 'use-latest' }
+  if (isRetryableMlRefreshStatus(ctx.httpStatus)) return { kind: 'retry-later' }
+  return { kind: 'flag-reauth' }
+}
+
 // ── Connection health (for the seller status surface) ──────────────────────────
 // `needs_reauth` is the Sprint-5 addition: a token refresh actually FAILED (the
 // refresh token was revoked/expired), so the seller must reconnect. It outranks

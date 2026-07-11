@@ -48,7 +48,13 @@ export async function exchangeCode(code: string): Promise<MlTokenResponse> {
   return res.json()
 }
 
-/** Swap a refresh token for a fresh access + refresh token pair. */
+/**
+ * Swap a refresh token for a fresh access + refresh token pair. On rejection the
+ * thrown error carries `.httpStatus` (same pattern as `updateMlItem`'s
+ * `.mlCode`/`.mlMessage`) so the caller can tell a transient ML-side failure
+ * (5xx/429) apart from a non-retryable one (400/401 — the refresh token is
+ * genuinely dead/already used) without re-parsing the message string.
+ */
 export async function refreshMlToken(refreshToken: string): Promise<MlTokenResponse> {
   const res = await fetch(`${ML_API}/oauth/token`, {
     method: 'POST',
@@ -60,7 +66,9 @@ export async function refreshMlToken(refreshToken: string): Promise<MlTokenRespo
       refresh_token: refreshToken,
     }),
   })
-  if (!res.ok) throw new Error(`ML token refresh failed: ${res.status}`)
+  if (!res.ok) {
+    throw Object.assign(new Error(`ML token refresh failed: ${res.status}`), { httpStatus: res.status })
+  }
   return res.json()
 }
 

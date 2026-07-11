@@ -8,6 +8,8 @@ import {
   redactSyncMetadata,
   MAX_SYNC_MESSAGE_LEN,
   SYNC_EVENT_KINDS,
+  isRetryableMlRefreshStatus,
+  decideRefreshFailure,
 } from '../_utils'
 
 /**
@@ -116,5 +118,80 @@ describe('redactSyncMetadata — caller-provided metadata cannot leak a token (S
   it('returns null for nullish', () => {
     expect(redactSyncMetadata(null)).toBeNull()
     expect(redactSyncMetadata(undefined)).toBeNull()
+  })
+})
+
+describe('isRetryableMlRefreshStatus — transient vs. non-retryable ML rejection (S0 bug fix)', () => {
+  it('treats a missing status (network error / no response) as retryable', () => {
+    expect(isRetryableMlRefreshStatus(null)).toBe(true)
+    expect(isRetryableMlRefreshStatus(undefined)).toBe(true)
+  })
+
+  it('treats 429 and any 5xx as retryable', () => {
+    expect(isRetryableMlRefreshStatus(429)).toBe(true)
+    expect(isRetryableMlRefreshStatus(500)).toBe(true)
+    expect(isRetryableMlRefreshStatus(502)).toBe(true)
+    expect(isRetryableMlRefreshStatus(503)).toBe(true)
+  })
+
+  it('treats 400 and 401 as non-retryable (a genuine dead/invalid refresh token)', () => {
+    expect(isRetryableMlRefreshStatus(400)).toBe(false)
+    expect(isRetryableMlRefreshStatus(401)).toBe(false)
+  })
+
+  it('treats other 4xx as non-retryable too', () => {
+    expect(isRetryableMlRefreshStatus(403)).toBe(false)
+    expect(isRetryableMlRefreshStatus(404)).toBe(false)
+  })
+})
+
+describe('decideRefreshFailure — the race/failure classification (S0 bug fix: ML re-auth churn)', () => {
+  /**
+   * Two identically-scheduled cron jobs (`reconcile-ml-order-status` +
+   * `reconcile-ml-inventory`, both `* /30 * * * *`) can both call
+   * `getAccessTokenForSeller` for the same seller in the same tick. ML's refresh
+   * grant is single-use, so exactly one of two concurrent refreshes wins — the
+   * loser must never be treated as proof the refresh token is dead.
+   */
+  const snapshot = 'enc(refresh-token-v1)'
+
+  it('a changed snapshot (a sibling already won) is always use-latest, even on a hard 400', () => {
+    const decision = decideRefreshFailure({
+      snapshotRefreshTokenEnc: snapshot,
+      latestRefreshTokenEnc: 'enc(refresh-token-v2)', // the sibling's fresh write
+      httpStatus: 400,
+    })
+    expect(decision).toEqual({ kind: 'use-latest' })
+  })
+
+  it('an unchanged snapshot + a retryable status (5xx/429/no response) is retry-later, never flag-reauth', () => {
+    for (const httpStatus of [500, 502, 429, null, undefined]) {
+      expect(
+        decideRefreshFailure({ snapshotRefreshTokenEnc: snapshot, latestRefreshTokenEnc: snapshot, httpStatus }),
+      ).toEqual({ kind: 'retry-later' })
+    }
+  })
+
+  it('an unchanged snapshot + a non-retryable status (400/401) is flag-reauth — the ONLY genuine-dead-token case', () => {
+    expect(
+      decideRefreshFailure({ snapshotRefreshTokenEnc: snapshot, latestRefreshTokenEnc: snapshot, httpStatus: 400 }),
+    ).toEqual({ kind: 'flag-reauth' })
+    expect(
+      decideRefreshFailure({ snapshotRefreshTokenEnc: snapshot, latestRefreshTokenEnc: snapshot, httpStatus: 401 }),
+    ).toEqual({ kind: 'flag-reauth' })
+  })
+
+  it('exactly one of two concurrent refreshes ⇒ the winner persists, the loser never flags reauth', () => {
+    // Simulates the two-cron-job race end to end at the decision layer: both
+    // callers snapshot the SAME refresh token; the winner's write changes it;
+    // the loser's failed call must classify as use-latest, not flag-reauth.
+    const winnerWroteRefreshTokenEnc = 'enc(refresh-token-v2)'
+    const loserDecision = decideRefreshFailure({
+      snapshotRefreshTokenEnc: snapshot,
+      latestRefreshTokenEnc: winnerWroteRefreshTokenEnc, // winner's write already landed
+      httpStatus: 400, // ML rejected the loser's now-stale single-use token
+    })
+    expect(loserDecision.kind).not.toBe('flag-reauth')
+    expect(loserDecision).toEqual({ kind: 'use-latest' })
   })
 })
