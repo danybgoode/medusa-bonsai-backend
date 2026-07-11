@@ -1,8 +1,9 @@
 /**
- * Platform coupons — coupons owned by the platform's own shop (`miyagiprints`,
- * the print-ad seller), as opposed to a regular seller's coupons. These are the
- * funding-safe "marketplace/admin coupons": redeemable on print-ad checkout,
- * which the platform actually bills. The SAME route mints referral rewards.
+ * Platform coupons — coupons owned by the platform-owned seller (resolved via
+ * `PLATFORM_SELLER_SLUG`, see ../_utils/platform-seller), as opposed to a
+ * regular seller's coupons. These are the funding-safe "marketplace/admin
+ * coupons": redeemable on print-ad checkout, which the platform actually
+ * bills. The SAME route mints referral rewards.
  *
  *   POST   /internal/platform-coupons        — create a platform coupon
  *   GET    /internal/platform-coupons        — list platform coupons (+usage)
@@ -24,9 +25,7 @@ import {
   normalizeCode,
   type CouponInput,
 } from '../../store/_utils/coupons'
-
-// The platform's own shop that bills print-ad placements.
-const PLATFORM_SELLER_SLUG = 'miyagiprints'
+import { resolvePlatformSellerSlug } from '../_utils/platform-seller'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -42,9 +41,10 @@ function couponIdsOf(seller: { metadata?: unknown }): string[] {
 
 async function resolvePlatformSeller(req: MedusaRequest) {
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
-  const slug = ((req.body as { seller_slug?: string })?.seller_slug)
-    || (req.query.seller_slug as string)
-    || PLATFORM_SELLER_SLUG
+  const slug = resolvePlatformSellerSlug(
+    ((req.body as { seller_slug?: string })?.seller_slug) || (req.query.seller_slug as string),
+  )
+  if (!slug) return { sellerService, seller: null }
   const [seller] = await sellerService.listSellers({ slug } as never, { take: 1 })
   return { sellerService, seller }
 }
