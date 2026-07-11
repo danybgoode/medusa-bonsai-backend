@@ -9,6 +9,10 @@
  * The flag is the REAL enforcement: the routes resolve `isEnabled(...)` once, hand
  * the boolean here, and act on the decision. When OFF, the quote seam short-circuits
  * to the arranged-delivery fallback and the label seam rejects → manual carrier.
+ *
+ * Shipping-provider-expansion · Sprint 2: a granted tenant (`seller.metadata.envia_grant`,
+ * comp-grant precedent) rides Envía even while the platform flag stays OFF —
+ * `sellerGranted` is a second, independent passthrough alongside `enviaEnabled`.
  */
 
 /**
@@ -29,6 +33,8 @@ export const ENVIA_LABEL_DISABLED_MESSAGE =
 export type EnviaKillSwitch = {
   /** `shipping.envia_enabled` — when false, all Envía carrier calls are blocked. */
   enviaEnabled: boolean
+  /** `seller.metadata.envia_grant` present — a per-tenant comp override, independent of the platform flag. */
+  sellerGranted: boolean
 }
 
 export type EnviaGateDecision =
@@ -36,11 +42,11 @@ export type EnviaGateDecision =
   | { blocked: true; reason: 'platform_envia_disabled' }
 
 /**
- * Decide whether an Envía carrier call (quote or label) may proceed. Pure: ON →
- * passthrough, OFF → blocked. Never throws.
+ * Decide whether an Envía carrier call (quote or label) may proceed. Pure:
+ * platform ON, or a granted seller, → passthrough; neither → blocked. Never throws.
  */
-export function enviaKillGate({ enviaEnabled }: EnviaKillSwitch): EnviaGateDecision {
-  return enviaEnabled
+export function enviaKillGate({ enviaEnabled, sellerGranted }: EnviaKillSwitch): EnviaGateDecision {
+  return enviaEnabled || sellerGranted
     ? { blocked: false }
     : { blocked: true, reason: 'platform_envia_disabled' }
 }

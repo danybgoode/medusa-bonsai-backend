@@ -44,11 +44,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const seller = await resolveSeller(req)
   if (!seller) return res.status(401).json({ message: 'Unauthorized' })
 
-  // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open).
-  // This whole route is the Envía label path; when off, reject so the UI steers to
-  // the existing manual-carrier flow. Server-side gate — agents / stale ship screens
-  // can't bypass it.
-  if (enviaKillGate({ enviaEnabled: await isEnabled('shipping.envia_enabled') }).blocked) {
+  // Resolve the seller record up front — needed both for the comp-grant check
+  // below (Sprint 2: seller.metadata.envia_grant) and, further down, for the
+  // origin address (reused there, no duplicate fetch).
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+  const [sellerRecord] = await sellerService.listSellers({ id: seller.sellerId })
+  const sellerMeta = (sellerRecord?.metadata ?? {}) as Record<string, any>
+  const sellerGranted = Boolean(sellerMeta.envia_grant)
+
+  // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open),
+  // widened by a per-seller comp grant (Sprint 2: seller.metadata.envia_grant).
+  // This whole route is the Envía label path; when neither applies, reject so
+  // the UI steers to the existing manual-carrier flow. Server-side gate —
+  // agents / stale ship screens can't bypass it.
+  if (enviaKillGate({ enviaEnabled: await isEnabled('shipping.envia_enabled'), sellerGranted }).blocked) {
     return res.status(422).json({ message: ENVIA_LABEL_DISABLED_MESSAGE })
   }
 
@@ -131,10 +140,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     email: (order.email as string | undefined) ?? undefined,
   }
 
-  // Origin from seller metadata
-  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
-  const [sellerRecord] = await sellerService.listSellers({ id: seller.sellerId })
-  const sellerMeta = (sellerRecord?.metadata ?? {}) as Record<string, any>
+  // Origin from seller metadata (sellerRecord/sellerMeta resolved above, at the gate check)
   const sellerSettings = (sellerMeta.settings ?? {}) as Record<string, any>
   const shippingSettings = (sellerSettings.shipping ?? {}) as Record<string, any>
   const originRaw = (shippingSettings.origin_address ?? {}) as Record<string, any>
