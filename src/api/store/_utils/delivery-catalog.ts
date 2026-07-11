@@ -117,3 +117,31 @@ export function buildDeliveryCatalog(input: BuildDeliveryCatalogInput): Delivery
 
   return { deliveryMethods, onlyCoordinated: effectiveArranged }
 }
+
+export type ResolveDeliveryModeForWriteResult =
+  | { ok: true; value: DeliveryMode }
+  | { ok: false; message: string }
+
+/**
+ * S1.2 — the write-path rule shared by createSellerProduct and
+ * updateSellerProduct: validate the requested delivery_mode, then force
+ * 'arranged' for service/rental listings regardless of what was requested
+ * (checkout-options already treats those types as never-carrier-shippable —
+ * an independent carrier/arranged choice for a haircut has no coherent
+ * meaning, and forcing it server-side, not just hiding the UI, protects
+ * against a direct API/MCP write bypassing the listing-editor toggle).
+ * `requested: null` resets to the default ('carrier') for non-service/rental.
+ */
+export function resolveDeliveryModeForWrite(input: {
+  listingType: string
+  requested: DeliveryMode | null | undefined
+}): ResolveDeliveryModeForWriteResult {
+  const { listingType, requested } = input
+  if (requested != null && requested !== 'carrier' && requested !== 'arranged') {
+    return { ok: false, message: "delivery_mode must be 'carrier' or 'arranged'" }
+  }
+  if (listingType === 'service' || listingType === 'rental') {
+    return { ok: true, value: 'arranged' }
+  }
+  return { ok: true, value: requested ?? 'carrier' }
+}

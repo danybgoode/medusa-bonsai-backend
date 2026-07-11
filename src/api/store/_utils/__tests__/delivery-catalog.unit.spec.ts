@@ -1,4 +1,4 @@
-import { buildDeliveryCatalog } from '../delivery-catalog'
+import { buildDeliveryCatalog, resolveDeliveryModeForWrite } from '../delivery-catalog'
 
 /**
  * Arranged-only delivery · Sprint 1 · S1.1 (backend enforcement).
@@ -96,5 +96,39 @@ describe('buildDeliveryCatalog · pickup spot mapping (unchanged behavior)', () 
     })
     const pickup = deliveryMethods.find(m => m.id === 'local_pickup')
     expect(pickup?.pickup_spots?.[0]).toMatchObject({ id: 'Tienda Centro', notes: 'Toca el timbre' })
+  })
+})
+
+/**
+ * Arranged-only delivery · Sprint 1 · S1.2 (product-write path rule, shared by
+ * createSellerProduct + updateSellerProduct).
+ */
+describe('resolveDeliveryModeForWrite', () => {
+  it('defaults product listings to carrier when nothing is requested', () => {
+    expect(resolveDeliveryModeForWrite({ listingType: 'product', requested: undefined })).toEqual({ ok: true, value: 'carrier' })
+  })
+
+  it('honors an explicit carrier/arranged request for a product listing', () => {
+    expect(resolveDeliveryModeForWrite({ listingType: 'product', requested: 'arranged' })).toEqual({ ok: true, value: 'arranged' })
+    expect(resolveDeliveryModeForWrite({ listingType: 'product', requested: 'carrier' })).toEqual({ ok: true, value: 'carrier' })
+  })
+
+  it('null resets a product listing to the carrier default', () => {
+    expect(resolveDeliveryModeForWrite({ listingType: 'product', requested: null })).toEqual({ ok: true, value: 'carrier' })
+  })
+
+  it('rejects an invalid value', () => {
+    const result = resolveDeliveryModeForWrite({ listingType: 'product', requested: 'coordinated' as any })
+    expect(result.ok).toBe(false)
+  })
+
+  it('forces service listings to arranged regardless of what was requested', () => {
+    expect(resolveDeliveryModeForWrite({ listingType: 'service', requested: 'carrier' })).toEqual({ ok: true, value: 'arranged' })
+    expect(resolveDeliveryModeForWrite({ listingType: 'service', requested: undefined })).toEqual({ ok: true, value: 'arranged' })
+  })
+
+  it('forces rental listings to arranged regardless of what was requested', () => {
+    expect(resolveDeliveryModeForWrite({ listingType: 'rental', requested: 'carrier' })).toEqual({ ok: true, value: 'arranged' })
+    expect(resolveDeliveryModeForWrite({ listingType: 'rental', requested: null })).toEqual({ ok: true, value: 'arranged' })
   })
 })
