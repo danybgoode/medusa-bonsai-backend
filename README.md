@@ -1,62 +1,51 @@
-<p align="center">
-  <a href="https://www.medusajs.com">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://user-images.githubusercontent.com/59018053/229103275-b5e482bb-4601-46e6-8142-244f531cebdb.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://user-images.githubusercontent.com/59018053/229103726-e5b529a3-9b3f-4970-8a1f-c6af37f087bf.svg">
-    <img alt="Medusa logo" src="https://user-images.githubusercontent.com/59018053/229103726-e5b529a3-9b3f-4970-8a1f-c6af37f087bf.svg">
-    </picture>
-  </a>
-</p>
-<h1 align="center">
-  Medusa
-</h1>
+# medusa-bonsai-backend
 
-<h4 align="center">
-  <a href="https://docs.medusajs.com">Documentation</a> |
-  <a href="https://www.medusajs.com">Website</a>
-</h4>
+The [Medusa v2](https://docs.medusajs.com) commerce engine for
+[Miyagi Sánchez](https://miyagisanchez.com) — a multi-seller marketplace where anyone in Mexico
+can open a shop and sell with no commission, across the marketplace, their own domain, an
+embeddable widget, or to AI shopping agents. This repo owns **every commerce primitive**:
+products, orders, cart/checkout, payments, fulfillment, returns, regions, and the custom modules
+that extend Medusa for this marketplace.
 
-<p align="center">
-  Building blocks for digital commerce
-</p>
-<p align="center">
-  <a href="https://github.com/medusajs/medusa/blob/master/CONTRIBUTING.md">
-    <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat" alt="PRs welcome!" />
-  </a>
-    <a href="https://www.producthunt.com/posts/medusa"><img src="https://img.shields.io/badge/Product%20Hunt-%231%20Product%20of%20the%20Day-%23DA552E" alt="Product Hunt"></a>
-  <a href="https://discord.gg/xpCwq3Kfn8">
-    <img src="https://img.shields.io/badge/chat-on%20discord-7289DA.svg" alt="Discord Chat" />
-  </a>
-  <a href="https://twitter.com/intent/follow?screen_name=medusajs">
-    <img src="https://img.shields.io/twitter/follow/medusajs.svg?label=Follow%20@medusajs" alt="Follow @medusajs" />
-  </a>
-</p>
+This repo is part of a four-repo platform; the product roadmap and cross-repo practice live in the
+root docs repo, [`miyagi-product-management`](https://github.com/danybgoode/miyagi-product-management).
 
-## Compatibility
+## What this repo owns
 
-This starter is compatible with versions >= 2 of `@medusajs/medusa`. 
+Custom modules under `src/modules/`, on top of the standard Medusa commerce modules:
 
-## Getting Started
+- `seller` — shops/sellers/vendors (not `@medusajs/marketplace` — no such plugin is used)
+- `subscriptions` — recurring seller offerings
+- `profit` — the per-sale margin ledger ("Ganancias")
+- `mercadolibre` — Mercado Libre catalog/order sync
+- `fulfillment-envia` — Envía.com shipping (Estafeta live)
+- `auth-clerk` — validates the frontend's Clerk JWTs so Medusa can identify customers
+- Payment providers: `payment-stripe-connect`, `payment-mercadopago`, `payment-spei`,
+  `payment-manual`, `payment-manual-mx`, `payment-cash`
 
-Visit the [Quickstart Guide](https://docs.medusajs.com/learn/installation) to set up a server.
+## Practice
 
-Visit the [Docs](https://docs.medusajs.com/learn/installation#get-started) to learn more about our system requirements.
+Follows the same gitflow, risk-tiered PR review, and deterministic-gate discipline as the rest of
+the platform — see [`Roadmap/WAYS-OF-WORKING.md`](https://github.com/danybgoode/miyagi-product-management/blob/main/Roadmap/WAYS-OF-WORKING.md)
+in the root repo. This repo's own deterministic gate is `medusa build` (which also generates the
+`.medusa/types` that `tsc` needs) → `tsc --noEmit` → `npm run test:unit`, required on every PR.
 
-## What is Medusa
+## Deploy
 
-Medusa is a set of commerce modules and tools that allow you to build rich, reliable, and performant commerce applications without reinventing core commerce logic. The modules can be customized and used to build advanced ecommerce stores, marketplaces, or any product that needs foundational commerce primitives. All modules are open-source and freely available on npm.
+Merging to `main` deploys: Cloud Build (us-east4) → Cloud Run `medusa-web`, ~12 min. There is no
+per-branch preview here — live confirmation happens post-merge against production.
 
-Learn more about [Medusa’s architecture](https://docs.medusajs.com/learn/introduction/architecture) and [commerce modules](https://docs.medusajs.com/learn/fundamentals/modules/commerce-modules) in the Docs.
+## Quickstart
 
-## Community & Contributions
+```bash
+npm install
+npx medusa db:migrate
+npm run dev   # medusa develop, :9000
+```
 
-The community and core team are available in [GitHub Discussions](https://github.com/medusajs/medusa/discussions), where you can ask for support, discuss roadmap, and share ideas.
+Open the admin dashboard at `localhost:9000/app`. Needs a Postgres `DATABASE_URL`, Stripe /
+MercadoPago credentials, and `CLERK_SECRET_KEY` (validates the frontend's JWTs) — see the full env
+list in the frontend repo's `AGENTS.md`.
 
-Join our [Discord server](https://discord.com/invite/medusajs) to meet other community members.
-
-## Other channels
-
-- [GitHub Issues](https://github.com/medusajs/medusa/issues)
-- [Twitter](https://twitter.com/medusajs)
-- [LinkedIn](https://www.linkedin.com/company/medusajs)
-- [Medusa Blog](https://medusajs.com/blog/)
+Other scripts: `npm run build` (`medusa build`), `npm run test:unit`, `npm run
+test:integration:http` / `test:integration:modules` (need Postgres).
