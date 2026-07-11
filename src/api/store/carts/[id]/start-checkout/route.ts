@@ -355,8 +355,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const cartProducts = cartProductIds.length
       ? await loadProductsForCheckout(remoteQuery as any, cartProductIds)
       : (productRecord ? [productRecord] : [])
-    const cartHasCoordinatedItem = (cartProducts as any[]).some((p) => {
+    // Fail CLOSED on incomplete hydration: if remoteQuery returned fewer rows
+    // than cart items reference, a coordinated line's product could be exactly
+    // the one that silently dropped out of `.some()` below — that must not
+    // read as "not coordinated." Missing hydration is treated as coordinated.
+    const hydrationIncomplete = cartProductIds.length > 0 && cartProducts.length < cartProductIds.length
+    const cartHasCoordinatedItem = hydrationIncomplete || (cartProducts as any[]).some((p) => {
       const meta = (p?.metadata ?? {}) as Record<string, unknown>
+      // Mirrors checkout-options' isDigital derivation (route.ts ~line 85) minus
+      // the client-supplied `is_digital` query param, which has no server-side
+      // equivalent here — no separate `metadata.is_digital` field is ever
+      // written (grepped the product write path), so listingType is the only
+      // signal available and the two can't diverge in practice.
       const listingType = (p?.type?.value as string | undefined) ?? (meta.listing_type as string | undefined) ?? 'product'
       const deliveryMode: DeliveryMode = meta.delivery_mode === 'arranged' ? 'arranged' : 'carrier'
       const isDigitalItem = listingType === 'digital' || listingType === 'print_ad'
