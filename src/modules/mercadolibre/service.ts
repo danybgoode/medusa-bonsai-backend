@@ -41,6 +41,7 @@ import {
   decidePublishAction,
   mlSiteForCountry,
   summarizeSyncEvent,
+  decideRefreshFailure,
   type SanitizedMlConnection,
   type MlPublishInput,
   type MlPublishAction,
@@ -126,6 +127,25 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
    * The load-bearing primitive every later sprint uses: return a valid access
    * token for the seller, refreshing (and persisting the new tokens) when it is
    * within the refresh-skew window. Never logs the token.
+   *
+   * **Sprint 0 bug fix (ML re-auth churn):** this has no distributed lock — two
+   * identically-scheduled cron jobs (`reconcile-ml-order-status` +
+   * `reconcile-ml-inventory`, both `* /30 * * * *`) can both decide to refresh the
+   * SAME seller's connection in the same tick. ML's refresh grant is single-use,
+   * so one of two concurrent callers is guaranteed a rejection — indistinguishable
+   * from a genuinely dead refresh token to a naive catch block, which is exactly
+   * what caused sellers to be wrongly flagged `needs_reauth` on a healthy
+   * connection. Three DB-level (no new infra) mitigations, in order:
+   *  1. Re-read + re-check `shouldRefresh` right before calling ML — a sibling
+   *     caller may have already refreshed since our first read; skip the network
+   *     call entirely when so (closes most of the race window for free).
+   *  2. Snapshot `refresh_token_enc` before calling ML; on success, re-check it
+   *     before persisting — a concurrent winner's newer pair is never clobbered.
+   *  3. On failure, classify it (`decideRefreshFailure`): a changed snapshot means
+   *     a sibling already won (use its result, never flag reauth); a transient ML
+   *     error (5xx/429/no response) rides the still-valid current token a little
+   *     longer instead of condemning it; only an unchanged snapshot + a
+   *     non-retryable rejection is genuine evidence the refresh token is dead.
    */
   async getAccessTokenForSeller(sellerId: string): Promise<string> {
     const conn = await this.getConnection(sellerId)
@@ -133,37 +153,89 @@ class MercadolibreModuleService extends MedusaService({ MlConnection, ProductMlL
       throw Object.assign(new Error('No active MercadoLibre connection'), { code: 'ML_NOT_CONNECTED' })
     }
 
-    if (shouldRefresh(conn.expires_at)) {
-      const refresh = decryptToken(conn.refresh_token_enc)
-      if (!refresh) throw await this.flagReauth(conn, 'refresh token unavailable')
-      let tokens
-      try {
-        tokens = await refreshMlToken(refresh)
-      } catch (e) {
-        // A revoked/expired refresh token throws here. BEFORE Sprint 5 this
-        // propagated uncaught → a generic 502 while the connection still read
-        // `connected`, so the seller never learned they must reconnect. Now we
-        // persist a `needs_reauth` flag (surfaced by `deriveConnectionHealth`) and
-        // rethrow a tagged code the routes map to a distinct re-auth response.
-        throw await this.flagReauth(conn, e instanceof Error ? e.message : String(e))
-      }
-      const meta = (conn.metadata ?? {}) as Record<string, unknown>
-      // Clear any stale reauth flag on a successful refresh (preserve the rest).
-      const { needs_reauth: _nr, last_error: _le, last_error_at: _lea, ...keepMeta } = meta
-      await this.updateMlConnections({
-        id: conn.id,
-        access_token_enc: encryptToken(tokens.access_token),
-        refresh_token_enc: encryptToken(tokens.refresh_token),
-        expires_at: new Date(Date.now() + tokens.expires_in * 1000),
-        last_refreshed_at: new Date(),
-        metadata: keepMeta,
-      })
-      return tokens.access_token
+    if (!shouldRefresh(conn.expires_at)) {
+      const token = decryptToken(conn.access_token_enc)
+      if (!token) throw new Error('ML access token unavailable')
+      return token
     }
 
-    const token = decryptToken(conn.access_token_enc)
-    if (!token) throw new Error('ML access token unavailable')
-    return token
+    // Mitigation 1: re-read right before touching ML. A sibling caller (e.g. the
+    // other */30 reconcile job) may have already refreshed this connection
+    // between our first read and now.
+    const fresh = await this.getConnection(sellerId)
+    if (!fresh || fresh.status !== 'connected') {
+      throw Object.assign(new Error('No active MercadoLibre connection'), { code: 'ML_NOT_CONNECTED' })
+    }
+    if (!shouldRefresh(fresh.expires_at)) {
+      const token = decryptToken(fresh.access_token_enc)
+      if (token) return token
+    }
+
+    const snapshotRefreshTokenEnc = fresh.refresh_token_enc
+    const refresh = decryptToken(snapshotRefreshTokenEnc)
+    if (!refresh) throw await this.flagReauth(fresh, 'refresh token unavailable')
+
+    let tokens
+    try {
+      tokens = await refreshMlToken(refresh)
+    } catch (e) {
+      const httpStatus = (e as { httpStatus?: number } | null)?.httpStatus ?? null
+      const latest = await this.getConnection(sellerId)
+      const decision = decideRefreshFailure({
+        snapshotRefreshTokenEnc,
+        latestRefreshTokenEnc: latest?.refresh_token_enc ?? snapshotRefreshTokenEnc,
+        httpStatus,
+      })
+
+      if (decision.kind === 'use-latest' && latest) {
+        // A sibling caller already won this race and persisted a newer pair —
+        // our copy of the refresh token was already stale before we ever called
+        // ML with it. Use theirs; never flag reauth on a benign race loss.
+        const token = decryptToken(latest.access_token_enc)
+        if (token && !shouldRefresh(latest.expires_at)) return token
+      }
+      if (decision.kind === 'retry-later' || decision.kind === 'use-latest') {
+        // Transient ML-side error, or the sibling's pair is (rarely) also due —
+        // don't condemn a token that might still be fine. Ride the CURRENT
+        // access token if it isn't literally expired yet; the next call retries.
+        const stillValid = decryptToken(fresh.access_token_enc)
+        if (stillValid && !shouldRefresh(fresh.expires_at, Date.now(), 0)) return stillValid
+        throw Object.assign(new Error('MercadoLibre token refresh temporarily failed'), { code: 'ML_REFRESH_TRANSIENT' })
+      }
+
+      // Non-retryable rejection on an unchanged snapshot — the refresh token
+      // really is dead. This is exactly what flagReauth exists for.
+      // A revoked/expired refresh token throws here. BEFORE Sprint 5 this
+      // propagated uncaught → a generic 502 while the connection still read
+      // `connected`, so the seller never learned they must reconnect. Now we
+      // persist a `needs_reauth` flag (surfaced by `deriveConnectionHealth`) and
+      // rethrow a tagged code the routes map to a distinct re-auth response.
+      throw await this.flagReauth(fresh, e instanceof Error ? e.message : String(e))
+    }
+
+    // Mitigation 2: snapshot-and-compare before persisting, so a slower
+    // concurrent winner's write can never be clobbered by our (now-redundant) one.
+    const latest = await this.getConnection(sellerId)
+    if (latest && latest.refresh_token_enc !== snapshotRefreshTokenEnc) {
+      const token = decryptToken(latest.access_token_enc)
+      if (token && !shouldRefresh(latest.expires_at)) return token
+      // Their pair is (rarely) also already due for refresh — our freshly
+      // obtained pair is still ML-valid, so fall through and persist it rather
+      // than discarding a good pair.
+    }
+
+    const meta = (fresh.metadata ?? {}) as Record<string, unknown>
+    // Clear any stale reauth flag on a successful refresh (preserve the rest).
+    const { needs_reauth: _nr, last_error: _le, last_error_at: _lea, ...keepMeta } = meta
+    await this.updateMlConnections({
+      id: fresh.id,
+      access_token_enc: encryptToken(tokens.access_token),
+      refresh_token_enc: encryptToken(tokens.refresh_token),
+      expires_at: new Date(Date.now() + tokens.expires_in * 1000),
+      last_refreshed_at: new Date(),
+      metadata: keepMeta,
+    })
+    return tokens.access_token
   }
 
   /**
