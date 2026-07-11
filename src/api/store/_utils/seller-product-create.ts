@@ -188,7 +188,7 @@ export async function createSellerProduct(
     requested: body.delivery_mode,
   })
   if (!deliveryModeResult.ok) {
-    return { ok: false, status: 400, message: deliveryModeResult.message }
+    return { ok: false, status: 422, message: deliveryModeResult.message }
   }
   const deliveryMode = deliveryModeResult.value
 
