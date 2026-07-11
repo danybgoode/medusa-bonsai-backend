@@ -24,7 +24,7 @@ import { toEnviaStateCode } from '../../../../modules/fulfillment-envia/mx-state
 import { isEnabled } from '../../../../lib/flags'
 import { enviaKillGate, ENVIA_ARRANGED_DELIVERY_MESSAGE } from '../../../../lib/envia-killswitch'
 import { correosGate } from '../../../../lib/correos-gate'
-import { quoteCorreos } from '../../../../lib/correos-tariff'
+import { quoteCorreosForPieces } from '../../../../lib/correos-tariff'
 
 const DEFAULT_CARRIERS = ['dhl', 'fedex', 'estafeta', 'ups', 'redpack', 'paquetexpress']
 
@@ -244,15 +244,27 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const handlingFeeCents = Math.max(0, Math.round(shipping.handling_fee_cents ?? 0))
   const rateDisplay = shipping.rate_display ?? 'recommended'
 
-  // Total weight across shippable items, in grams — feeds Correos' flat
-  // national quote (Story 3.1's quoteCorreos), computed alongside the
-  // per-product Envía packages below (same weight resolution, summed).
-  let totalWeightGrams = 0
+  // Per-item weights, in grams — feeds Correos' quote (Story 3.1's
+  // quoteCorreosForPieces), computed alongside the per-product Envía packages
+  // below (same weight resolution). The Impresos tariff is priced "por pieza"
+  // (per piece), NOT by combined cart weight — quoteCorreosForPieces quotes
+  // each item separately and sums the totals (cross-review catch: summing
+  // weights first would wrongly undercharge or reject an eligible multi-item
+  // order once the SUM crossed the 2000 g table max, even though each
+  // individual piece was well within it).
+  const itemWeightsGrams: number[] = []
 
   const packages: EnviaPackage[] = shippable.map((p: any) => {
     const meta = (p.metadata ?? {}) as Record<string, unknown>
-    const weightGrams = (meta.weight_grams as number | undefined) ?? pkgDefaults.weight_grams ?? 500
-    totalWeightGrams += weightGrams
+    // Number(...) tolerates a numeric-string metadata value the same way the
+    // Envía `weight / 1000` arithmetic below already implicitly coerced it —
+    // without this, a string weight silently passed Number.isFinite() as
+    // false in quoteCorreosForPieces and hid Correos with no error
+    // (cross-review catch: Envía and Correos would have read the identical
+    // stored value inconsistently).
+    const rawWeight = Number((meta.weight_grams as number | string | undefined) ?? pkgDefaults.weight_grams ?? 500)
+    const weightGrams = Number.isFinite(rawWeight) && rawWeight > 0 ? rawWeight : 500
+    itemWeightsGrams.push(weightGrams)
     // Max price across all variants — a multi-variant (configurator) listing's
     // declared value should reflect its most expensive combination, not
     // whichever variant happens to be first. Excludes any variant flagged
@@ -280,7 +292,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     }
   })
 
-  const correosQuote = correosSellerEligible ? quoteCorreos(totalWeightGrams) : null
+  const correosQuote = correosSellerEligible ? quoteCorreosForPieces(itemWeightsGrams) : null
   const correosRate = correosQuote ? buildCorreosRate(correosQuote.totalCents) : null
 
   // ── Envía blocked (platform OFF + ungranted): Correos was already

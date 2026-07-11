@@ -65,12 +65,37 @@ export type CorreosQuote = {
 }
 
 /**
- * Quote the Impresos en General rate for a piece of the given weight. Pure, never
- * throws. `null` when the weight is non-positive/non-finite or exceeds the table's max
- * band (2000 g) — the caller must never invent a price outside the published table.
+ * Quote the Impresos en General rate for a SINGLE PIECE of the given weight. Pure,
+ * never throws. `null` when the weight is non-positive/non-finite or exceeds the
+ * table's max band (2000 g) — the caller must never invent a price outside the
+ * published table. The tariff is priced "por pieza" (per piece) — a multi-piece
+ * shipment is NOT one combined weight; see `quoteCorreosForPieces` for that case.
  */
 export function quoteCorreos(weightGrams: number): CorreosQuote | null {
   if (!Number.isFinite(weightGrams) || weightGrams <= 0) return null
   const band = CORREOS_IMPRESOS_BANDS_2026.find((b) => weightGrams <= b.maxGrams)
   return band ? { totalCents: band.totalCents, maxGrams: band.maxGrams } : null
+}
+
+/**
+ * Quote a multi-piece shipment: each item is quoted SEPARATELY (the table is
+ * "peso en gramos por pieza," not a combined-weight schedule — a cart summing all
+ * items into one weight would either undercharge or wrongly reject an otherwise
+ * eligible order once the sum crosses 2000 g). Sums the per-piece totals. `null`
+ * if the list is empty, or if ANY single piece can't be quoted (over the 2000 g
+ * max, or non-positive/non-finite) — Correos can't ship an assortment when one
+ * piece in it is out of the table, so the whole quote fails rather than silently
+ * dropping that piece's cost.
+ */
+export function quoteCorreosForPieces(weightsGrams: ReadonlyArray<number>): CorreosQuote | null {
+  if (weightsGrams.length === 0) return null
+  let totalCents = 0
+  let maxGrams = 0
+  for (const w of weightsGrams) {
+    const quote = quoteCorreos(w)
+    if (!quote) return null
+    totalCents += quote.totalCents
+    maxGrams = Math.max(maxGrams, quote.maxGrams)
+  }
+  return { totalCents, maxGrams }
 }

@@ -1,4 +1,4 @@
-import { quoteCorreos, CORREOS_IMPRESOS_BANDS_2026, CORREOS_IMPRESOS_MAX_GRAMS } from '../correos-tariff'
+import { quoteCorreos, quoteCorreosForPieces, CORREOS_IMPRESOS_BANDS_2026, CORREOS_IMPRESOS_MAX_GRAMS } from '../correos-tariff'
 
 /**
  * Correos de México — Impresos en General tariff (shipping-provider-expansion epic,
@@ -81,5 +81,36 @@ describe('quoteCorreos · out-of-table weights return null, never an invented pr
   it('non-finite → null', () => {
     expect(quoteCorreos(NaN)).toBeNull()
     expect(quoteCorreos(Infinity)).toBeNull()
+  })
+})
+
+describe('quoteCorreosForPieces · multi-piece shipments sum PER-PIECE quotes, never one combined weight', () => {
+  it('sums each piece\'s own band price — two 1500 g pieces is NOT one 3000 g quote', () => {
+    // Cross-review catch: the table is "peso en gramos por pieza." Two 1500 g
+    // pieces quote at $25.00 each ($50.00 total) — summing to 3000 g first
+    // would wrongly return null (over the 2000 g table max).
+    expect(quoteCorreosForPieces([1500, 1500])).toEqual({ totalCents: 5000, maxGrams: 1500 })
+  })
+
+  it('a single-piece list matches quoteCorreos exactly', () => {
+    expect(quoteCorreosForPieces([500])).toEqual(quoteCorreos(500))
+  })
+
+  it('mixed light + heavy pieces sum correctly', () => {
+    // 20 g piece ($6.00) + 2000 g piece ($29.00) = $35.00, maxGrams tracks the heaviest band.
+    expect(quoteCorreosForPieces([20, 2000])).toEqual({ totalCents: 3500, maxGrams: 2000 })
+  })
+
+  it('ANY single piece over the max fails the whole quote (never drops it silently)', () => {
+    expect(quoteCorreosForPieces([500, 2001])).toBeNull()
+  })
+
+  it('an empty piece list → null', () => {
+    expect(quoteCorreosForPieces([])).toBeNull()
+  })
+
+  it('a non-positive/non-finite piece anywhere in the list → null', () => {
+    expect(quoteCorreosForPieces([500, 0])).toBeNull()
+    expect(quoteCorreosForPieces([500, NaN])).toBeNull()
   })
 })
