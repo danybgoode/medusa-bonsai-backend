@@ -28,6 +28,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerPaymentMethods } from '../../../_utils/payment-methods'
 import { isEnabled } from '../../../../../lib/flags'
+import { correosGate } from '../../../../../lib/correos-gate'
 
 type PickupSpot = {
   id?: string
@@ -107,7 +108,17 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const pickupSpots: PickupSpot[] = localPickup ? (shipping.pickup_spots ?? []) : []
   const origin = (shipping.origin_address ?? {}) as Record<string, string | null>
   const hasShippingOrigin = !!(origin.street && origin.city && origin.state && origin.postal_code)
-  const hasLiveShipping = shipping.envia_enabled !== false && hasShippingOrigin
+  // Correos de México (Sprint 3): independent of Envía's own envia_enabled toggle —
+  // a Correos-only seller (Envía off/ungranted) still needs the "shipping" category
+  // to appear so the buyer can reach the Correos rate at the quote seam
+  // (envia/rates). Origin address stays required for both (v1 simplification —
+  // Correos is technically address-independent, but this keeps one setup/UX path).
+  const correosPlatformEnabled = await isEnabled('shipping.correos_enabled')
+  const correosSellerEligible = !correosGate({
+    correosEnabled: correosPlatformEnabled,
+    sellerOptIn: shipping.correos_enabled === true,
+  }).blocked
+  const hasLiveShipping = (shipping.envia_enabled !== false || correosSellerEligible) && hasShippingOrigin
   const preparation = processingLabel(orders.processing_time)
 
   // ── Delivery methods ────────────────────────────────────────────────────

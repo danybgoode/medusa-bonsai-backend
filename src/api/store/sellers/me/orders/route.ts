@@ -262,6 +262,13 @@ export function normalizeMedusaOrder(
     currency: ((order.currency_code as string) ?? 'mxn').toUpperCase(),
     shipping_method: isSupportOrder ? 'support' : selectedFulfillment,
     shipping_cost_cents: 0,
+    // The carrier the BUYER selected at checkout (start-checkout's
+    // normalizeShippingQuote → metadata.shipping_carrier) — e.g. 'correos_mx'
+    // for a Correos Impresos order. Distinct from marketplace_shipments[0].carrier
+    // below, which only exists once the seller has actually shipped; this lets
+    // the ship form pre-fill the right manual carrier BEFORE that happens
+    // (shipping-provider-expansion S3.4).
+    checkout_shipping_carrier: (metadata.shipping_carrier as string | undefined) ?? null,
     // Direct-payment fields so the buyer order/success page can show instructions
     // and the pending-payment state.
     payment_method: (metadata.payment_method as string) ?? null,

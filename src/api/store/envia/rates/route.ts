@@ -23,8 +23,47 @@ import { quoteShipments, mapEnviaError, type EnviaAddress, type EnviaPackage } f
 import { toEnviaStateCode } from '../../../../modules/fulfillment-envia/mx-state-codes'
 import { isEnabled } from '../../../../lib/flags'
 import { enviaKillGate, ENVIA_ARRANGED_DELIVERY_MESSAGE } from '../../../../lib/envia-killswitch'
+import { correosGate } from '../../../../lib/correos-gate'
+import { quoteCorreosForPieces } from '../../../../lib/correos-tariff'
 
 const DEFAULT_CARRIERS = ['dhl', 'fedex', 'estafeta', 'ups', 'redpack', 'paquetexpress']
+
+/**
+ * Correos de México — Impresos en General, a flat NATIONAL rate (no zones, no
+ * carrier lookup). Sprint 3 (shipping-provider-expansion): appended to the same
+ * quote seam as Envía, but independent of it — no funding gate, no comp-grant.
+ */
+const CORREOS_DELIVERY_LABEL = 'Económico · 4–10 días · sin rastreo'
+
+type NormalizedRate = {
+  id: string
+  rateId: string
+  carrier: string
+  service: string
+  baseAmountCents: number
+  handlingFeeCents: number
+  amountCents: number
+  currency: string
+  deliveryEstimate: number | null
+  deliveryLabel: string | null
+  logoUrl: string | null
+}
+
+function buildCorreosRate(totalCents: number): NormalizedRate {
+  return {
+    id: 'correos:impresos:flat',
+    rateId: 'correos_impresos_flat',
+    carrier: 'correos_mx',
+    service: 'Económico',
+    baseAmountCents: totalCents,
+    handlingFeeCents: 0,
+    amountCents: totalCents,
+    currency: 'MXN',
+    deliveryEstimate: null,
+    deliveryLabel: CORREOS_DELIVERY_LABEL,
+    logoUrl: null,
+  }
+}
 
 type IncomingAddress = {
   name?: string
@@ -46,6 +85,8 @@ type IncomingAddress = {
 
 type ShippingSettings = {
   envia_enabled?: boolean
+  /** Correos de México Impresos opt-in (Sprint 3, Story 3.2) — sibling key to envia_enabled. */
+  correos_enabled?: boolean
   allowed_carriers?: string[]
   rate_display?: 'recommended' | 'cheapest' | 'all'
   handling_fee_cents?: number
@@ -84,7 +125,10 @@ function deliveryLabel(days: number | null) {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const enviaEnabled = await isEnabled('shipping.envia_enabled')
+  const [enviaEnabled, correosEnabled] = await Promise.all([
+    isEnabled('shipping.envia_enabled'),
+    isEnabled('shipping.correos_enabled'),
+  ])
 
   const body = req.body as {
     listingId?: string
@@ -156,13 +200,27 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const sellerGranted = Boolean(sellerMeta.envia_grant)
 
+  // ── Shipping settings, resolved EARLY (Sprint 3) — the Correos eligibility
+  // check below needs shipping.correos_enabled before deciding whether the
+  // Envía-blocked early-return should still fire. ───────────────────────────
+  const settings = (sellerMeta.settings ?? {}) as Record<string, unknown>
+  const shipping = (settings.shipping ?? {}) as ShippingSettings
+
+  const correosSellerEligible = !correosGate({
+    correosEnabled,
+    sellerOptIn: shipping.correos_enabled === true,
+  }).blocked
+
+  const enviaBlocked = enviaKillGate({ enviaEnabled, sellerGranted }).blocked
+
   // Platform Envía kill-switch (shipping.envia_enabled, default OFF / fail-open),
   // widened by a per-seller comp grant (Sprint 2: seller.metadata.envia_grant).
-  // When neither applies, short-circuit BEFORE any Envía call to the graceful
-  // arranged-delivery fallback so checkout never hits an unfunded carrier. This
-  // is the real enforcement — UCP/MCP/agent + stale checkout pages proxying
-  // here inherit it.
-  if (enviaKillGate({ enviaEnabled, sellerGranted }).blocked) {
+  // Sprint 3: Correos is a WHOLLY INDEPENDENT provider (no funding gate, no
+  // grant) — a Correos-eligible seller must still be priced even when Envía is
+  // fully blocked, so only short-circuit BEFORE any address/product validation
+  // when NEITHER provider can quote. This is the real enforcement — UCP/MCP/
+  // agent + stale checkout pages proxying here inherit it.
+  if (enviaBlocked && !correosSellerEligible) {
     return res.json({ rates: [], package_count: 0, message: ENVIA_ARRANGED_DELIVERY_MESSAGE })
   }
 
@@ -182,10 +240,77 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(422).json({ error: 'Ningún artículo requiere envío por paquetería.' })
   }
 
-  const settings = (sellerMeta.settings ?? {}) as Record<string, unknown>
-  const shipping = (settings.shipping ?? {}) as ShippingSettings
-  const originRaw = shipping.origin_address
+  const pkgDefaults = shipping.package_defaults ?? {}
+  const handlingFeeCents = Math.max(0, Math.round(shipping.handling_fee_cents ?? 0))
+  const rateDisplay = shipping.rate_display ?? 'recommended'
 
+  // Per-item weights, in grams — feeds Correos' quote (Story 3.1's
+  // quoteCorreosForPieces), computed alongside the per-product Envía packages
+  // below (same weight resolution). The Impresos tariff is priced "por pieza"
+  // (per piece), NOT by combined cart weight — quoteCorreosForPieces quotes
+  // each item separately and sums the totals (cross-review catch: summing
+  // weights first would wrongly undercharge or reject an eligible multi-item
+  // order once the SUM crossed the 2000 g table max, even though each
+  // individual piece was well within it).
+  const itemWeightsGrams: number[] = []
+
+  const packages: EnviaPackage[] = shippable.map((p: any) => {
+    const meta = (p.metadata ?? {}) as Record<string, unknown>
+    // Number(...) tolerates a numeric-string metadata value the same way the
+    // Envía `weight / 1000` arithmetic below already implicitly coerced it —
+    // without this, a string weight silently passed Number.isFinite() as
+    // false in quoteCorreosForPieces and hid Correos with no error
+    // (cross-review catch: Envía and Correos would have read the identical
+    // stored value inconsistently).
+    const rawWeight = Number((meta.weight_grams as number | string | undefined) ?? pkgDefaults.weight_grams ?? 500)
+    const weightGrams = Number.isFinite(rawWeight) && rawWeight > 0 ? rawWeight : 500
+    itemWeightsGrams.push(weightGrams)
+    // Max price across all variants — a multi-variant (configurator) listing's
+    // declared value should reflect its most expensive combination, not
+    // whichever variant happens to be first. Excludes any variant flagged
+    // metadata.disabled (defensive; nothing sets this today — mirrors the
+    // same filter in listing.ts/price-grid route).
+    const priceVariant = ((p.variants ?? []) as any[])
+      .filter((v) => v?.metadata?.disabled !== true)
+      .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number; currency_code?: string }>)
+      // MXN only — mixing currencies into one max() would compare, e.g., a
+      // 50 USD price against a 1000 MXN price as raw integers, producing a
+      // meaningless declared value (cross-agent review catch, 2026-07-05).
+      .filter((pr) => pr?.currency_code === 'mxn')
+      .reduce((max: number | undefined, pr) =>
+        typeof pr?.amount === 'number' && (max === undefined || pr.amount > max) ? pr.amount : max,
+        undefined as number | undefined)
+    return {
+      content: String(p.title ?? 'Producto').slice(0, 80),
+      weight: Math.max(0.1, weightGrams / 1000),
+      declaredValue: priceVariant ? Math.round(priceVariant / 100) : 0,
+      dimensions: {
+        length: Math.max(1, pkgDefaults.length_cm ?? 20),
+        width:  Math.max(1, pkgDefaults.width_cm  ?? 15),
+        height: Math.max(1, pkgDefaults.height_cm ?? 10),
+      },
+    }
+  })
+
+  const correosQuote = correosSellerEligible ? quoteCorreosForPieces(itemWeightsGrams) : null
+  const correosRate = correosQuote ? buildCorreosRate(correosQuote.totalCents) : null
+
+  // ── Envía blocked (platform OFF + ungranted): Correos was already
+  // established eligible above (else the byte-identical fallback already
+  // returned) — respond Correos-only, never touch the Envía API. ───────────
+  if (enviaBlocked) {
+    return res.json(
+      correosRate
+        ? { rates: [correosRate], package_count: packages.length }
+        : { rates: [], package_count: packages.length, message: ENVIA_ARRANGED_DELIVERY_MESSAGE },
+    )
+  }
+
+  // ── Envía live from here on — original flow, unchanged, plus Correos
+  // appended AFTER the price sort/slice below (never inserted by price: the
+  // frontend blindly pre-selects rates[0], so a cheap Correos rate must never
+  // land ahead of a faster live-quoted carrier). ────────────────────────────
+  const originRaw = shipping.origin_address
   if (shipping.envia_enabled === false) {
     return res.status(422).json({ error: 'El vendedor no tiene envío a domicilio activo.' })
   }
@@ -223,40 +348,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     postalCode: body.address.postal_code ?? '',
   }
 
-  const pkgDefaults = shipping.package_defaults ?? {}
   const carriers = shipping.allowed_carriers?.length ? shipping.allowed_carriers : DEFAULT_CARRIERS
-  const handlingFeeCents = Math.max(0, Math.round(shipping.handling_fee_cents ?? 0))
-  const rateDisplay = shipping.rate_display ?? 'recommended'
-
-  const packages: EnviaPackage[] = shippable.map((p: any) => {
-    const meta = (p.metadata ?? {}) as Record<string, unknown>
-    const weightGrams = (meta.weight_grams as number | undefined) ?? pkgDefaults.weight_grams ?? 500
-    // Max price across all variants — a multi-variant (configurator) listing's
-    // declared value should reflect its most expensive combination, not
-    // whichever variant happens to be first. Excludes any variant flagged
-    // metadata.disabled (defensive; nothing sets this today — mirrors the
-    // same filter in listing.ts/price-grid route).
-    const priceVariant = ((p.variants ?? []) as any[])
-      .filter((v) => v?.metadata?.disabled !== true)
-      .flatMap((v) => (v?.prices ?? []) as Array<{ amount?: number; currency_code?: string }>)
-      // MXN only — mixing currencies into one max() would compare, e.g., a
-      // 50 USD price against a 1000 MXN price as raw integers, producing a
-      // meaningless declared value (cross-agent review catch, 2026-07-05).
-      .filter((pr) => pr?.currency_code === 'mxn')
-      .reduce((max: number | undefined, pr) =>
-        typeof pr?.amount === 'number' && (max === undefined || pr.amount > max) ? pr.amount : max,
-        undefined as number | undefined)
-    return {
-      content: String(p.title ?? 'Producto').slice(0, 80),
-      weight: Math.max(0.1, weightGrams / 1000),
-      declaredValue: priceVariant ? Math.round(priceVariant / 100) : 0,
-      dimensions: {
-        length: Math.max(1, pkgDefaults.length_cm ?? 20),
-        width:  Math.max(1, pkgDefaults.width_cm  ?? 15),
-        height: Math.max(1, pkgDefaults.height_cm ?? 10),
-      },
-    }
-  })
 
   try {
     const rates = await quoteShipments({ origin, destination, carriers, packages })
@@ -283,11 +375,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       )
 
     if (normalized.length === 0) {
-      return res.json({
-        rates: [],
-        package_count: packages.length,
-        message: ENVIA_ARRANGED_DELIVERY_MESSAGE,
-      })
+      return res.json(
+        correosRate
+          ? { rates: [correosRate], package_count: packages.length }
+          : { rates: [], package_count: packages.length, message: ENVIA_ARRANGED_DELIVERY_MESSAGE },
+      )
     }
 
     const visible = rateDisplay === 'cheapest'
@@ -296,7 +388,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         ? normalized.slice(0, 8)
         : normalized.slice(0, 3)
 
-    return res.json({ rates: visible, package_count: packages.length })
+    const finalRates = correosRate ? [...visible, correosRate] : visible
+
+    return res.json({ rates: finalRates, package_count: packages.length })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[envia/rates] quote failed:', msg)
