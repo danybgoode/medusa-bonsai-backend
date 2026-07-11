@@ -5,12 +5,15 @@
  * General tariff (depósitos individuales, nacional). Pure, no Medusa/DB imports, so it's
  * directly unit-testable and safe to import from a settings-page preview with no round trip.
  *
- * Source: local copy `references/correos-de-mexico-impresos.pdf` (sheet titled "TARIFA
- * POSTAL 2026"). The Impresos band schedule's own printed vigencia is 24 de febrero de
- * 2010 — it has been stable since (the "2026" in the sheet title is the current in-force
- * publication year, not a rate change). Flat NATIONAL rate — no zones. IVA (16%) is
- * already included in each band's total. A tariff republication is a one-constant PR;
- * spec-locked band-by-band in `__tests__/correos-tariff.unit.spec.ts`.
+ * Source: `references/correos-de-mexico-impresos.pdf` (sheet titled "TARIFA POSTAL
+ * 2026") — tracked in the monorepo-ROOT repo (product docs / research materials live
+ * there, not in this app repo; see the root `Roadmap/WAYS-OF-WORKING.md` repo-structure
+ * note), NOT inside `apps/backend`. Auditable at that path in a full monorepo checkout.
+ * The Impresos band schedule's own printed vigencia is 24 de febrero de 2010 — it has
+ * been stable since (the "2026" in the sheet title is the current in-force publication
+ * year, not a rate change). Flat NATIONAL rate — no zones. IVA (16%) is already included
+ * in each band's total. A tariff republication is a one-constant PR; spec-locked
+ * band-by-band in `__tests__/correos-tariff.unit.spec.ts`.
  *
  * `maxGrams` is the inclusive upper edge of each "hasta" band (peso en gramos por pieza).
  */
