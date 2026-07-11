@@ -26,6 +26,7 @@ import {
   provisionVariantInventory,
 } from './inventory'
 import { generateSku, buildVariantComboKey, validateOptionDimensions } from './seller-product-create'
+import { resolveDeliveryModeForWrite } from './delivery-catalog'
 import { validateTierLadder, type PriceTier } from '../../../lib/price-tiers'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
@@ -188,6 +189,16 @@ export interface SellerProductUpdateBody {
    * how `collection_ids` alone preserves the current platform category.
    */
   category_handle?: string
+  /**
+   * Arranged-only delivery (epic, S1.2): 'carrier' (default) or 'arranged' — a
+   * listing delivered only by coordination (no carrier, no named pickup spot).
+   * Stored on PRODUCT metadata (`metadata.delivery_mode`). `service`/`rental`
+   * listings are FORCED to 'arranged' server-side regardless of this value
+   * (checkout-options already treats them as never-carrier-shippable). `null`
+   * resets to the default ('carrier'). Only takes effect when
+   * shipping.arranged_only_enabled is ON (checkout-options ignores it OFF).
+   */
+  delivery_mode?: 'carrier' | 'arranged' | null
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -759,6 +770,24 @@ export async function updateSellerProduct(
     const nextMeta: Record<string, unknown> = { ...current }
     if (body.miyagi_visible !== undefined) nextMeta.miyagi_visible = body.miyagi_visible
     if (body.ml_enabled !== undefined) nextMeta.ml_enabled = body.ml_enabled
+    await (productService as any).updateProducts(id, { metadata: nextMeta })
+  }
+
+  // ── Delivery mode: carrier vs. arranged — arranged-only-delivery epic S1.2 ──
+  if (body.delivery_mode !== undefined) {
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['metadata', 'type.value'],
+      filters: { id },
+    })
+    const product = rows?.[0] as any
+    const current = (product?.metadata ?? {}) as Record<string, unknown>
+    const listingType = product?.type?.value ?? (current.listing_type as string | undefined) ?? 'product'
+    const deliveryModeResult = resolveDeliveryModeForWrite({ listingType, requested: body.delivery_mode })
+    if (!deliveryModeResult.ok) {
+      return { ok: false, status: 422, message: deliveryModeResult.message }
+    }
+    const nextMeta: Record<string, unknown> = { ...current, delivery_mode: deliveryModeResult.value }
     await (productService as any).updateProducts(id, { metadata: nextMeta })
   }
 

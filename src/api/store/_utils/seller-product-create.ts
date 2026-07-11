@@ -21,6 +21,7 @@ import {
   provisionVariantInventory,
 } from './inventory'
 import { resolveDefaultShippingProfileId } from './fulfillment'
+import { resolveDeliveryModeForWrite } from './delivery-catalog'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 export function generateSku(): string {
@@ -70,6 +71,16 @@ export interface CreateProductBody {
    * route's `variant_id` + `unit_cost_cents` (profit-analyzer S1 · US-1).
    */
   unit_cost_cents?: number | null
+  /**
+   * Arranged-only delivery (epic, S1.2): 'carrier' (default) or 'arranged' — a
+   * listing delivered only by coordination (no carrier, no named pickup spot).
+   * `service`/`rental` listings are FORCED to 'arranged' server-side regardless
+   * of this value (see createSellerProduct) — checkout-options already treats
+   * them as never-carrier-shippable, so an independent choice for those types
+   * has no coherent meaning. Only takes effect when
+   * shipping.arranged_only_enabled is ON (checkout-options ignores it OFF).
+   */
+  delivery_mode?: 'carrier' | 'arranged' | null
 }
 
 const MAX_OPTION_DIMENSIONS = 3
@@ -172,6 +183,15 @@ export async function createSellerProduct(
     return { ok: false, status: 422, message: 'El costo unitario debe ser un entero en centavos de 0 o más.' }
   }
 
+  const deliveryModeResult = resolveDeliveryModeForWrite({
+    listingType: body.listing_type ?? 'product',
+    requested: body.delivery_mode,
+  })
+  if (!deliveryModeResult.ok) {
+    return { ok: false, status: 422, message: deliveryModeResult.message }
+  }
+  const deliveryMode = deliveryModeResult.value
+
   // ── Priced option dimensions (print-configurator listings) ────────────────
   let dimensions: Array<{ title: string; values: string[] }> | undefined
   let dimensionCombos: Array<Record<string, string>> | undefined
@@ -209,6 +229,7 @@ export async function createSellerProduct(
     ...(body.price_cents != null ? { price_cents: body.price_cents } : {}),
     currency: body.currency ?? 'MXN',
     listing_type: body.listing_type ?? 'product',
+    delivery_mode: deliveryMode,
     views: 0,
     // Category/type-specific structured attributes (brand, size, color, year, km…)
     ...(body.attrs && Object.keys(body.attrs).length > 0 ? { attrs: body.attrs } : {}),
