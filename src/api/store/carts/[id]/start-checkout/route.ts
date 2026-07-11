@@ -21,6 +21,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerMpToken, sellerMpConnected, MP_MARKETPLACE_FEE_RATE } from '../../../_utils/mp'
 import { resolveShippingOptionIds } from '../../../_utils/fulfillment'
+import { isCoordinatedListing, type DeliveryMode } from '../../../_utils/delivery-catalog'
 import { isEnabled } from '../../../../../lib/flags'
 import { extractClerkUserId, resolveOrCreateBuyerCustomer } from '../../../_utils/clerk-auth'
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
@@ -172,6 +173,30 @@ async function loadProductForCheckout(remoteQuery: any, productId?: string | nul
   return rows?.[0] ?? null
 }
 
+/**
+ * S2.2 — batched sibling of loadProductForCheckout, for the coordinated-payment
+ * re-derivation below (checks ALL cart line items, not just the first).
+ */
+async function loadProductsForCheckout(remoteQuery: any, productIds: string[]) {
+  if (!productIds.length) return []
+  if (typeof remoteQuery?.graph === 'function') {
+    const { data: rows } = await remoteQuery.graph({
+      entity: 'product',
+      fields: ['id', 'metadata', 'type.value'],
+      filters: { id: productIds },
+    })
+    return rows ?? []
+  }
+
+  const { data: rows } = await remoteQuery({
+    product: {
+      fields: ['id', 'metadata', 'type.value'],
+      variables: { filters: { id: productIds } },
+    },
+  })
+  return rows ?? []
+}
+
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const { id: cartId } = req.params
   const body = req.body as {
@@ -240,16 +265,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(raw) ? raw : null
   })()
 
-  // Rule: coordinated delivery (none/coord) requires manual payment coordination.
-  // Card payments create buyer anxiety when there is no structured delivery path.
+  // Rule: coordinated delivery (none/coord/service/rental) requires manual payment
+  // coordination. Card payments create buyer anxiety when there is no structured
+  // delivery path. This is a CHEAP, early, client-trusting pre-check — fails fast
+  // for well-behaved clients before any DB call. It is NOT the authoritative
+  // guard: a direct API/MCP caller can lie about fulfillment_method, so the real
+  // enforcement is the product-data re-derivation below (S2.2), once the cart's
+  // actual items are loaded.
+  const COORD_MESSAGE = 'Este vendedor coordina la entrega personalmente. El pago debe acordarse junto con la entrega — usa pago directo (SPEI / efectivo).'
   const fulfillmentMethodEarly = supportCheckout ? 'digital' : (body.fulfillment_method ?? 'none')
   if (
-    (fulfillmentMethodEarly === 'none' || fulfillmentMethodEarly === 'coord') &&
+    (fulfillmentMethodEarly === 'none' || fulfillmentMethodEarly === 'coord' ||
+     fulfillmentMethodEarly === 'service' || fulfillmentMethodEarly === 'rental') &&
     !isManual
   ) {
-    return res.status(422).json({
-      message: 'Este vendedor coordina la entrega personalmente. El pago debe acordarse junto con la entrega — usa pago directo (SPEI / efectivo).',
-    })
+    return res.status(422).json({ message: COORD_MESSAGE })
   }
 
   const cartService: ICartModuleService = req.scope.resolve(Modules.CART)
@@ -309,6 +339,43 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const productImage = (item as any).thumbnail ?? null
   const productRecord = await loadProductForCheckout(remoteQuery as any, productId)
   const productMetadata = ((productRecord as any)?.metadata ?? {}) as Record<string, unknown>
+
+  // ── Coordinated-payment re-derivation (S2.2) ──────────────────────────────
+  // The authoritative guard: re-derive "must this cart pay manually" from the
+  // cart's ACTUAL product data (listing type + stored delivery_mode), not the
+  // client-supplied fulfillment_method the early check above trusted. Checks
+  // every line item — any single coordinated item forces manual payment for
+  // the whole cart. Uses the same canonical isCoordinatedListing() that
+  // checkout-options uses, so the two surfaces can never disagree.
+  {
+    const arrangedOnlyEnabledForGuard = await isEnabled('shipping.arranged_only_enabled')
+    const cartProductIds = Array.from(new Set(
+      (cart.items ?? []).map((i: any) => i.product_id ?? i.variant?.product_id).filter(Boolean)
+    )) as string[]
+    const cartProducts = cartProductIds.length
+      ? await loadProductsForCheckout(remoteQuery as any, cartProductIds)
+      : (productRecord ? [productRecord] : [])
+    // Fail CLOSED on incomplete hydration: if remoteQuery returned fewer rows
+    // than cart items reference, a coordinated line's product could be exactly
+    // the one that silently dropped out of `.some()` below — that must not
+    // read as "not coordinated." Missing hydration is treated as coordinated.
+    const hydrationIncomplete = cartProductIds.length > 0 && cartProducts.length < cartProductIds.length
+    const cartHasCoordinatedItem = hydrationIncomplete || (cartProducts as any[]).some((p) => {
+      const meta = (p?.metadata ?? {}) as Record<string, unknown>
+      // Mirrors checkout-options' isDigital derivation (route.ts ~line 85) minus
+      // the client-supplied `is_digital` query param, which has no server-side
+      // equivalent here — no separate `metadata.is_digital` field is ever
+      // written (grepped the product write path), so listingType is the only
+      // signal available and the two can't diverge in practice.
+      const listingType = (p?.type?.value as string | undefined) ?? (meta.listing_type as string | undefined) ?? 'product'
+      const deliveryMode: DeliveryMode = meta.delivery_mode === 'arranged' ? 'arranged' : 'carrier'
+      const isDigitalItem = listingType === 'digital' || listingType === 'print_ad'
+      return isCoordinatedListing({ listingType, deliveryMode, arrangedOnlyEnabled: arrangedOnlyEnabledForGuard, isDigital: isDigitalItem })
+    })
+    if (cartHasCoordinatedItem && !isManual) {
+      return res.status(422).json({ message: COORD_MESSAGE })
+    }
+  }
 
   // ── Rental pricing (server-recomputed total) ──────────────────────────────
   // A rental checkout sends ONLY the date range; the total (nights × rate +

@@ -1,4 +1,4 @@
-import { buildDeliveryCatalog, resolveDeliveryModeForWrite } from '../delivery-catalog'
+import { buildDeliveryCatalog, isCoordinatedListing, resolveDeliveryModeForWrite } from '../delivery-catalog'
 
 /**
  * Arranged-only delivery · Sprint 1 · S1.1 (backend enforcement).
@@ -96,6 +96,55 @@ describe('buildDeliveryCatalog · pickup spot mapping (unchanged behavior)', () 
     })
     const pickup = deliveryMethods.find(m => m.id === 'local_pickup')
     expect(pickup?.pickup_spots?.[0]).toMatchObject({ id: 'Tienda Centro', notes: 'Toca el timbre' })
+  })
+})
+
+/**
+ * Arranged-only delivery · Sprint 2 · S2.2 — regression pinned to the exact hole:
+ * service/rental listings were card-payable in production despite
+ * OPTION_KEY_BY_METHOD already routing their fulfillment to the coord option,
+ * because `onlyCoordinated` only ever looked at the client-supplied
+ * `delivery_mode` query param, never `listingType`. This is the canonical fix,
+ * shared by checkout-options (via buildDeliveryCatalog) and start-checkout's
+ * server-side re-derivation.
+ */
+describe('isCoordinatedListing · S2.2 regression', () => {
+  it('service is coordinated UNCONDITIONALLY — even with the arranged_only flag OFF', () => {
+    expect(isCoordinatedListing({ listingType: 'service', deliveryMode: 'carrier', arrangedOnlyEnabled: false, isDigital: false })).toBe(true)
+  })
+
+  it('rental is coordinated UNCONDITIONALLY — even with the arranged_only flag OFF', () => {
+    expect(isCoordinatedListing({ listingType: 'rental', deliveryMode: 'carrier', arrangedOnlyEnabled: false, isDigital: false })).toBe(true)
+  })
+
+  it('a plain product with deliveryMode carrier is never coordinated', () => {
+    expect(isCoordinatedListing({ listingType: 'product', deliveryMode: 'carrier', arrangedOnlyEnabled: true, isDigital: false })).toBe(false)
+  })
+
+  it('a plain product with deliveryMode arranged is coordinated ONLY when the flag is ON (unchanged S1.1 contract)', () => {
+    expect(isCoordinatedListing({ listingType: 'product', deliveryMode: 'arranged', arrangedOnlyEnabled: false, isDigital: false })).toBe(false)
+    expect(isCoordinatedListing({ listingType: 'product', deliveryMode: 'arranged', arrangedOnlyEnabled: true, isDigital: false })).toBe(true)
+  })
+
+  it('digital listings are never coordinated, even service/rental-typed or arranged', () => {
+    expect(isCoordinatedListing({ listingType: 'service', deliveryMode: 'carrier', arrangedOnlyEnabled: false, isDigital: true })).toBe(false)
+    expect(isCoordinatedListing({ listingType: 'product', deliveryMode: 'arranged', arrangedOnlyEnabled: true, isDigital: true })).toBe(false)
+  })
+})
+
+describe('buildDeliveryCatalog · S2.2 — onlyCoordinated for service/rental is unconditional on the flag', () => {
+  it('service listing: onlyCoordinated true even with arrangedOnlyEnabled false', () => {
+    const { onlyCoordinated } = buildDeliveryCatalog({
+      ...baseInput, listingType: 'service', deliveryMode: 'carrier', arrangedOnlyEnabled: false,
+    })
+    expect(onlyCoordinated).toBe(true)
+  })
+
+  it('rental listing: onlyCoordinated true even with arrangedOnlyEnabled false', () => {
+    const { onlyCoordinated } = buildDeliveryCatalog({
+      ...baseInput, listingType: 'rental', deliveryMode: 'carrier', arrangedOnlyEnabled: false,
+    })
+    expect(onlyCoordinated).toBe(true)
   })
 })
 
