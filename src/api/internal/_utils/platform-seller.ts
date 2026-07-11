@@ -4,7 +4,8 @@
  * `PLATFORM_SELLER_SLUG`, not a hardcoded merchant-shop constant. An explicit
  * override (e.g. a caller-supplied `seller_slug`) always wins over the env var.
  */
-export function resolvePlatformSellerSlug(override?: string | null): string | null {
-  const slug = (override || process.env.PLATFORM_SELLER_SLUG || '').trim()
+export function resolvePlatformSellerSlug(override?: unknown): string | null {
+  const safeOverride = typeof override === 'string' ? override : ''
+  const slug = (safeOverride || process.env.PLATFORM_SELLER_SLUG || '').trim()
   return slug || null
 }

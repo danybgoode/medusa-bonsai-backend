@@ -37,4 +37,10 @@ describe('resolvePlatformSellerSlug', () => {
     process.env.PLATFORM_SELLER_SLUG = 'miyagiprints'
     expect(resolvePlatformSellerSlug('')).toBe('miyagiprints')
   })
+
+  it('a non-string override (e.g. a duplicate query param parsed as an array) falls through safely, no crash', () => {
+    process.env.PLATFORM_SELLER_SLUG = 'miyagiprints'
+    expect(resolvePlatformSellerSlug(['a', 'b'])).toBe('miyagiprints')
+    expect(resolvePlatformSellerSlug({ nope: true })).toBe('miyagiprints')
+  })
 })
