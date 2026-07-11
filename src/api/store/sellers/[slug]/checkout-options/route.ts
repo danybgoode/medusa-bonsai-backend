@@ -19,7 +19,9 @@
  *   - Digital listings hide MercadoPago (digital-goods restriction, preserved).
  *
  * `:slug` may be a seller slug OR a seller id — resolved either way.
- * Query: listing_type=product|digital|service|rental, is_digital=true|false
+ * Query: listing_type=product|digital|service|rental, is_digital=true|false,
+ *        delivery_mode=carrier|arranged (arranged-only delivery epic, S1.1 —
+ *        gated by shipping.arranged_only_enabled; absent/carrier ⇒ today's behavior)
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
@@ -27,27 +29,9 @@ import { Modules } from '@medusajs/framework/utils'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerPaymentMethods } from '../../../_utils/payment-methods'
+import { buildDeliveryCatalog, type PickupSpot } from '../../../_utils/delivery-catalog'
 import { isEnabled } from '../../../../../lib/flags'
 import { correosGate } from '../../../../../lib/correos-gate'
-
-type PickupSpot = {
-  id?: string
-  name?: string
-  address?: string
-  hours?: string
-  scheduling_url?: string
-  notes?: string
-  instructions?: string
-}
-
-type DeliveryMethod = {
-  id: 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'coord'
-  label: string
-  note: string
-  requires_address?: boolean
-  requires_pickup_spot?: boolean
-  pickup_spots?: PickupSpot[]
-}
 
 function processingLabel(value: unknown): string | null {
   const labels: Record<string, string> = {
@@ -99,6 +83,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // Print-ad placements fulfill like digital goods (access / no shipping) — map them
   // so card/manual checkout works and the coord-only rule never trips.
   const isDigital = req.query.is_digital === 'true' || listingType === 'digital' || listingType === 'print_ad'
+  const deliveryMode = req.query.delivery_mode === 'arranged' ? 'arranged' as const : 'carrier' as const
 
   const settings = ((seller.metadata ?? {}) as any).settings ?? {}
   const shipping = (settings.shipping ?? {}) as Record<string, any>
@@ -120,56 +105,20 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }).blocked
   const hasLiveShipping = (shipping.envia_enabled !== false || correosSellerEligible) && hasShippingOrigin
   const preparation = processingLabel(orders.processing_time)
+  // Arranged-only delivery (epic, S1.1) — flag OFF or delivery_mode absent/carrier
+  // reproduces today's behavior byte-for-byte (see buildDeliveryCatalog).
+  const arrangedOnlyEnabled = await isEnabled('shipping.arranged_only_enabled')
 
   // ── Delivery methods ────────────────────────────────────────────────────
-  const delivery_methods: DeliveryMethod[] = []
-
-  if (localPickup) {
-    delivery_methods.push({
-      id: 'local_pickup',
-      label: 'Recolección en mano',
-      note: pickupSpots.length
-        ? 'Elige dónde recoger tu pedido.'
-        : 'Coordina el punto de entrega con la tienda.',
-      requires_pickup_spot: pickupSpots.length > 0,
-      pickup_spots: pickupSpots.map((s, i) => ({
-        id: s.id ?? s.name ?? `spot-${i}`,
-        name: s.name,
-        address: s.address,
-        hours: s.hours,
-        scheduling_url: s.scheduling_url,
-        notes: s.notes ?? s.instructions,
-      })),
-    })
-  }
-
-  if (!isDigital && listingType === 'product' && hasLiveShipping) {
-    delivery_methods.push({
-      id: 'shipping',
-      label: 'Envío a domicilio',
-      note: 'Cotiza y elige paquetería antes de pagar.',
-      requires_address: true,
-    })
-  }
-
-  if (isDigital) {
-    delivery_methods.push({ id: 'digital', label: 'Entrega digital', note: 'Recibirás acceso o archivo después del pago.' })
-  }
-
-  if (listingType === 'service') {
-    delivery_methods.push({ id: 'service', label: 'Servicio', note: 'Coordina el horario con el vendedor.' })
-  }
-
-  if (listingType === 'rental') {
-    delivery_methods.push({ id: 'rental', label: 'Renta', note: 'Coordina las fechas con el vendedor.' })
-  }
-
-  // No "coordinate after purchase" fallback — every listing must offer a concrete
-  // delivery method (pickup or shipping for products). The publish gate enforces
-  // this; a product with neither configured returns no delivery methods and the
-  // storefront shows a "delivery not configured" notice instead of an ambiguous
-  // post-purchase coordination.
-  const onlyCoordinated = false
+  const { deliveryMethods: delivery_methods, onlyCoordinated } = buildDeliveryCatalog({
+    listingType,
+    isDigital,
+    deliveryMode,
+    arrangedOnlyEnabled,
+    localPickup,
+    pickupSpots,
+    hasLiveShipping,
+  })
 
   // ── Payment methods (two buckets: online + one consolidated manual) ───────
   const regionProviderIds = await resolveRegionProviderIds(req)
