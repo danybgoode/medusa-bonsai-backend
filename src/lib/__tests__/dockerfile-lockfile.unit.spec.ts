@@ -47,4 +47,27 @@ describe('backend Dockerfile + lockfile — deploy-pipeline-tuning S1 self-check
     expect(workflow).not.toMatch(/run: npm install\b/)
     expect(workflow).toMatch(/cache:\s*npm/)
   })
+
+  // The runner Dockerfile stage runs `npm ci --omit=dev` against `medusa
+  // build`'s GENERATED .medusa/server/package.json, not this file — but it
+  // copies the SAME package-lock.json (generated against THIS package.json)
+  // into that stage. That only works if the two dependency sets are
+  // identical. CI's own gate runs `npm run build` (Build step) before `npm
+  // run test:unit` (Unit tests step) — see .github/workflows/ci.yml — so
+  // .medusa/server/package.json is guaranteed to exist here, letting this
+  // assert the real claim instead of just the Dockerfile's text shape. A
+  // future Medusa version that changes what medusa build emits would fail
+  // this test in CI, well before it could break a live Cloud Run deploy.
+  it('.medusa/server/package.json (medusa build output) has IDENTICAL deps to package.json — the lockfile-reuse premise', () => {
+    const builtPkgPath = join(ROOT, '.medusa/server/package.json')
+    if (!existsSync(builtPkgPath)) {
+      throw new Error(
+        '.medusa/server/package.json not found — this test must run AFTER `npm run build` ' +
+        '(medusa build), exactly as CI does (Build step precedes Unit tests step in ci.yml).',
+      )
+    }
+    const built = JSON.parse(readFileSync(builtPkgPath, 'utf8'))
+    expect(built.dependencies).toEqual(pkg.dependencies)
+    expect(built.devDependencies).toEqual(pkg.devDependencies)
+  })
 })
