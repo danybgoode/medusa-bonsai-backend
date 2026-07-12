@@ -5,6 +5,34 @@
 # The deploy step only swaps the image — env vars, secrets, VPC connector, SA,
 # scaling and CORS were set once by infra/gcp/deploy.sh and Cloud Run preserves
 # them across image-only deploys.
+#
+# deploy-pipeline-tuning S2: registry-backed BuildKit layer cache via buildx.
+# A plain `docker build --build-arg BUILDKIT_INLINE_CACHE=1` was tried first
+# and measured LOCALLY to cache almost nothing for this multi-stage Dockerfile
+# — Docker's inline-cache export only covers layers reachable from the FINAL
+# stage's own graph ("min" mode), and the npm-ci layer this build most wants
+# to skip lives in the discarded `builder` stage, never copied forward as a
+# filesystem layer (only its derived `.medusa/server` output is). `--cache-to
+# type=registry,...,mode=max` exports EVERY stage's layers to a dedicated
+# `:buildcache` tag; confirmed locally (via `docker buildx build` with a
+# docker-container driver) that this correctly caches the builder stage's
+# `npm ci` on a source-only change. buildx needs a docker-container driver
+# (the default `docker` driver errors "Cache export is not supported") —
+# bootstrapped fresh each build in its own step; Cloud Build's per-build VM
+# is ephemeral, so this never collides with a stale builder from a prior run.
+# `buildx build --push` pushes both tags directly, replacing the old
+# separate `push` step and the top-level `images:` list (which would try to
+# re-push from the LOCAL docker daemon — buildx's docker-container driver
+# builds in its own isolated daemon, so those tags are never loaded locally).
+#
+# The runner stage's OWN `npm ci --omit=dev` (against `medusa build`'s
+# freshly generated `.medusa/server/package.json`) is NOT expected to cache
+# across builds even with mode=max — confirmed locally: `medusa build`'s
+# output isn't byte-stable across runs, so the `COPY --from=builder
+# /app/.medusa/server` layer (and everything after it) invalidates every
+# build regardless of caching technique. The real, measured win here is the
+# builder stage's install (~180s of ~360s total install time) — a genuine
+# but partial improvement, not a full elimination of both installs.
 
 substitutions:
   _REGION: us-east4
@@ -15,27 +43,33 @@ options:
   logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_8        # admin bundle build is memory/CPU-hungry
 
-images:
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:$SHORT_SHA'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:latest'
-
 steps:
-  - id: build
+  - id: buildx-bootstrap
     name: gcr.io/cloud-builders/docker
     args:
+      - buildx
+      - create
+      - --name
+      - cloudbuildx
+      - --driver
+      - docker-container
+      - --use
+
+  - id: build-and-push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - buildx
       - build
+      - --cache-from
+      - 'type=registry,ref=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:buildcache'
+      - --cache-to
+      - 'type=registry,ref=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:buildcache,mode=max'
+      - --push
       - -t
       - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:$SHORT_SHA'
       - -t
       - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend:latest'
       - .
-
-  - id: push
-    name: gcr.io/cloud-builders/docker
-    args:
-      - push
-      - --all-tags
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/backend'
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
