@@ -36,6 +36,11 @@ describe('cloudbuild.yaml — deploy-pipeline-tuning S2 self-check', () => {
   it('bootstraps a docker-container buildx builder (the classic docker driver cannot export cache)', () => {
     expect(cloudbuild).toMatch(/buildx\s*\n\s*-\s*create/)
     expect(cloudbuild).toMatch(/--driver\s*\n\s*-\s*docker-container/)
+    expect(cloudbuild).toMatch(/--name\s*\n\s*-\s*cloudbuildx/)
+  })
+
+  it('the build step explicitly selects the bootstrapped builder by name (cross-review, Codex) — each Cloud Build step is its own container, so a bare `docker buildx create --use` in a PRIOR step may not leave the "current builder" selection visible to a later step\'s buildx CLI invocation; passing `--builder cloudbuildx` removes any reliance on that implicit cross-step state', () => {
+    expect(cloudbuild).toMatch(/buildx\s*\n\s*-\s*build\s*\n\s*-\s*--builder\s*\n\s*-\s*cloudbuildx/)
   })
 
   it('builds with buildx using a registry-backed mode=max cache (not the weaker inline-cache method)', () => {
