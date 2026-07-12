@@ -55,7 +55,12 @@ describe('cloudbuild.yaml — deploy-pipeline-tuning S2 self-check', () => {
   })
 
   it('has no top-level images: list (buildx --push already pushes both tags; a stale images: list would try to re-push from the buildx-isolated daemon and fail)', () => {
-    expect(cloudbuild).not.toMatch(/^images:/m)
+    // Independent pr-reviewer catch (flagged on the sibling frontend PR, same
+    // pattern here): a top-level `images:` block conventionally sits BEFORE
+    // `steps:` (that's where it lived pre-S2) — asserting against the
+    // post-`steps:` `cloudbuild` slice wouldn't catch it reappearing in its
+    // normal position. Check the FULL file.
+    expect(cloudbuildFull).not.toMatch(/^images:/m)
   })
 
   it('the preamble comment still explains why inline cache was rejected (context for the next reader)', () => {
