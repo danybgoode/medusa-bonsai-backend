@@ -1,4 +1,4 @@
-import { validateTierLadder, type PriceTier } from '../price-tiers'
+import { validateTierLadder, isRealTierLadder, type PriceTier } from '../price-tiers'
 
 /**
  * Custom print products · Sprint 2, Story 2.2.
@@ -67,5 +67,52 @@ describe('validateTierLadder', () => {
   it('is order-independent (sorts before validating)', () => {
     const shuffled = [VALID_LADDER[2], VALID_LADDER[0], VALID_LADDER[1]]
     expect(validateTierLadder(shuffled)).toEqual({ ok: true })
+  })
+})
+
+/**
+ * pricing-money-path-remediation Finding E, 2026-07-13. Medusa Admin's price
+ * editor shows one column per currency PLUS one column per region — filling
+ * in both the bare "MXN" column and a region-scoped "Mexico" column creates
+ * TWO mxn price rows with the SAME unbounded band (min_quantity:1,
+ * max_quantity:null), not a real ladder. `seller-product-update.ts`'s flat
+ * price_cents write must tell these two shapes apart: refuse a genuine
+ * ladder (different bands per row) but safely collapse a same-band
+ * duplicate (the Admin artifact).
+ */
+describe('isRealTierLadder', () => {
+  it('is false for zero or one price row (nothing to disambiguate)', () => {
+    expect(isRealTierLadder([])).toBe(false)
+    expect(isRealTierLadder([{ min_quantity: 1, max_quantity: null }])).toBe(false)
+  })
+
+  it('is false for the exact Admin dual-column artifact (two identical unbounded bands)', () => {
+    expect(isRealTierLadder([
+      { min_quantity: 1, max_quantity: null },
+      { min_quantity: 1, max_quantity: null },
+    ])).toBe(false)
+  })
+
+  it('is true for a genuine ladder (different bands per row)', () => {
+    expect(isRealTierLadder([
+      { min_quantity: 1, max_quantity: 9 },
+      { min_quantity: 10, max_quantity: null },
+    ])).toBe(true)
+  })
+
+  it('is true when only one row differs from the rest (any real differentiation trips it)', () => {
+    expect(isRealTierLadder([
+      { min_quantity: 1, max_quantity: null },
+      { min_quantity: 1, max_quantity: null },
+      { min_quantity: 5, max_quantity: null },
+    ])).toBe(true)
+  })
+
+  it('is false for three identical same-band rows (a triple-column Admin artifact, same logic)', () => {
+    expect(isRealTierLadder([
+      { min_quantity: 1, max_quantity: null },
+      { min_quantity: 1, max_quantity: null },
+      { min_quantity: 1, max_quantity: null },
+    ])).toBe(false)
   })
 })

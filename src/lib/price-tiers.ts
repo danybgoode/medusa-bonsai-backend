@@ -64,3 +64,29 @@ export function validateTierLadder(tiers: PriceTier[]): ValidateTierLadderResult
 
   return { ok: true }
 }
+
+/**
+ * Distinguishes a REAL quantity-tier ladder (multiple mxn prices covering
+ * different [min_quantity, max_quantity] bands) from a harmless same-price
+ * duplicate. Medusa Admin's price editor shows one column per currency PLUS
+ * one column per region — filling in both the bare "MXN" column and a
+ * region-scoped "Mexico" column creates TWO mxn price rows with the SAME
+ * unbounded band (min_quantity:1, max_quantity:null), not a ladder, just
+ * the same single price entered twice (found live 2026-07-13,
+ * pricing-money-path-remediation Finding E). `seller-product-update.ts`'s
+ * flat `price_cents` write must refuse a real ladder (silently picking one
+ * row would corrupt the others' stale amounts — cross-agent review catch,
+ * 2026-07-05) but is safe to collapse a same-band duplicate by updating
+ * every row to the new amount.
+ */
+export interface QuantityBand {
+  min_quantity: number | null
+  max_quantity: number | null
+}
+
+export function isRealTierLadder(mxnPrices: QuantityBand[]): boolean {
+  if (mxnPrices.length <= 1) return false
+  return mxnPrices.some((p, i) =>
+    mxnPrices.some((other, j) => i !== j && (p.min_quantity !== other.min_quantity || p.max_quantity !== other.max_quantity)),
+  )
+}

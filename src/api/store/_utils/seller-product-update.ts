@@ -27,7 +27,7 @@ import {
 } from './inventory'
 import { generateSku, buildVariantComboKey, validateOptionDimensions } from './seller-product-create'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
-import { validateTierLadder, type PriceTier } from '../../../lib/price-tiers'
+import { validateTierLadder, isRealTierLadder, type PriceTier } from '../../../lib/price-tiers'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
@@ -513,7 +513,7 @@ export async function updateSellerProduct(
   if (body.price_cents !== undefined && body.price_cents !== null) {
     const { data: rows } = await remoteQuery.graph({
       entity: 'product',
-      fields: ['variants.id', 'variants.prices.id', 'variants.prices.currency_code'],
+      fields: ['variants.id', 'variants.prices.id', 'variants.prices.currency_code', 'variants.prices.min_quantity', 'variants.prices.max_quantity'],
       filters: { id },
     })
     const variants: any[] = (rows?.[0] as any)?.variants ?? []
@@ -525,14 +525,24 @@ export async function updateSellerProduct(
         ? { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
         : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
     }
-    const prices: Array<{ id: string; currency_code: string }> = variant?.prices ?? []
+    const prices: Array<{ id: string; currency_code: string; min_quantity: number | null; max_quantity: number | null }> = variant?.prices ?? []
     const mxnPrices = prices.filter(p => p.currency_code === 'mxn')
-    // A variant with quantity tiers (Story 2.2) carries MULTIPLE mxn prices.
-    // Silently picking one via .find() and overwriting only that tier would
-    // corrupt the ladder (the other tiers keep stale amounts) — reject
-    // instead and point at the right tool (cross-agent review catch,
-    // 2026-07-05).
-    if (mxnPrices.length > 1) {
+    // A variant with REAL quantity tiers (Story 2.2) carries multiple mxn
+    // prices with DIFFERENT [min_quantity, max_quantity] bands. Distinguish
+    // that from a harmless duplicate: Medusa Admin's price editor shows one
+    // column per currency PLUS one column per region, so filling in both the
+    // bare "MXN" column and a region-scoped "Mexico" column creates TWO mxn
+    // price rows with the SAME unbounded band (min_quantity:1, max_quantity:
+    // null) — not a ladder, just the same single price entered twice (found
+    // live 2026-07-13, mcp-parity pricing-money-path-remediation Finding E).
+    // Only refuse when the rows are genuinely differentiated by quantity —
+    // silently picking one via .find() and overwriting only that tier would
+    // still corrupt a REAL ladder (the other bands keep stale amounts) —
+    // reject that case and point at the right tool (cross-agent review
+    // catch, 2026-07-05). A same-band duplicate is safe to collapse: update
+    // every one of them to the new amount, since they all represent the
+    // exact same intended price.
+    if (isRealTierLadder(mxnPrices)) {
       return {
         ok: false,
         status: 422,
@@ -541,7 +551,11 @@ export async function updateSellerProduct(
     }
     const existing = mxnPrices[0] ?? prices[0]
 
-    if (existing?.id) {
+    if (mxnPrices.length > 1) {
+      // Same-band duplicate (the Admin multi-column artifact) — update every
+      // row so none of them silently keeps a stale amount.
+      await (pricingService as any).updatePrices(mxnPrices.map((p) => ({ id: p.id, amount: body.price_cents })))
+    } else if (existing?.id) {
       await (pricingService as any).updatePrices([{ id: existing.id, amount: body.price_cents }])
     } else if (variant?.id) {
       const { data: varRows } = await remoteQuery.graph({
@@ -551,16 +565,38 @@ export async function updateSellerProduct(
       })
       const priceSetId = (varRows?.[0] as any)?.price_set?.id
       if (priceSetId) {
+        // REAL root cause of "Price set with id: undefined not found"
+        // (confirmed live 2026-07-13, pricing-money-path-remediation
+        // Finding D): Medusa's `AddPricesDTO` field is `priceSetId`
+        // (camelCase) — confirmed against the installed
+        // @medusajs/types/dist/pricing/common/price-set.d.ts. This call was
+        // passing `price_set_id` (snake_case), an unrecognized key, so
+        // Medusa's own `addPrices_` internals read `data.priceSetId` as
+        // `undefined` for every price in the batch
+        // (@medusajs/pricing/dist/services/pricing-module.js:648), which
+        // then fails the `priceSetMap.get(price.price_set_id)` lookup and
+        // throws exactly `` `Price set with id: ${undefined} not found` ``
+        // (same file, line 665) — a byte-for-byte match of the production
+        // error. `createProductsWorkflow` always creates a (possibly-empty)
+        // price_set for every new variant, even one minted with
+        // `prices: []` (confirmed via
+        // @medusajs/core-flows/dist/product/workflows/create-product-variants.js),
+        // so a freshly-published launchpad product's variant DOES have a
+        // price_set — this branch is the one that actually runs, not the
+        // "no price_set at all" fallback below.
         await (pricingService as any).addPrices([{
-          price_set_id: priceSetId,
+          priceSetId,
           prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
         }])
       } else {
-        // The variant has no price_set at all (edge case). Two unsafe paths
-        // ruled out here: updateProductsWorkflow's `variants` array does a
-        // full Collection.set() replace at the Product level and hard-
-        // deletes any sibling variant omitted from the array (verified
-        // 2026-07-05; see the option_dimensions doc comment above); and
+        // The variant has no price_set at all — true edge case now that the
+        // bug above is understood (createProductsWorkflow always creates
+        // one; this branch is defensive, for a variant reaching this code
+        // through some other path). Two unsafe paths ruled out here:
+        // updateProductsWorkflow's `variants` array does a full
+        // Collection.set() replace at the Product level and hard-deletes
+        // any sibling variant omitted from the array (verified 2026-07-05;
+        // see the option_dimensions doc comment above); and
         // productService.updateProductVariants()'s UpdateProductVariantDTO
         // has NO `prices` field at all (confirmed against
         // @medusajs/types/dist/product/common.d.ts) — it would silently
@@ -568,9 +604,18 @@ export async function updateSellerProduct(
         // (2026-07-05). Create a fresh price set and link it via the exact
         // remote-link shape Medusa's own createVariantPricingLinkStep uses
         // (@medusajs/core-flows/dist/product/steps/create-variant-pricing-link.js).
-        const newPriceSet = await (pricingService as any).createPriceSets({
+        // Array form (not a bare object) matches Medusa's own internal
+        // convention for this operation (upsertVariantPricesWorkflow) —
+        // confirmed this makes no functional difference to the returned
+        // shape (both forms serialize identically), kept for consistency
+        // with Medusa's own usage; the `!newPriceSet?.id` guard is the real
+        // safety net if this fallback is ever actually reached.
+        const [newPriceSet] = await (pricingService as any).createPriceSets([{
           prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
-        })
+        }])
+        if (!newPriceSet?.id) {
+          return { ok: false, status: 500, message: 'No se pudo crear el precio para esta variante. Inténtalo de nuevo.' }
+        }
         const remoteLink = scope.resolve(ContainerRegistrationKeys.LINK)
         await remoteLink.create({
           [Modules.PRODUCT]: { variant_id: variant.id },
@@ -619,8 +664,10 @@ export async function updateSellerProduct(
     if (existingMxnPriceIds.length > 0) {
       await (pricingService as any).softDeletePrices(existingMxnPriceIds)
     }
+    // Same key-name bug as the flat price_cents branch above — Medusa's
+    // AddPricesDTO field is `priceSetId` (camelCase), not `price_set_id`.
     await (pricingService as any).addPrices([{
-      price_set_id: priceSetId,
+      priceSetId,
       prices: body.variant_tiers.map((tier) => ({
         amount: tier.amount,
         currency_code: 'mxn',
