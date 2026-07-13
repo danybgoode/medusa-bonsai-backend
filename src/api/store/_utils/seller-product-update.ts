@@ -568,9 +568,22 @@ export async function updateSellerProduct(
         // (2026-07-05). Create a fresh price set and link it via the exact
         // remote-link shape Medusa's own createVariantPricingLinkStep uses
         // (@medusajs/core-flows/dist/product/steps/create-variant-pricing-link.js).
-        const newPriceSet = await (pricingService as any).createPriceSets({
+        const createdPriceSet = await (pricingService as any).createPriceSets({
           prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
         })
+        // Defensive normalize — confirmed live 2026-07-13 that this specific
+        // MedusaService-generated create call can return an ARRAY even for a
+        // single-object input, despite the declared single-object-in/single-
+        // object-out overload (@medusajs/pricing 2.15.3's pricing-module.d.ts).
+        // Using `newPriceSet.id` unguarded threw "Price set with id: undefined
+        // not found" from the immediately-following remoteLink.create() call —
+        // exactly the class of bug already fought once in this same repo
+        // (see coupons.ts's `Array.isArray(created) ? created[0]?.id : …`
+        // after `promotionModuleService.createPromotions`) and documented in
+        // Roadmap/LEARNINGS.md's "MedusaService auto-generated returns a
+        // SINGLE object, not an array" entry (that entry covers `update`;
+        // this is the same shape hitting `create`).
+        const newPriceSet = Array.isArray(createdPriceSet) ? createdPriceSet[0] : createdPriceSet
         const remoteLink = scope.resolve(ContainerRegistrationKeys.LINK)
         await remoteLink.create({
           [Modules.PRODUCT]: { variant_id: variant.id },
