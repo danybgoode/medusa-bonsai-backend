@@ -18,6 +18,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { IPaymentModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../modules/seller'
+import { logger } from '../../../../lib/logger'
 import SellerModuleService from '../../../../modules/seller/service'
 import { resolveSellerMpToken, getMpPaymentWithToken } from '../../_utils/mp'
 
@@ -80,7 +81,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         }
       }
     } catch (e) {
-      console.error('[mp-ipn] session patch failed for cart', cartId, e)
+      logger.error('mp-ipn', 'session patch failed for cart', { cartId, error: e })
     }
   }
 
