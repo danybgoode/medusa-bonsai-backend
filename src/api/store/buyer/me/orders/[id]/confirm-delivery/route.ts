@@ -12,6 +12,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { capturePaymentWorkflow } from '@medusajs/medusa/core-flows'
 import { extractClerkUserId } from '../../../../../_utils/clerk-auth'
+import { logger } from '../../../../../../../lib/logger'
 
 async function resolveOrderForBuyer(req: MedusaRequest, orderId: string) {
   const clerkUserId = extractClerkUserId(req)
@@ -71,7 +72,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         })
       } catch (e) {
         const msg = (e as Error).message ?? 'Capture failed'
-        console.error('[confirm-delivery] escrow capture failed:', msg)
+        logger.error('confirm-delivery', 'escrow capture failed', { orderId, message: msg })
         return res.status(502).json({ message: `No se pudo liberar el pago al vendedor: ${msg}` })
       }
     }

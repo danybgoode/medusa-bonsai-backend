@@ -14,6 +14,7 @@
  */
 
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
+import { logger } from './logger'
 import { isEnabled } from './flags'
 import { PROFIT_MODULE } from '../modules/profit'
 import type ProfitModuleService from '../modules/profit/service'
@@ -162,7 +163,7 @@ export async function appendOrderLedger(
     })
     return await profit.appendFinancialEvents(events)
   } catch (e) {
-    console.error('[profit-ledger] appendOrderLedger failed (non-fatal)', orderId, e)
+    logger.error('profit-ledger', 'appendOrderLedger failed (non-fatal)', { orderId, error: e })
     return null
   }
 }
@@ -194,6 +195,9 @@ export async function appendNativeShippingLedger(
     const profit = scope.resolve(PROFIT_MODULE) as ProfitModuleService
     await profit.appendFinancialEvents([event])
   } catch (e) {
-    console.error('[profit-ledger] appendNativeShippingLedger failed (non-fatal)', input.orderId, e)
+    logger.error('profit-ledger', 'appendNativeShippingLedger failed (non-fatal)', {
+      orderId: input.orderId,
+      error: e,
+    })
   }
 }

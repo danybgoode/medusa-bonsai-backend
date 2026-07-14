@@ -8,6 +8,8 @@
  * own MP account. The token never leaves the backend.
  */
 
+import { logger } from '../../../lib/logger'
+
 const MP_OAUTH_TOKEN_URL = 'https://api.mercadopago.com/oauth/token'
 
 /** Platform commission as a fraction of the order total. 0 = match Stripe (0% fee). */
@@ -66,7 +68,7 @@ export async function resolveSellerMpToken(sellerService: any, seller: any): Pro
     })
     const json = await res.json().catch(() => null)
     if (!res.ok || !json?.access_token) {
-      console.error('[mp] token refresh failed:', json)
+      logger.error('mp', 'token refresh failed', { response: json })
       return mp.access_token
     }
     const updated: SellerMpSettings = {
@@ -77,9 +79,10 @@ export async function resolveSellerMpToken(sellerService: any, seller: any): Pro
     }
     const settings = { ...((seller.metadata as any)?.settings ?? {}), mercadopago: updated }
     await sellerService.updateSellers(seller.id, { metadata: { ...(seller.metadata ?? {}), settings } })
+    logger.info('mp', 'token refreshed', { sellerId: seller.id })
     return updated.access_token ?? null
   } catch (e) {
-    console.error('[mp] token refresh error:', e)
+    logger.error('mp', 'token refresh error', { error: e })
     return mp.access_token
   }
 }
