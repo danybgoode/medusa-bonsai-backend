@@ -137,6 +137,8 @@ describe('buildHomePersonalization — shape', () => {
       return {
         data: [
           {
+            // price_cents_at_save (30000) > current price_cents (25000) — a real drop.
+            price_cents_at_save: 30000,
             marketplace_listings: {
               medusa_product_id: 'prod_1', title: 'Lámpara', price_cents: 25000,
               currency: 'mxn', condition: 'good', location: 'CDMX',
@@ -144,7 +146,7 @@ describe('buildHomePersonalization — shape', () => {
             },
           },
           // dropped: no medusa id
-          { marketplace_listings: { medusa_product_id: null, title: 'X', price_cents: 1, currency: 'mxn', condition: null, location: null, images: null, status: 'active' } },
+          { price_cents_at_save: null, marketplace_listings: { medusa_product_id: null, title: 'X', price_cents: 1, currency: 'mxn', condition: null, location: null, images: null, status: 'active' } },
         ],
       }
     }
@@ -178,7 +180,11 @@ describe('buildHomePersonalization — shape', () => {
 
     // recentFavorites: only the linkable active one, currency upper-cased
     expect(out.recentFavorites).toEqual([
-      { medusaId: 'prod_1', title: 'Lámpara', priceCents: 25000, currency: 'MXN', condition: 'good', location: 'CDMX', imageUrl: 'http://img/1.jpg' },
+      {
+        medusaId: 'prod_1', title: 'Lámpara', priceCents: 25000, currency: 'MXN',
+        condition: 'good', location: 'CDMX', imageUrl: 'http://img/1.jpg',
+        priceCentsAtSave: 30000,
+      },
     ])
 
     // offerAlertInputs: a buyer + a seller input, data only (no title/subtitle/href/icon)
@@ -204,6 +210,36 @@ describe('buildHomePersonalization — shape', () => {
     // sellerSnapshot + hasShop
     expect(out.hasShop).toBe(true)
     expect(out.sellerSnapshot).toEqual({ shopName: 'Mi Tienda', visitas: 20, ofertasNuevas: 1 })
+  })
+
+  it('priceCentsAtSave is null (not a crash) for a favorite saved before the snapshot column existed', async () => {
+    const noSnapshot = (ctx: QueryCtx) => {
+      if (ctx.table === 'marketplace_favorites') {
+        return {
+          data: [
+            {
+              price_cents_at_save: null,
+              marketplace_listings: {
+                medusa_product_id: 'prod_2', title: 'Silla vieja', price_cents: 15000,
+                currency: 'mxn', condition: 'fair', location: 'GDL',
+                images: null, status: 'active',
+              },
+            },
+          ],
+        }
+      }
+      return resolver(ctx)
+    }
+    const out = await buildHomePersonalization({
+      supabase: makeSupabase(noSnapshot), sellerService, remoteQuery, clerkUserId: 'user_42',
+    })
+    expect(out.recentFavorites).toEqual([
+      {
+        medusaId: 'prod_2', title: 'Silla vieja', priceCents: 15000, currency: 'MXN',
+        condition: 'fair', location: 'GDL', imageUrl: null,
+        priceCentsAtSave: null,
+      },
+    ])
   })
 
   it('hasShop=false and null snapshot when the user has NO Medusa seller', async () => {

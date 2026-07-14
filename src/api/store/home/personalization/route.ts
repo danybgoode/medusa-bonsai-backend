@@ -32,6 +32,10 @@ export interface RecentFavorite {
   condition: string | null
   location: string | null
   imageUrl: string | null
+  /** Snapshot of `price_cents` at favorite-time (`marketplace_favorites.price_cents_at_save`,
+   *  written by `app/api/favorites/route.ts` on favorite). `null` for favorites saved before
+   *  that column existed — the S2.2 price-drop badge just degrades to "no badge" then. */
+  priceCentsAtSave: number | null
 }
 
 /** Data subset of the frontend `OfferAlertInput` (lib/home-offer-alert.ts) — no copy. */
@@ -101,6 +105,7 @@ async function readShop(supabase: SupabaseLike, clerkUserId: string): Promise<Sh
 }
 
 interface FavoriteRow {
+  price_cents_at_save: number | null
   marketplace_listings: {
     medusa_product_id: string | null
     title: string
@@ -123,6 +128,7 @@ async function readRecentFavorites(
     const { data, error } = await supabase
       .from('marketplace_favorites')
       .select(`
+        price_cents_at_save,
         marketplace_listings (
           medusa_product_id, title, price_cents, currency, condition, location, images, status
         )
@@ -132,18 +138,18 @@ async function readRecentFavorites(
       .limit(20)
     if (error) throw error
     return ((data ?? []) as unknown as FavoriteRow[])
-      .map((row) => row.marketplace_listings)
-      .filter((l): l is NonNullable<FavoriteRow['marketplace_listings']> =>
-        !!l && l.status === 'active' && !!l.medusa_product_id)
+      .filter((row): row is FavoriteRow & { marketplace_listings: NonNullable<FavoriteRow['marketplace_listings']> } =>
+        !!row.marketplace_listings && row.marketplace_listings.status === 'active' && !!row.marketplace_listings.medusa_product_id)
       .slice(0, n)
-      .map((l) => ({
-        medusaId: l.medusa_product_id!,
-        title: l.title,
-        priceCents: l.price_cents,
-        currency: (l.currency ?? 'MXN').toUpperCase(),
-        condition: l.condition,
-        location: l.location,
-        imageUrl: l.images?.[0]?.url ?? null,
+      .map((row) => ({
+        medusaId: row.marketplace_listings.medusa_product_id!,
+        title: row.marketplace_listings.title,
+        priceCents: row.marketplace_listings.price_cents,
+        currency: (row.marketplace_listings.currency ?? 'MXN').toUpperCase(),
+        condition: row.marketplace_listings.condition,
+        location: row.marketplace_listings.location,
+        imageUrl: row.marketplace_listings.images?.[0]?.url ?? null,
+        priceCentsAtSave: row.price_cents_at_save,
       }))
   } catch (e) {
     console.error('[home-personalization] favorites read failed:', e)
