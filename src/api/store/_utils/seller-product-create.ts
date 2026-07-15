@@ -338,13 +338,6 @@ export async function createSellerProduct(
     [Modules.PRODUCT]: { product_id: product.id },
   })
 
-  // ── Publish (only now that the link is confirmed) ───────────────────────
-  if (requestedStatus !== 'draft') {
-    await updateProductsWorkflow(scope).run({
-      input: { selector: { id: product.id }, update: { status: requestedStatus } },
-    })
-  }
-
   // ── Provision inventory level for managed (physical) products ─────────────
   // The managed variant's inventory item is auto-created by the product workflow;
   // here we create the stock level at the seeded location and ensure that location
@@ -375,6 +368,18 @@ export async function createSellerProduct(
     } else {
       console.error('[createSellerProduct] inventory not provisioned:', { variantIds, locationId })
     }
+  }
+
+  // ── Publish (only now that the link AND inventory are both confirmed) ────
+  // A cross-agent review catch: publishing right after the seller-link step
+  // (this fix's original shape) still left a window where inventory
+  // provisioning could fail on an already-live, catalog-visible product —
+  // the same "safe to strand until fully ready" principle this fix applies
+  // to the seller link applies here too.
+  if (requestedStatus !== 'draft') {
+    await updateProductsWorkflow(scope).run({
+      input: { selector: { id: product.id }, update: { status: requestedStatus } },
+    })
   }
 
   return { ok: true, product_id: product.id }
