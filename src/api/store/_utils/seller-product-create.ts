@@ -13,7 +13,7 @@
 import type { MedusaRequest } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { IProductModuleService } from '@medusajs/framework/types'
-import { createProductsWorkflow } from '@medusajs/medusa/core-flows'
+import { createProductsWorkflow, updateProductsWorkflow } from '@medusajs/medusa/core-flows'
 import { SELLER_MODULE } from '../../../modules/seller'
 import {
   isStockableListingType,
@@ -270,12 +270,22 @@ export async function createSellerProduct(
   const shippingProfileId = await resolveDefaultShippingProfileId(scope)
 
   // ── Create Medusa product ────────────────────────────────────────────────
+  // Always create as 'draft' (never catalog-visible), THEN link to the seller
+  // below, THEN — only once the link is confirmed — flip to the caller's
+  // actually-requested status. Product-create and seller-link used to happen
+  // as status:published followed by a separate, non-atomic link step; if
+  // anything failed/was interrupted between them, the result was a real,
+  // live, orphaned listing with no resolvable seller (found in production,
+  // 2026-07-15 — its shop.slug resolved to the frontend's "Unknown"
+  // placeholder, which broke the embed-iframe surface). A draft product is
+  // structurally safe to strand: it never reaches the public catalog.
+  const requestedStatus = body.status ?? 'published'
   const { result } = await createProductsWorkflow(scope).run({
     input: {
       products: [{
         title: body.title.trim().slice(0, 100),
         description: body.description?.trim() || null,
-        status: body.status ?? 'published',
+        status: 'draft',
         ...(weightGrams !== undefined ? { weight: weightGrams } : {}),
         ...(shippingProfileId ? { shipping_profile_id: shippingProfileId } : {}),
         ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
@@ -327,6 +337,13 @@ export async function createSellerProduct(
     [SELLER_MODULE]: { seller_id: sellerId },
     [Modules.PRODUCT]: { product_id: product.id },
   })
+
+  // ── Publish (only now that the link is confirmed) ───────────────────────
+  if (requestedStatus !== 'draft') {
+    await updateProductsWorkflow(scope).run({
+      input: { selector: { id: product.id }, update: { status: requestedStatus } },
+    })
+  }
 
   // ── Provision inventory level for managed (physical) products ─────────────
   // The managed variant's inventory item is auto-created by the product workflow;
