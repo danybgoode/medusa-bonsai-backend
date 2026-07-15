@@ -342,6 +342,12 @@ export async function createSellerProduct(
   // The managed variant's inventory item is auto-created by the product workflow;
   // here we create the stock level at the seeded location and ensure that location
   // is linked to the sales channel so reservations succeed on order placement.
+  // `inventoryProvisioned` gates the publish step below — a second fresh-reviewer
+  // pass caught that the FIRST version of this reorder still let a manageInventory
+  // product publish even when this block's own pre-existing else branch below
+  // fired (console.error-only, never blocking) — the exact "goes live incomplete"
+  // failure mode this fix exists to close.
+  let inventoryProvisioned = true
   if (manageInventory) {
     const variantIds = ((product.variants ?? []) as { id?: string }[])
       .map((v) => v.id)
@@ -367,16 +373,18 @@ export async function createSellerProduct(
       }
     } else {
       console.error('[createSellerProduct] inventory not provisioned:', { variantIds, locationId })
+      inventoryProvisioned = false
     }
   }
 
   // ── Publish (only now that the link AND inventory are both confirmed) ────
-  // A cross-agent review catch: publishing right after the seller-link step
-  // (this fix's original shape) still left a window where inventory
-  // provisioning could fail on an already-live, catalog-visible product —
-  // the same "safe to strand until fully ready" principle this fix applies
-  // to the seller link applies here too.
   if (requestedStatus !== 'draft') {
+    if (!inventoryProvisioned) {
+      // Leave the product in draft — safe to strand, matching this fix's own
+      // principle — and surface the failure explicitly rather than returning
+      // ok:true for a listing that's actually invisible in the catalog.
+      return { ok: false, status: 500, message: 'No se pudo aprovisionar el inventario. Intenta de nuevo o contacta soporte.' }
+    }
     await updateProductsWorkflow(scope).run({
       input: { selector: { id: product.id }, update: { status: requestedStatus } },
     })
