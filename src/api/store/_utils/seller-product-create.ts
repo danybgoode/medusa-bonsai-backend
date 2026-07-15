@@ -13,7 +13,7 @@
 import type { MedusaRequest } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { IProductModuleService } from '@medusajs/framework/types'
-import { createProductsWorkflow } from '@medusajs/medusa/core-flows'
+import { createProductsWorkflow, updateProductsWorkflow } from '@medusajs/medusa/core-flows'
 import { SELLER_MODULE } from '../../../modules/seller'
 import {
   isStockableListingType,
@@ -270,12 +270,22 @@ export async function createSellerProduct(
   const shippingProfileId = await resolveDefaultShippingProfileId(scope)
 
   // ── Create Medusa product ────────────────────────────────────────────────
+  // Always create as 'draft' (never catalog-visible), THEN link to the seller
+  // below, THEN — only once the link is confirmed — flip to the caller's
+  // actually-requested status. Product-create and seller-link used to happen
+  // as status:published followed by a separate, non-atomic link step; if
+  // anything failed/was interrupted between them, the result was a real,
+  // live, orphaned listing with no resolvable seller (found in production,
+  // 2026-07-15 — its shop.slug resolved to the frontend's "Unknown"
+  // placeholder, which broke the embed-iframe surface). A draft product is
+  // structurally safe to strand: it never reaches the public catalog.
+  const requestedStatus = body.status ?? 'published'
   const { result } = await createProductsWorkflow(scope).run({
     input: {
       products: [{
         title: body.title.trim().slice(0, 100),
         description: body.description?.trim() || null,
-        status: body.status ?? 'published',
+        status: 'draft',
         ...(weightGrams !== undefined ? { weight: weightGrams } : {}),
         ...(shippingProfileId ? { shipping_profile_id: shippingProfileId } : {}),
         ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
@@ -332,6 +342,12 @@ export async function createSellerProduct(
   // The managed variant's inventory item is auto-created by the product workflow;
   // here we create the stock level at the seeded location and ensure that location
   // is linked to the sales channel so reservations succeed on order placement.
+  // `inventoryProvisioned` gates the publish step below — a second fresh-reviewer
+  // pass caught that the FIRST version of this reorder still let a manageInventory
+  // product publish even when this block's own pre-existing else branch below
+  // fired (console.error-only, never blocking) — the exact "goes live incomplete"
+  // failure mode this fix exists to close.
+  let inventoryProvisioned = true
   if (manageInventory) {
     const variantIds = ((product.variants ?? []) as { id?: string }[])
       .map((v) => v.id)
@@ -357,7 +373,21 @@ export async function createSellerProduct(
       }
     } else {
       console.error('[createSellerProduct] inventory not provisioned:', { variantIds, locationId })
+      inventoryProvisioned = false
     }
+  }
+
+  // ── Publish (only now that the link AND inventory are both confirmed) ────
+  if (requestedStatus !== 'draft') {
+    if (!inventoryProvisioned) {
+      // Leave the product in draft — safe to strand, matching this fix's own
+      // principle — and surface the failure explicitly rather than returning
+      // ok:true for a listing that's actually invisible in the catalog.
+      return { ok: false, status: 500, message: 'No se pudo aprovisionar el inventario. Intenta de nuevo o contacta soporte.' }
+    }
+    await updateProductsWorkflow(scope).run({
+      input: { selector: { id: product.id }, update: { status: requestedStatus } },
+    })
   }
 
   return { ok: true, product_id: product.id }

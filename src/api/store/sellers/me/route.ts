@@ -3,7 +3,7 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { extractClerkUserId } from '../../_utils/clerk-auth'
 
-function slugify(text: string) {
+export function slugify(text: string) {
   return text
     .toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -73,8 +73,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(400).json({ message: 'name is required' })
   }
 
-  // Generate a unique slug
-  let baseSlug = body.slug ? slugify(body.slug) : slugify(body.name)
+  // Generate a unique slug. `|| 'tienda'` guards a name/slug that slugifies to
+  // empty (all-emoji/punctuation/CJK) — without it this silently persists
+  // slug: '', matching POST /internal/sellers' existing fallback for the same
+  // reason (found live, 2026-07-15 — a seller-less orphaned catalog item
+  // downstream got the frontend's "Unknown" placeholder with slug: '').
+  let baseSlug = (body.slug ? slugify(body.slug) : slugify(body.name)) || 'tienda'
   let slug = baseSlug
   let attempt = 0
   while (true) {
