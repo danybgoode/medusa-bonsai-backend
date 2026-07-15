@@ -3,7 +3,7 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { extractClerkUserId } from '../../_utils/clerk-auth'
 
-function slugify(text: string) {
+export function slugify(text: string) {
   return text
     .toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
