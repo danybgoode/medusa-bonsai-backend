@@ -6,6 +6,19 @@
  *   2. Create a "Mexico" region with currency MXN + country mx
  *   3. Create a Mexico tax region
  *   4. Rename the seeded "European Warehouse" stock location → "México"
+ *   5. Update store name
+ *   6. Delete the leftover seeded "Europe" region (pricing-money-path-remediation
+ *      Finding F) — Medusa's starter template ships an EUR region by default;
+ *      step 2 above ADDS Mexico alongside it but never removed the original.
+ *      This surfaced live 2026-07-13 as an extra, irrelevant pricing column in
+ *      Admin's price editor for every product platform-wide (Mexico-only
+ *      marketplace). Confirmed safe before deleting: a live sweep of all 76
+ *      real store products found zero EUR-currency price rows anywhere, and a
+ *      repo-wide grep found no code keying off the Europe region id — this
+ *      step re-verifies the price-safety check itself (not just trusting that
+ *      one-time audit) before ever calling the delete workflow, so a future
+ *      re-run on a database that somehow DOES have a real EUR price refuses
+ *      instead of silently deleting live pricing data.
  *
  * Run once after deploy. Safe to re-run — each step checks before acting.
  * Auth: x-internal-secret header must match MEDUSA_INTERNAL_SECRET.
@@ -17,6 +30,7 @@ import {
   createRegionsWorkflow,
   updateRegionsWorkflow,
   createTaxRegionsWorkflow,
+  deleteRegionsWorkflow,
 } from '@medusajs/medusa/core-flows'
 
 // All payment providers that should be enabled on the Mexico region. Keeping
@@ -149,6 +163,41 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     report.push('✓ Renamed store "Default Store" → "Miyagi Sánchez"')
   } else {
     report.push(`○ Store name "${storeRecord?.name}" — not changed`)
+  }
+
+  // ── 6. Delete the leftover seeded "Europe" region ────────────────────────
+  const staleRegions = regions.filter((r: any) => r.id !== mexicoRegion?.id && r.name !== 'Mexico')
+  if (!staleRegions.length) {
+    report.push('○ No stale non-Mexico regions found — skipped')
+  } else {
+    // Safety re-check: never delete a region if ANY product variant carries a
+    // real price in that region's currency — that would mean real pricing data
+    // depends on it, not just leftover seed scaffolding. Fetch every product's
+    // variant prices and filter in plain JS rather than a nested remote-query
+    // filter (no precedent for that shape anywhere in this codebase — a flat
+    // fetch is the same approach already verified live against all 76 real
+    // products before writing this route).
+    const { data: allProducts } = await query.graph({
+      entity: 'product',
+      fields: ['id', 'variants.prices.currency_code'],
+    })
+    const currenciesInUse = new Set<string>()
+    for (const p of (allProducts ?? []) as any[]) {
+      for (const v of p.variants ?? []) {
+        for (const pr of v.prices ?? []) {
+          if (pr?.currency_code) currenciesInUse.add(pr.currency_code)
+        }
+      }
+    }
+
+    for (const stale of staleRegions) {
+      if (currenciesInUse.has(stale.currency_code)) {
+        report.push(`⚠ Region "${stale.name}" (${stale.id}, ${stale.currency_code}) — at least one real product price uses this currency — NOT deleted, needs manual review`)
+        continue
+      }
+      await deleteRegionsWorkflow(req.scope).run({ input: { ids: [stale.id] } })
+      report.push(`✓ Deleted stale region "${stale.name}" (${stale.id}, ${stale.currency_code}) — no real pricing depended on it`)
+    }
   }
 
   return res.json({ ok: true, report })
