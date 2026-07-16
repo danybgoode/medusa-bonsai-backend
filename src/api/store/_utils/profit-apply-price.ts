@@ -36,6 +36,23 @@ export interface ApplyPriceOutcome {
   body: Record<string, unknown>
 }
 
+/**
+ * Activity logging is observability, never outcome: a failed `price_apply`
+ * log write must not turn an already-determined price-write result into a 500
+ * (Codex cross-review catch on the S3.2 extraction — the pre-extraction route
+ * had the same latent issue).
+ */
+async function recordSyncEventBestEffort(
+  ml: MercadolibreModuleService,
+  event: Parameters<MercadolibreModuleService['recordSyncEvent']>[0],
+): Promise<void> {
+  try {
+    await ml.recordSyncEvent(event)
+  } catch (e) {
+    console.error('[profit-apply-price] price_apply activity-log write failed (non-fatal):', e)
+  }
+}
+
 export async function applySellerPrice(
   scope: MedusaRequest['scope'],
   sellerCtx: { sellerId: string; sellerName: string | null },
@@ -81,7 +98,7 @@ export async function applySellerPrice(
   const miyagiResult = await updateSellerProduct(scope, product_id, miyagiBody)
 
   if (!miyagiResult.ok) {
-    await ml.recordSyncEvent({
+    await recordSyncEventBestEffort(ml, {
       sellerId: sellerCtx.sellerId, kind: 'price_apply', outcome: 'fail', productId: product_id,
       code: 'MIYAGI_WRITE_FAILED', message: miyagiResult.message,
       metadata: { variant_id, old_price_cents: oldPriceCents, new_price_cents, target_margin_pct: target_margin_pct ?? null },
@@ -92,7 +109,7 @@ export async function applySellerPrice(
   // ── ML push — only if linked AND the publish rail is enabled ────────────────
   const link = await ml.getLinkByProduct(product_id)
   if (!link || link.seller_id !== sellerCtx.sellerId || !(await isEnabled('ml.publish_enabled'))) {
-    await ml.recordSyncEvent({
+    await recordSyncEventBestEffort(ml, {
       sellerId: sellerCtx.sellerId, kind: 'price_apply', outcome: 'ok', productId: product_id,
       code: 'ml_skipped',
       message: 'Precio de Miyagi actualizado (sin publicación en Mercado Libre — sin vínculo o publicación desactivada)',
@@ -137,7 +154,7 @@ export async function applySellerPrice(
       categoryId: null, // reconcile reuses the link's stored ml_category_id
     })
 
-    await ml.recordSyncEvent({
+    await recordSyncEventBestEffort(ml, {
       sellerId: sellerCtx.sellerId, kind: 'price_apply', outcome: 'ok', productId: product_id,
       mlItemId: result.ml_item_id, code: result.action,
       message: `Precio aplicado — Mercado Libre: ${result.action} (${result.status ?? 'ok'})`,
@@ -147,7 +164,7 @@ export async function applySellerPrice(
   } catch (e) {
     const err = e as { code?: string; message?: string; mlCode?: string | null; mlMessage?: string | null }
     const reason = err.mlMessage ?? err.message ?? 'Failed to update Mercado Libre'
-    await ml.recordSyncEvent({
+    await recordSyncEventBestEffort(ml, {
       sellerId: sellerCtx.sellerId, kind: 'price_apply', outcome: 'fail', productId: product_id,
       code: err.code ?? err.mlCode ?? null, message: reason,
       metadata: { variant_id, old_price_cents: oldPriceCents, new_price_cents, target_margin_pct: target_margin_pct ?? null },
