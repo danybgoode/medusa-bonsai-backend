@@ -9,9 +9,10 @@
 # below (matching the frontend's identical yaml-guard.yml); the tiny download-script wrapper itself is
 # fetched unpinned from the tool's own `main` branch (its documented, standard install method).
 #
-# ADVISORY for now (continue-on-error) — no findings verified yet against this repo's workflow files.
-# Flip to required after one green cycle, matching this repo's standing convention for rolling out a
-# new guard.
+# REQUIRED — advisory cycle came back clean (actionlint found zero issues on the real workflow
+# files; Daniel reviewed the run on all three repos and confirmed only GitHub's own informational
+# Node-20-deprecation notice, unrelated to actionlint). Flipped to required 2026-07-16, one cycle
+# after the guard's introduction, matching this repo's standing convention.
 name: yaml-guard
 
 on:
@@ -37,5 +38,4 @@ jobs:
         run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
       - name: Check workflow files
         shell: bash
-        continue-on-error: true
         run: ${{ steps.get_actionlint.outputs.executable }} -color
