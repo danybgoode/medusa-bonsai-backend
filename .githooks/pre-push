@@ -1,0 +1,28 @@
+#!/bin/sh
+# Local-first pre-push — ADVISORY (never blocks the push, exits 0 regardless). Auto-enabled
+# via package.json's "prepare" script (git config core.hooksPath .githooks).
+#
+# This repo is PUBLIC, so its GH Actions minutes are already free/unlimited — ci.yml's own
+# build + type-check + unit jobs are UNCHANGED and stay the real gate. This hook is purely
+# additive: faster local feedback before waiting on a PR round-trip, added as part of the
+# 2026-07-16 GitHub Actions minutes offload work (root repo miyagi-product-management) — same
+# local-first pattern, applied here for consistency even though there's no billing reason to.
+#
+# Order matches ci.yml: build FIRST (medusa build generates .medusa/types/* that tsc's
+# tsconfig include depends on — swc-based, doesn't type-check on its own), then tsc --noEmit.
+
+if ! command -v node >/dev/null 2>&1; then
+  exit 0
+fi
+
+echo "pre-push: building (medusa build)..." >&2
+if ! npm run build; then
+  echo "pre-push: build failed — advisory only, push proceeding. ci.yml will also catch this." >&2
+fi
+
+echo "pre-push: type-checking..." >&2
+if ! npx tsc --noEmit; then
+  echo "pre-push: tsc --noEmit failed — advisory only, push proceeding. ci.yml will also catch this." >&2
+fi
+
+exit 0
