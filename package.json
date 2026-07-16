@@ -13,6 +13,7 @@
     "medusa"
   ],
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks",
     "build": "medusa build",
     "start": "medusa start",
     "dev": "medusa develop",
