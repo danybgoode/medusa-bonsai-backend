@@ -28,8 +28,10 @@ const RESERVED_SLUGS = new Set([
  * Validate a seller-chosen slug. Returns an error message, or null if valid.
  * Format mirrors the frontend: 3–40 chars, lowercase alphanumeric + hyphens,
  * no leading/trailing hyphen, not reserved.
+ * Exported so the internal slug door (internal/sellers/slug) enforces the
+ * exact same policy — one backend copy, never a drift pair.
  */
-function validateSlug(slug: string): string | null {
+export function validateSlug(slug: string): string | null {
   if (slug.length < 3 || slug.length > 40) return 'El slug debe tener entre 3 y 40 caracteres.'
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {
     return 'Solo minúsculas, números y guiones; sin guion al inicio o al final.'
