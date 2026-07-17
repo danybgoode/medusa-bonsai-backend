@@ -19,6 +19,9 @@ const RESERVED_SLUGS = new Set([
   'ayuda', 'help', 's', 'shop', 'www', 'billing', 'support', 'soporte', 'account',
   'cuenta', 'sign-in', 'sign-up', 'embed', 'l', 'messages', 'mensajes', 'checkout',
   'cart', 'carrito', 'settings', 'ajustes', 'supply', 'terminos', 'mschz',
+  // mschz-full-coverage (07, Sprint 1, US-1.2) — passthrough prefixes; defense-in-
+  // depth (single-char slugs are already structurally impossible, min length 3).
+  'g', 'e', 'v',
 ])
 
 /**
