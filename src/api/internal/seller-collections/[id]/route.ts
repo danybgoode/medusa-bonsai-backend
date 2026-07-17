@@ -37,7 +37,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
 
   const { id } = req.params
-  const body = req.body as { seller_slug?: string; name?: string }
+  const body = (req.body ?? {}) as { seller_slug?: string; name?: string }
   const seller = await resolveSeller(req, body.seller_slug)
   if (!body.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
   if (!seller) return res.status(404).json({ message: 'Seller not found' })

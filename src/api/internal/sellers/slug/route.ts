@@ -8,10 +8,9 @@
  *
  * Uniqueness is authoritative HERE (Medusa owns seller.slug, mirroring the
  * store/sellers/me PATCH slug branch: same no-op, 422 format and 409
- * conflict semantics). Format is re-checked inline as defense in depth; the
- * reserved-word policy deliberately is not duplicated a third time — the
- * secret-gated caller enforces it, and the two existing copies
- * (lib/slug.ts + store/sellers/me/route.ts) are already a keep-in-sync pair.
+ * conflict semantics). Format + reserved words are re-checked with the SAME
+ * exported validateSlug the store PATCH uses — one backend copy, so this
+ * door can never drift into accepting a slug the portal would reject.
  *
  *   PATCH /internal/sellers/slug
  *         body: { seller_slug, new_slug,
@@ -24,6 +23,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
+import { validateSlug } from '../../../store/sellers/me/route'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -34,7 +34,7 @@ function unauthorized(req: MedusaRequest): boolean {
 export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
 
-  const body = req.body as {
+  const body = (req.body ?? {}) as {
     seller_slug?: string
     new_slug?: string
     previous_slugs?: Array<{ slug: string; until: string }>
@@ -43,11 +43,8 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   if (!body.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
 
   const candidate = (body.new_slug ?? '').trim().toLowerCase()
-  // Defense-in-depth format check (mirrors store/sellers/me's validateSlug
-  // minus the reserved list — see header comment).
-  if (candidate.length < 3 || candidate.length > 40 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(candidate)) {
-    return res.status(422).json({ message: 'Slug inválido.', field: 'slug' })
-  }
+  const invalid = validateSlug(candidate)
+  if (invalid) return res.status(422).json({ message: invalid, field: 'slug' })
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const [seller] = await sellerService.listSellers({ slug: body.seller_slug } as never, { take: 1 })

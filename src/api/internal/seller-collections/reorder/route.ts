@@ -26,7 +26,7 @@ function unauthorized(req: MedusaRequest): boolean {
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
 
-  const body = req.body as { seller_slug?: string; ordered_ids?: unknown }
+  const body = (req.body ?? {}) as { seller_slug?: string; ordered_ids?: unknown }
   if (!body.seller_slug) return res.status(400).json({ message: 'seller_slug required' })
   if (!Array.isArray(body.ordered_ids) || body.ordered_ids.some((x) => typeof x !== 'string')) {
     return res.status(400).json({ message: 'ordered_ids must be an array of collection ids' })
