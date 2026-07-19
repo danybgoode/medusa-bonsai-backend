@@ -26,7 +26,10 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
-import { resolveSellerProductIds } from '../../../../../_utils/seller-catalog-query'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../../../_utils/seller-catalog-query'
 import { deriveProofRestatement } from '../../../../../../../lib/proof-restatement'
 
 async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
@@ -46,9 +49,6 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   // touch any such order (cross-agent review catch, 2026-07-07; unlike
   // tags/confirm-payment, which only tag/confirm-payment an order the
   // seller already reached some other way, this is a NEW write surface).
-  const productIds = ((order.items ?? []) as any[]).map((i: any) => i.product_id).filter(Boolean)
-  if (productIds.length === 0) return { order: null, code: 403 as const }
-
   const sellerProductIds = await resolveSellerProductIds(
     req.scope,
     sellerAuth.sellerId,
@@ -60,8 +60,9 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   // 2026-07-07). A cart can only ever hold one seller's items in normal use
   // (lib/cart.ts on the frontend enforces this at checkout), so this is a
   // no-op for every real order today — pure defense-in-depth.
-  const owns = productIds.every((pid: string) => sellerProductIds.has(pid))
-  if (!owns) return { order: null, code: 403 as const }
+  if (!sellerOwnsEveryOrderItem(sellerProductIds, order.items)) {
+    return { order: null, code: 403 as const }
+  }
 
   return { order, code: 200 as const }
 }

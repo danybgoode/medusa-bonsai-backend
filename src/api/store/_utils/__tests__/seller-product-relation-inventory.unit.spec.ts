@@ -43,6 +43,11 @@ const ORDER_OWNERSHIP_CALL_COUNTS: Record<string, number> = {
   'store/sellers/me/orders/bulk-status/route.ts': 1,
 }
 
+const DELETED_INCLUSIVE_CALL_COUNTS: Record<string, number> = {
+  ...ORDER_OWNERSHIP_CALL_COUNTS,
+  'internal/events-ticketing/redeem/route.ts': 1,
+}
+
 function sourceFiles(root: string): string[] {
   return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const absolute = path.join(root, entry.name)
@@ -72,7 +77,7 @@ function directSellerProductFields(file: string): Array<{ field: string; line: n
   const findings: Array<{ field: string; line: number }> = []
 
   function visit(node: ts.Node) {
-    if (ts.isStringLiteralLike(node) && (node.text === 'products.id' || node.text === 'products.metadata')) {
+    if (ts.isStringLiteralLike(node) && node.text.startsWith('products.')) {
       const { line } = source.getLineAndCharacterOfPosition(node.getStart(source))
       findings.push({ field: node.text, line: line + 1 })
     }
@@ -83,15 +88,39 @@ function directSellerProductFields(file: string): Array<{ field: string; line: n
   return findings
 }
 
+function importedBindings(source: ts.SourceFile, exportedNames: Set<string>): Set<string> {
+  const bindings = new Set<string>()
+
+  for (const statement of source.statements) {
+    if (
+      !ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || !statement.moduleSpecifier.text.endsWith('seller-catalog-query')
+      || !statement.importClause?.namedBindings
+      || !ts.isNamedImports(statement.importClause.namedBindings)
+    ) {
+      continue
+    }
+
+    for (const element of statement.importClause.namedBindings.elements) {
+      const exportedName = element.propertyName?.text ?? element.name.text
+      if (exportedNames.has(exportedName)) bindings.add(element.name.text)
+    }
+  }
+
+  return bindings
+}
+
 function includeDeletedResolverCallCount(file: string): number {
   const source = parse(file)
+  const resolverBindings = importedBindings(source, new Set(['resolveSellerProductIds']))
   let count = 0
 
   function visit(node: ts.Node) {
     if (
       ts.isCallExpression(node)
       && ts.isIdentifier(node.expression)
-      && node.expression.text === 'resolveSellerProductIds'
+      && resolverBindings.has(node.expression.text)
     ) {
       const options = node.arguments[2]
       if (
@@ -121,13 +150,34 @@ function typedResolverCallCount(file: string): number {
     'resolveSellerProductIdsFromRemoteQuery',
     'resolveSellerProductMetadataRecords',
   ])
+  const resolverBindings = importedBindings(source, resolverNames)
   let count = 0
 
   function visit(node: ts.Node) {
     if (
       ts.isCallExpression(node)
       && ts.isIdentifier(node.expression)
-      && resolverNames.has(node.expression.text)
+      && resolverBindings.has(node.expression.text)
+    ) {
+      count++
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(source)
+  return count
+}
+
+function allItemOwnershipCallCount(file: string): number {
+  const source = parse(file)
+  const ownershipBindings = importedBindings(source, new Set(['sellerOwnsEveryOrderItem']))
+  let count = 0
+
+  function visit(node: ts.Node) {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && ownershipBindings.has(node.expression.text)
     ) {
       count++
     }
@@ -139,7 +189,7 @@ function typedResolverCallCount(file: string): number {
 }
 
 describe('seller→products null-slot inventory', () => {
-  it('keeps every route-local map/find/loop/metadata traversal behind the typed helper', () => {
+  it('keeps every direct seller relation field selection behind the typed helper', () => {
     const findings = sourceFiles(API_ROOT)
       .filter((file) => file !== CENTRAL_HELPER)
       .flatMap((file) =>
@@ -151,9 +201,9 @@ describe('seller→products null-slot inventory', () => {
 
     if (findings.length) {
       throw new Error(
-        `Direct seller→products traversal detected:\n${JSON.stringify(findings, null, 2)}\n`
+        `Direct seller→products relation field detected:\n${JSON.stringify(findings, null, 2)}\n`
         + 'Use resolveSellerProductIds() (or its typed metadata/legacy-query sibling) '
-        + 'instead of a route-local map/find/loop/metadata access.',
+        + 'instead of selecting products.* in a route-local seller query.',
       )
     }
   })
@@ -169,11 +219,22 @@ describe('seller→products null-slot inventory', () => {
     expect(actual).toEqual(EXPECTED_MIGRATED_CALL_COUNTS)
   })
 
-  it('keeps every order ownership read deleted-inclusive without widening live catalog reads', () => {
+  it('keeps historical ownership reads deleted-inclusive without widening live catalog reads', () => {
+    const actual = Object.fromEntries(
+      Object.keys(DELETED_INCLUSIVE_CALL_COUNTS).map((file) => [
+        file,
+        includeDeletedResolverCallCount(path.join(API_ROOT, file)),
+      ]),
+    )
+
+    expect(actual).toEqual(DELETED_INCLUSIVE_CALL_COUNTS)
+  })
+
+  it('keeps every order-level seam on the fail-closed all-item ownership predicate', () => {
     const actual = Object.fromEntries(
       Object.keys(ORDER_OWNERSHIP_CALL_COUNTS).map((file) => [
         file,
-        includeDeletedResolverCallCount(path.join(API_ROOT, file)),
+        allItemOwnershipCallCount(path.join(API_ROOT, file)),
       ]),
     )
 

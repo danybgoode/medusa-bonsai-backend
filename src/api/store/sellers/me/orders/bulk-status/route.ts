@@ -21,7 +21,10 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../../_utils/clerk-auth'
-import { resolveSellerProductIds } from '../../../../_utils/seller-catalog-query'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../../_utils/seller-catalog-query'
 import { applyOrderStatusTransition } from '../../../../../../lib/order-status-transition'
 
 const MAX_BULK_ORDERS = 50
@@ -48,14 +51,11 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const orderService = req.scope.resolve(Modules.ORDER) as any
 
   // Resolve the seller's product IDs ONCE for the whole batch (not per order).
-  let sellerProductIds = new Set<string>()
-  try {
-    sellerProductIds = await resolveSellerProductIds(
-      req.scope,
-      seller.sellerId,
-      { includeDeleted: true },
-    )
-  } catch { /* if the link query fails, skip ownership checks rather than block the whole batch */ }
+  const sellerProductIds = await resolveSellerProductIds(
+    req.scope,
+    seller.sellerId,
+    { includeDeleted: true },
+  )
 
   const advanced: string[] = []
   const skipped: Array<{ order_id: string; reason: string }> = []
@@ -72,12 +72,9 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
         continue
       }
 
-      if (sellerProductIds.size > 0) {
-        const orderProductIds = ((order.items as any[]) ?? []).map((i: any) => i.product_id)
-        if (!orderProductIds.some((pid: string) => sellerProductIds.has(pid))) {
-          skipped.push({ order_id: orderId, reason: 'Este pedido no te pertenece.' })
-          continue
-        }
+      if (!sellerOwnsEveryOrderItem(sellerProductIds, order.items)) {
+        skipped.push({ order_id: orderId, reason: 'Este pedido no te pertenece.' })
+        continue
       }
 
       const result = await applyOrderStatusTransition(req.scope, { orderId, order, newStatus })

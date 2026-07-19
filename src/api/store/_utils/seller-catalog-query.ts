@@ -95,6 +95,28 @@ export interface SellerProductMetadataRecord {
   metadata?: Record<string, unknown> | null
 }
 
+/**
+ * Order-level access is indivisible: an authenticated seller must own every
+ * line item, and every item must carry a resolvable product id. Empty sets,
+ * empty orders, missing ids, and mixed-seller orders all fail closed.
+ */
+export function sellerOwnsEveryOrderItem(
+  sellerProductIds: Set<string>,
+  items: unknown,
+): boolean {
+  if (sellerProductIds.size === 0 || !Array.isArray(items) || items.length === 0) {
+    return false
+  }
+
+  return items.every((item) => {
+    if (!item || typeof item !== 'object') return false
+    const productId = (item as { product_id?: unknown }).product_id
+    return typeof productId === 'string'
+      && productId.length > 0
+      && sellerProductIds.has(productId)
+  })
+}
+
 type SellerProductSlot = SellerProductMetadataRecord | null | undefined
 type GraphQueryLike = {
   graph: (query: Record<string, unknown>) => Promise<{ data?: unknown[] }>

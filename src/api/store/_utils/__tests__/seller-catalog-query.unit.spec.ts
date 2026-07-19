@@ -1,6 +1,7 @@
 import {
   resolveSellerProductIds,
   resolveSellerProductMetadataRecords,
+  sellerOwnsEveryOrderItem,
 } from '../seller-catalog-query'
 
 function fakeScope(products: Array<{ id: string } | null | undefined>) {
@@ -89,5 +90,29 @@ describe('resolveSellerProductMetadataRecords', () => {
       { id: 'prod_1', metadata: { views: 3 } },
       { id: 'prod_2', metadata: { views: 5 } },
     ])
+  })
+})
+
+describe('sellerOwnsEveryOrderItem', () => {
+  const owned = new Set(['prod_1', 'prod_2'])
+
+  it('authorizes only when every order item has a resolvable owned product id', () => {
+    expect(sellerOwnsEveryOrderItem(owned, [
+      { product_id: 'prod_1' },
+      { product_id: 'prod_2' },
+    ])).toBe(true)
+  })
+
+  it.each([
+    ['zero items', []],
+    ['a missing product id', [{ product_id: 'prod_1' }, {}]],
+    ['an explicit null product id', [{ product_id: 'prod_1' }, { product_id: null }]],
+    ['partial ownership', [{ product_id: 'prod_1' }, { product_id: 'prod_other' }]],
+  ])('fails closed for %s', (_case, items) => {
+    expect(sellerOwnsEveryOrderItem(owned, items)).toBe(false)
+  })
+
+  it('fails closed when the seller-owned set is empty', () => {
+    expect(sellerOwnsEveryOrderItem(new Set(), [{ product_id: 'prod_1' }])).toBe(false)
   })
 })

@@ -20,6 +20,20 @@ import {
 } from '../_utils'
 import { resolveSellerProductIds } from '../../../store/_utils/seller-catalog-query'
 
+export async function resolveRedeemSellerOwnership(
+  scope: MedusaRequest['scope'],
+  sellerId: string,
+  productId: string | null | undefined,
+): Promise<boolean> {
+  if (!productId) return false
+  const productIds = await resolveSellerProductIds(
+    scope,
+    sellerId,
+    { includeDeleted: true },
+  )
+  return productIds.has(productId)
+}
+
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
 
@@ -50,8 +64,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const current = tickets.find(ticket => ticket.token === token)
   if (!current) return res.status(404).json({ status: 'not_found' })
 
-  const productIds = await resolveSellerProductIds(req.scope, body.sellerId)
-  if (!current.product_id || !productIds.has(current.product_id)) {
+  if (!await resolveRedeemSellerOwnership(req.scope, body.sellerId, current.product_id)) {
     return res.status(403).json({ status: 'wrong_seller', ticket: current })
   }
 

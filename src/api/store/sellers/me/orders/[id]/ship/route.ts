@@ -26,7 +26,10 @@ import {
 } from '@medusajs/medusa/core-flows'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
 import { resolveShippingOptionIds, resolveStockLocationId } from '../../../../../_utils/fulfillment'
-import { resolveSellerProductIds } from '../../../../../_utils/seller-catalog-query'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../../../_utils/seller-catalog-query'
 import { SELLER_MODULE } from '../../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../../modules/seller/service'
 import {
@@ -85,19 +88,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // Ownership check
-  try {
-    const productIds = await resolveSellerProductIds(
-      req.scope,
-      seller.sellerId,
-      { includeDeleted: true },
-    )
-    if (productIds.size > 0) {
-      const orderProductIds = ((order.items as any[]) ?? []).map((i: any) => i.product_id)
-      if (!orderProductIds.some((id: string) => productIds.has(id))) {
-        return res.status(403).json({ message: 'Forbidden' })
-      }
-    }
-  } catch { /* skip check if link query fails */ }
+  const productIds = await resolveSellerProductIds(
+    req.scope,
+    seller.sellerId,
+    { includeDeleted: true },
+  )
+  if (!sellerOwnsEveryOrderItem(productIds, order.items)) {
+    return res.status(403).json({ message: 'Forbidden' })
+  }
 
   const meta = (order.metadata ?? {}) as Record<string, any>
 

@@ -20,7 +20,10 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { refundPaymentWorkflow } from '@medusajs/medusa/core-flows'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
-import { resolveSellerProductIds } from '../../../../../_utils/seller-catalog-query'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../../../_utils/seller-catalog-query'
 
 async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   const sellerAuth = await resolveSeller(req)
@@ -34,15 +37,13 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   if (!order) return { order: null, sellerId: null, code: 404 as const }
 
   // Verify order belongs to this seller
-  const productIds = ((order.items ?? []) as any[]).map((i: any) => i.product_id).filter(Boolean)
-  if (productIds.length) {
-    const sellerProductIds = await resolveSellerProductIds(
-      req.scope,
-      sellerAuth.sellerId,
-      { includeDeleted: true },
-    )
-    const owns = productIds.some((pid: string) => sellerProductIds.has(pid))
-    if (!owns) return { order: null, sellerId: null, code: 403 as const }
+  const sellerProductIds = await resolveSellerProductIds(
+    req.scope,
+    sellerAuth.sellerId,
+    { includeDeleted: true },
+  )
+  if (!sellerOwnsEveryOrderItem(sellerProductIds, order.items)) {
+    return { order: null, sellerId: null, code: 403 as const }
   }
 
   return { order, sellerId: sellerAuth.sellerId, code: 200 as const }
