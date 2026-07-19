@@ -19,6 +19,7 @@ import SellerModuleService from '../../../../modules/seller/service'
 import { MERCADOLIBRE_MODULE } from '../../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../../modules/mercadolibre/service'
 import { toListingShape } from '../../../store/_utils/listing'
+import { resolveSellerProductIds } from '../../../store/_utils/seller-catalog-query'
 import type { MlPublishInput } from '../../../../modules/mercadolibre/_utils'
 import { resolveMlOrdersEntitlement } from '../../../../lib/ml-orders-entitlement'
 
@@ -78,13 +79,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const remoteQuery = req.scope.resolve('remoteQuery')
 
   // Ownership: the product must belong to this seller (defense in depth).
-  const { data: sellerRows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: seller.id },
-  })
-  const ownedIds = (((sellerRows?.[0] as any)?.products ?? []) as any[]).map((p) => p.id)
-  if (!ownedIds.includes(product_id)) {
+  const ownedIds = await resolveSellerProductIds(req.scope, seller.id)
+  if (!ownedIds.has(product_id)) {
     return res.status(403).json({ message: 'Product not found in this shop' })
   }
 

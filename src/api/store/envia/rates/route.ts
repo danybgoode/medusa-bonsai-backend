@@ -25,6 +25,7 @@ import { isEnabled } from '../../../../lib/flags'
 import { enviaKillGate, ENVIA_ARRANGED_DELIVERY_MESSAGE } from '../../../../lib/envia-killswitch'
 import { correosGate } from '../../../../lib/correos-gate'
 import { quoteCorreosForPieces } from '../../../../lib/correos-tariff'
+import { resolveSellerProductIds } from '../../_utils/seller-catalog-query'
 
 const DEFAULT_CARRIERS = ['dhl', 'fedex', 'estafeta', 'ups', 'redpack', 'paquetexpress']
 
@@ -182,13 +183,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       const allSellers = await sellerService.listSellers({}, { take: 1000 })
       // Find which seller owns the first product
       for (const seller of allSellers) {
-        const { data: rows } = await remoteQuery.graph({
-          entity: 'seller',
-          fields: ['id', 'products.id'],
-          filters: { id: seller.id },
-        })
-        const productIds = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
-        if (productIds.includes(shippable[0].id)) {
+        const productIds = await resolveSellerProductIds(req.scope, seller.id)
+        if (productIds.has(shippable[0].id)) {
           sellerMeta = (seller.metadata ?? {}) as Record<string, unknown>
           break
         }

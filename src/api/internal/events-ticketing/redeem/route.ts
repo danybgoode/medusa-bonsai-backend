@@ -18,15 +18,20 @@ import {
   type EventTicket,
   unauthorized,
 } from '../_utils'
+import { resolveSellerProductIds } from '../../../store/_utils/seller-catalog-query'
 
-async function sellerProductIds(req: MedusaRequest, sellerId: string): Promise<Set<string>> {
-  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-  const { data } = await (query as any).graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: sellerId },
-  })
-  return new Set(((data?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
+export async function resolveRedeemSellerOwnership(
+  scope: MedusaRequest['scope'],
+  sellerId: string,
+  productId: string | null | undefined,
+): Promise<boolean> {
+  if (!productId) return false
+  const productIds = await resolveSellerProductIds(
+    scope,
+    sellerId,
+    { includeDeleted: true },
+  )
+  return productIds.has(productId)
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
@@ -59,8 +64,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const current = tickets.find(ticket => ticket.token === token)
   if (!current) return res.status(404).json({ status: 'not_found' })
 
-  const productIds = await sellerProductIds(req, body.sellerId)
-  if (!current.product_id || !productIds.has(current.product_id)) {
+  if (!await resolveRedeemSellerOwnership(req.scope, body.sellerId, current.product_id)) {
     return res.status(403).json({ status: 'wrong_seller', ticket: current })
   }
 

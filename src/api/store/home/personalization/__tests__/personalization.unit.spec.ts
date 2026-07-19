@@ -68,7 +68,12 @@ function makeSellerService(sellers: Array<{ id: string; name: string }>) {
 
 const remoteQuery = {
   graph: jest.fn(async () => ({
-    data: [{ products: [{ metadata: { views: 12 } }, { metadata: { views: 8 } }] }],
+    data: [{
+      products: [
+        { id: 'prod_1', metadata: { views: 12 } },
+        { id: 'prod_2', metadata: { views: 8 } },
+      ],
+    }],
   })),
 } as unknown as Parameters<typeof buildHomePersonalization>[0]['remoteQuery']
 

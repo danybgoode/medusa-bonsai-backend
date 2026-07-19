@@ -3,6 +3,7 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import type SellerModuleService from '../../../../modules/seller/service'
 import { supabaseRead } from '../../_utils/supabase-read'
 import { bearerToken, verifyClerkJwt } from '../../_utils/clerk-verify'
+import { resolveSellerProductMetadataRecords } from '../../_utils/seller-catalog-query'
 
 /**
  * GET /store/home/personalization
@@ -294,17 +295,11 @@ async function readSellerVisitas(
   remoteQuery: RemoteQueryLike,
 ): Promise<number> {
   try {
-    const { data } = await remoteQuery.graph({
-      entity: 'seller',
-      fields: ['id', 'products.metadata'],
-      filters: { id: seller.id },
-    })
+    const products = await resolveSellerProductMetadataRecords(remoteQuery, seller.id)
     let total = 0
-    for (const row of (data ?? []) as Array<{ products?: Array<{ metadata?: Record<string, unknown> }> }>) {
-      for (const p of row.products ?? []) {
-        const v = p.metadata?.views
-        if (typeof v === 'number') total += v
-      }
+    for (const product of products) {
+      const views = product.metadata?.views
+      if (typeof views === 'number') total += views
     }
     return total
   } catch (e) {

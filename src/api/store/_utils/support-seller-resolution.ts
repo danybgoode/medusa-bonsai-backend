@@ -1,3 +1,5 @@
+import { resolveSellerProductIdsFromRemoteQuery } from './seller-catalog-query'
+
 type SellerServiceLike = {
   listSellers: (filters?: Record<string, unknown>, config?: Record<string, unknown>) => Promise<any[]>
 }
@@ -18,14 +20,8 @@ export async function findSellerLinkedToProduct(
   const allSellers = await sellerService.listSellers({}, { take: 500 })
   for (const seller of allSellers) {
     try {
-      const { data: rows } = await remoteQuery({
-        seller: {
-          fields: ['id', 'products.id'],
-          variables: { filters: { id: seller.id } },
-        },
-      })
-      const ids = ((rows?.[0] as any)?.products ?? []).map((product: any) => product.id)
-      if (ids.includes(productId)) return seller
+      const ids = await resolveSellerProductIdsFromRemoteQuery(remoteQuery, seller.id)
+      if (ids.has(productId)) return seller
     } catch {
       // no products linked
     }

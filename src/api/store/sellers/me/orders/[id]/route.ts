@@ -17,6 +17,10 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { normalizeMedusaOrder } from '../route'
 import { resolveSeller } from '../../../../_utils/clerk-auth'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../../_utils/seller-catalog-query'
 import { applyOrderStatusTransition, LIFECYCLE_STATES } from '../../../../../../lib/order-status-transition'
 
 // ── GET ──────────────────────────────────────────────────────────────────────
@@ -51,24 +55,14 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return res.status(404).json({ message: 'Order not found' })
   }
 
-  // Verify the order contains one of this seller's products (security check)
-  const remoteQuery = req.scope.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
-  let productIds: string[] = []
-  try {
-    const { data: sellerRows } = await (remoteQuery as any).graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: seller.sellerId },
-    })
-    productIds = ((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
-  } catch { /* skip security check if link query fails */ }
-
-  if (productIds.length > 0) {
-    const orderProductIds = ((order.items as any[]) ?? []).map((i: any) => i.product_id)
-    const hasSellerProduct = orderProductIds.some((id: string) => productIds.includes(id))
-    if (!hasSellerProduct) {
-      return res.status(403).json({ message: 'Forbidden' })
-    }
+  // Verify every order item belongs to this seller (security check).
+  const productIds = await resolveSellerProductIds(
+    req.scope,
+    seller.sellerId,
+    { includeDeleted: true },
+  )
+  if (!sellerOwnsEveryOrderItem(productIds, order.items)) {
+    return res.status(403).json({ message: 'Forbidden' })
   }
 
   return res.json({ order: normalizeMedusaOrder(order, seller.sellerId, seller.sellerName) })
@@ -95,8 +89,6 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const orderService = req.scope.resolve(Modules.ORDER) as any
-  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-
   let order: Record<string, unknown>
   try {
     order = await orderService.retrieveOrder(orderId, {
@@ -107,21 +99,15 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     return res.status(404).json({ message: 'Order not found' })
   }
 
-  // Ownership: the order must contain one of this seller's products.
-  try {
-    const { data: sellerRows } = await query.graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: seller.sellerId },
-    })
-    const productIds: string[] = ((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id)
-    if (productIds.length > 0) {
-      const orderProductIds = ((order.items as any[]) ?? []).map((i: any) => i.product_id)
-      if (!orderProductIds.some((id: string) => productIds.includes(id))) {
-        return res.status(403).json({ message: 'Forbidden' })
-      }
-    }
-  } catch { /* if the link query fails, skip the check rather than block shipping */ }
+  // Ownership: every order item must belong to this seller.
+  const productIds = await resolveSellerProductIds(
+    req.scope,
+    seller.sellerId,
+    { includeDeleted: true },
+  )
+  if (!sellerOwnsEveryOrderItem(productIds, order.items)) {
+    return res.status(403).json({ message: 'Forbidden' })
+  }
 
   const result = await applyOrderStatusTransition(req.scope, {
     orderId,

@@ -9,6 +9,7 @@
  * Returns the full matching set, unpaginated — callers slice for a page
  * (GET route) or cap-and-use-directly for a bulk batch (bulk-stage route).
  */
+import { QueryContext } from '@medusajs/framework/utils'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
 import { toListingShape, type ListingShape } from './listing'
@@ -78,20 +79,135 @@ const isSobrePedido = (l: { manage_inventory: boolean; allow_backorder: boolean 
  * found via the catalog-management epic's Sprint 3 smoke test (this exact
  * `.map()` shape pre-dates Sprint 3 as inline code in the S1 GET route; the
  * extraction here didn't introduce the bug, just gave it one call site to
- * fix instead of several. Confirmed identical latent shape in the
- * single-row `resolveOwnership()` at `sellers/me/products/[id]/route.ts`
- * and `internal/seller-products/[id]/route.ts` — same fix owed there).
+ * fix instead of several.
  */
-export async function resolveSellerProductIds(scope: any, sellerId: string): Promise<Set<string>> {
-  const remoteQuery = scope.resolve('remoteQuery')
-  const { data: rows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: sellerId },
+export interface ResolveSellerProductIdsOptions {
+  /**
+   * Order ownership must survive a listing soft-delete. Medusa only applies
+   * top-level `withDeleted` to nested relations when that relation has a
+   * QueryContext, so both pieces below are load-bearing.
+   */
+  includeDeleted?: boolean
+}
+
+export interface SellerProductMetadataRecord {
+  id: string
+  metadata?: Record<string, unknown> | null
+}
+
+/**
+ * Order-level access is indivisible: an authenticated seller must own every
+ * line item, and every item must carry a resolvable product id. Empty sets,
+ * empty orders, missing ids, and mixed-seller orders all fail closed.
+ */
+export function sellerOwnsEveryOrderItem(
+  sellerProductIds: Set<string>,
+  items: unknown,
+): boolean {
+  if (sellerProductIds.size === 0 || !Array.isArray(items) || items.length === 0) {
+    return false
+  }
+
+  return items.every((item) => {
+    if (!item || typeof item !== 'object') return false
+    const productId = (item as { product_id?: unknown }).product_id
+    return typeof productId === 'string'
+      && productId.length > 0
+      && sellerProductIds.has(productId)
   })
-  const products = (rows?.[0] as { products?: Array<{ id: string } | null | undefined> } | undefined)?.products ?? []
-  const ids = products.filter((product): product is { id: string } => product != null).map((product) => product.id)
-  return new Set(ids)
+}
+
+type SellerProductSlot = SellerProductMetadataRecord | null | undefined
+type GraphQueryLike = {
+  graph: (query: Record<string, unknown>) => Promise<{ data?: unknown[] }>
+}
+
+function isResolvedSellerProduct(product: SellerProductSlot): product is SellerProductMetadataRecord {
+  return product != null && typeof product.id === 'string'
+}
+
+function productRecords(rows: unknown[] | undefined): SellerProductMetadataRecord[] {
+  const products = (
+    rows?.[0] as { products?: SellerProductSlot[] } | undefined
+  )?.products ?? []
+  return products.filter(isResolvedSellerProduct)
+}
+
+function sellerProductGraphQuery(
+  sellerId: string,
+  fields: string[],
+  options: ResolveSellerProductIdsOptions = {},
+) {
+  const query: Record<string, unknown> = {
+    entity: 'seller',
+    fields: ['id', ...fields],
+    filters: { id: sellerId },
+  }
+
+  if (options.includeDeleted) {
+    query.context = {
+      products: QueryContext({}),
+    }
+    query.withDeleted = true
+  }
+
+  return query
+}
+
+async function graphSellerProductRecords(
+  remoteQuery: GraphQueryLike,
+  sellerId: string,
+  fields: string[],
+  options: ResolveSellerProductIdsOptions = {},
+): Promise<SellerProductMetadataRecord[]> {
+  const { data: rows } = await remoteQuery.graph({
+    ...sellerProductGraphQuery(sellerId, fields, options),
+  })
+  return productRecords(rows)
+}
+
+export async function resolveSellerProductIds(
+  scope: any,
+  sellerId: string,
+  options: ResolveSellerProductIdsOptions = {},
+): Promise<Set<string>> {
+  const remoteQuery = scope.resolve('remoteQuery') as GraphQueryLike
+  const products = await graphSellerProductRecords(remoteQuery, sellerId, ['products.id'], options)
+  return new Set(products.map((product) => product.id))
+}
+
+/**
+ * The checkout support resolver still receives Medusa's legacy callable
+ * remote-query seam as an injected dependency. Keep its row parsing on the
+ * same typed null filter rather than duplicating the unsafe map locally.
+ */
+export async function resolveSellerProductIdsFromRemoteQuery(
+  remoteQuery: (query: Record<string, unknown>) => Promise<{ data?: unknown[] }>,
+  sellerId: string,
+): Promise<Set<string>> {
+  const { data: rows } = await remoteQuery({
+    seller: {
+      fields: ['id', 'products.id'],
+      variables: { filters: { id: sellerId } },
+    },
+  })
+  return new Set(productRecords(rows).map((product) => product.id))
+}
+
+/**
+ * Metadata consumers need the linked records, not only their ids. This is the
+ * sole typed escape hatch for those reads; sparse relation slots are removed
+ * before callers can find/iterate/access metadata.
+ */
+export async function resolveSellerProductMetadataRecords(
+  remoteQuery: GraphQueryLike,
+  sellerId: string,
+): Promise<SellerProductMetadataRecord[]> {
+  return graphSellerProductRecords(
+    remoteQuery,
+    sellerId,
+    ['products.id', 'products.metadata'],
+  )
 }
 
 export async function querySellerCatalog(

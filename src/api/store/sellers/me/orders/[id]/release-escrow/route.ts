@@ -13,6 +13,10 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { capturePaymentWorkflow } from '@medusajs/medusa/core-flows'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../../../_utils/seller-catalog-query'
 import { logger } from '../../../../../../../lib/logger'
 
 async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
@@ -20,24 +24,19 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   if (!sellerAuth) return { order: null, sellerId: null, code: 401 as const }
 
   const orderService: any = req.scope.resolve(Modules.ORDER)
-  const remoteQuery = req.scope.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
-
   const [order] = await orderService.listOrders(
     { id: orderId },
     { select: ['id', 'status', 'payment_status', 'metadata'], relations: ['items'] }
   )
   if (!order) return { order: null, sellerId: null, code: 404 as const }
 
-  const productIds = ((order.items ?? []) as any[]).map((i: any) => i.product_id).filter(Boolean)
-  if (productIds.length) {
-    const { data: sellerRows } = await (remoteQuery as any).graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: sellerAuth.sellerId },
-    })
-    const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
-    const owns = productIds.some((pid: string) => sellerProductIds.has(pid))
-    if (!owns) return { order: null, sellerId: null, code: 403 as const }
+  const sellerProductIds = await resolveSellerProductIds(
+    req.scope,
+    sellerAuth.sellerId,
+    { includeDeleted: true },
+  )
+  if (!sellerOwnsEveryOrderItem(sellerProductIds, order.items)) {
+    return { order: null, sellerId: null, code: 403 as const }
   }
 
   return { order, sellerId: sellerAuth.sellerId, code: 200 as const }

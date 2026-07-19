@@ -14,6 +14,10 @@ import { MedusaContainer } from '@medusajs/framework/types'
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../_utils/clerk-auth'
+import {
+  resolveSellerProductIds,
+  sellerOwnsEveryOrderItem,
+} from '../../../_utils/seller-catalog-query'
 import { readRentalBooking, deriveRentalBookingState } from '../../../../../lib/rental-booking'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -37,22 +41,20 @@ export async function listOrdersForSeller(
   sellerId: string,
   sellerName: string,
 ): Promise<ReturnType<typeof normalizeMedusaOrder>[]> {
-  const remoteQuery = (scope as any).resolve(ContainerRegistrationKeys.REMOTE_QUERY)
-
   // ── Get seller's product IDs ──────────────────────────────────────────────
-  let productIds: string[] = []
+  let sellerProductIds = new Set<string>()
   try {
-    const { data: sellerRows } = await (remoteQuery as any).graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: sellerId },
-    })
-    productIds = ((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
+    sellerProductIds = await resolveSellerProductIds(
+      scope,
+      sellerId,
+      { includeDeleted: true },
+    )
   } catch {
     return []
   }
 
-  if (!productIds.length) return []
+  if (!sellerProductIds.size) return []
+  const productIds = [...sellerProductIds]
 
   // ── Fetch Medusa orders that contain these products ───────────────────────
   const knex = (scope as any).resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
@@ -96,7 +98,9 @@ export async function listOrdersForSeller(
   }
 
   // ── Normalize to legacy shape ─────────────────────────────────────────────
-  return (orders as any[]).map(o => normalizeMedusaOrder(o, sellerId, sellerName))
+  return (orders as any[])
+    .filter((order) => sellerOwnsEveryOrderItem(sellerProductIds, order.items))
+    .map(o => normalizeMedusaOrder(o, sellerId, sellerName))
 }
 
 // ── Normalization helper ──────────────────────────────────────────────────────
