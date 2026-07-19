@@ -62,7 +62,7 @@ for secret in TELEGRAM_BOT_TOKEN TELEGRAM_CICD_CHAT_ID; do
       --role="roles/secretmanager.secretAccessor" \
       --condition=None \
       --quiet \
-      >/dev/null 2>&1; then
+      >/dev/null; then
       secret_access_granted=true
       break
     fi

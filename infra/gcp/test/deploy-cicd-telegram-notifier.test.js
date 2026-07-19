@@ -32,6 +32,7 @@ test('Secret Manager IAM grants retry the operation that actually observes propa
   assert.match(retryBlock[0], /if gcloud secrets add-iam-policy-binding/)
   assert.match(retryBlock[0], /for attempt in 1 2 3 4 5 6 7 8 9 10 11 12/)
   assert.match(retryBlock[0], /sleep 5/)
+  assert.doesNotMatch(retryBlock[0], /2>&1/, 'grant failures must stay visible while retrying')
   assert.doesNotMatch(src, /Waiting for service account visibility/)
 })
 
