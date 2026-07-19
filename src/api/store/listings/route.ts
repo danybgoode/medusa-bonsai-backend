@@ -3,6 +3,7 @@ import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { toListingShape, isFeaturedPin } from '../_utils/listing'
 import { isHiddenCatalogProduct } from '../_utils/support'
+import { resolveSellerProductIds } from '../_utils/seller-catalog-query'
 import { isEnabled } from '../../../lib/flags'
 import {
   carMake, carYear, carTransmission, carFuel,
@@ -47,15 +48,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   await Promise.all(
     allSellers.map(async (seller) => {
       try {
-        const { data: sellerRows } = await remoteQuery.graph({
-          entity: 'seller',
-          fields: ['id', 'products.id'],
-          filters: { id: seller.id },
-        })
-        for (const row of (sellerRows ?? []) as any[]) {
-          for (const prod of row.products ?? []) {
-            productToSeller.set(prod.id, seller)
-          }
+        const productIds = await resolveSellerProductIds(req.scope, seller.id)
+        for (const productId of productIds) {
+          productToSeller.set(productId, seller)
         }
       } catch {
         // Seller has no linked products yet — skip

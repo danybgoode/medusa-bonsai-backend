@@ -2,6 +2,7 @@ import { MedusaRequest } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { createSellerProduct } from './seller-product-create'
+import { resolveSellerProductMetadataRecords } from './seller-catalog-query'
 import { isSupportProductMetadata, SUPPORT_PRODUCT_METADATA } from './support'
 
 /**
@@ -30,30 +31,17 @@ async function findLinkedSupportProduct(
 ) {
   const remoteQuery = scope.resolve('remoteQuery')
 
-  if (configuredProductId) {
-    try {
-      const { data: rows } = await remoteQuery.graph({
-        entity: 'seller',
-        fields: ['id', 'products.id', 'products.metadata'],
-        filters: { id: sellerId },
-      })
-      const products = ((rows?.[0] as any)?.products ?? []) as Array<{ id: string; metadata?: unknown }>
+  try {
+    // One typed, null-filtered link read covers both reuse paths. The old
+    // implementation queried the same seller relation twice when the
+    // configured id was stale.
+    const products = await resolveSellerProductMetadataRecords(remoteQuery, sellerId)
+    if (configuredProductId) {
       const configured = products.find((product) => product.id === configuredProductId)
       if (configured && isSupportProductMetadata(configured.metadata)) {
         return configured.id
       }
-    } catch {
-      // Fall through to a broader linked-product lookup.
     }
-  }
-
-  try {
-    const { data: rows } = await remoteQuery.graph({
-      entity: 'seller',
-      fields: ['id', 'products.id', 'products.metadata'],
-      filters: { id: sellerId },
-    })
-    const products = ((rows?.[0] as any)?.products ?? []) as Array<{ id: string; metadata?: unknown }>
     return products.find((product) => isSupportProductMetadata(product.metadata))?.id ?? null
   } catch {
     return null

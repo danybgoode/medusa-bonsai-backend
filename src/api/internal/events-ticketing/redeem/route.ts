@@ -18,16 +18,7 @@ import {
   type EventTicket,
   unauthorized,
 } from '../_utils'
-
-async function sellerProductIds(req: MedusaRequest, sellerId: string): Promise<Set<string>> {
-  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-  const { data } = await (query as any).graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: sellerId },
-  })
-  return new Set(((data?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
-}
+import { resolveSellerProductIds } from '../../../store/_utils/seller-catalog-query'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (unauthorized(req)) return res.status(401).json({ message: 'Unauthorized' })
@@ -59,7 +50,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const current = tickets.find(ticket => ticket.token === token)
   if (!current) return res.status(404).json({ status: 'not_found' })
 
-  const productIds = await sellerProductIds(req, body.sellerId)
+  const productIds = await resolveSellerProductIds(req.scope, body.sellerId)
   if (!current.product_id || !productIds.has(current.product_id)) {
     return res.status(403).json({ status: 'wrong_seller', ticket: current })
   }

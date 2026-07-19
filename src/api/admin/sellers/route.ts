@@ -1,13 +1,12 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
+import { resolveSellerProductIds } from '../../store/_utils/seller-catalog-query'
 
 // GET /admin/sellers — list all sellers with product counts
 // Optional: ?product_id=X to find the seller that owns a specific product
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
-  const remoteQuery = req.scope.resolve('remoteQuery')
-
   const productId = req.query.product_id as string | undefined
 
   const sellers = await sellerService.listSellers({}, { take: 1000, skip: 0 })
@@ -17,12 +16,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     sellers.map(async (seller) => {
       let productIds: string[] = []
       try {
-        const { data } = await remoteQuery.graph({
-          entity: 'seller',
-          fields: ['id', 'products.id'],
-          filters: { id: seller.id },
-        })
-        productIds = ((data?.[0] as any)?.products ?? []).map((p: any) => p.id as string)
+        productIds = [...await resolveSellerProductIds(req.scope, seller.id)]
       } catch { /* no products linked */ }
 
       return {

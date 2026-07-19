@@ -3,6 +3,7 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { toListingShape } from '../../_utils/listing'
 import { isHiddenCatalogProduct } from '../../_utils/support'
+import { resolveSellerProductIds } from '../../_utils/seller-catalog-query'
 
 // GET /store/listings/:id — single listing with seller enrichment
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -38,13 +39,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const allSellers = await sellerService.listSellers({}, { take: 1000 })
   for (const s of allSellers) {
     try {
-      const { data: rows } = await remoteQuery.graph({
-        entity: 'seller',
-        fields: ['id', 'products.id'],
-        filters: { id: s.id },
-      })
-      const productIds = ((rows?.[0] as any)?.products ?? []).map((p: any) => p.id)
-      if (productIds.includes(id)) {
+      const productIds = await resolveSellerProductIds(req.scope, s.id)
+      if (productIds.has(id)) {
         seller = s
         break
       }

@@ -2,6 +2,7 @@ import { MedusaRequest } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { updateSellerProduct, type SellerProductUpdateBody } from './seller-product-update'
 import { toListingShape } from './listing'
+import { resolveSellerProductIds } from './seller-catalog-query'
 import { isEnabled } from '../../../lib/flags'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import type MercadolibreModuleService from '../../../modules/mercadolibre/service'
@@ -67,13 +68,8 @@ export async function applySellerPrice(
   const ml = scope.resolve(MERCADOLIBRE_MODULE) as MercadolibreModuleService
 
   // Ownership (defense in depth — mirrors /store/sellers/me/products/:id).
-  const { data: sellerRows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: sellerCtx.sellerId },
-  })
-  const ownedIds = (((sellerRows?.[0] as any)?.products ?? []) as any[]).map((p) => p.id)
-  if (!ownedIds.includes(product_id)) {
+  const ownedIds = await resolveSellerProductIds(scope, sellerCtx.sellerId)
+  if (!ownedIds.has(product_id)) {
     return { httpStatus: 403, body: { message: 'Product not found in this shop' } }
   }
 
