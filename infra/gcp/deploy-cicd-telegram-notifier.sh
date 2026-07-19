@@ -52,32 +52,27 @@ if ! gcloud iam service-accounts describe "${SERVICE_ACCOUNT_EMAIL}" --project="
     >/dev/null
 fi
 
-# IAM is eventually consistent after service-account creation. The create command can return before
-# Secret Manager can resolve the new principal; wait a bounded minute instead of failing a fresh deploy.
-service_account_visible=false
-for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  if gcloud iam service-accounts describe "${SERVICE_ACCOUNT_EMAIL}" \
-    --project="${PROJECT_ID}" >/dev/null 2>&1; then
-    service_account_visible=true
-    break
-  fi
-  echo "Waiting for service account visibility (${attempt}/12)..."
-  sleep 5
-done
-if [ "${service_account_visible}" != "true" ]; then
-  echo "Service account did not become visible within 60s: ${SERVICE_ACCOUNT_EMAIL}" >&2
-  exit 1
-fi
-
 echo "Granting notifier access to Telegram secrets..."
 for secret in TELEGRAM_BOT_TOKEN TELEGRAM_CICD_CHAT_ID; do
-  gcloud secrets add-iam-policy-binding "${secret}" \
-    --project="${PROJECT_ID}" \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/secretmanager.secretAccessor" \
-    --condition=None \
-    --quiet \
-    >/dev/null
+  secret_access_granted=false
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if gcloud secrets add-iam-policy-binding "${secret}" \
+      --project="${PROJECT_ID}" \
+      --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --condition=None \
+      --quiet \
+      >/dev/null 2>&1; then
+      secret_access_granted=true
+      break
+    fi
+    echo "Waiting for ${SERVICE_ACCOUNT_EMAIL} to resolve in Secret Manager (${attempt}/12)..." >&2
+    sleep 5
+  done
+  if [ "${secret_access_granted}" != "true" ]; then
+    echo "Could not grant ${SERVICE_ACCOUNT_EMAIL} access to ${secret} within 60s." >&2
+    exit 1
+  fi
 done
 
 BACKEND_TRIGGER_ID="${BACKEND_TRIGGER_ID:-$(gcloud builds triggers list \

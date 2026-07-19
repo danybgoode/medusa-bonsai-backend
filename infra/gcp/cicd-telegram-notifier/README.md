@@ -60,9 +60,9 @@ The deploy script:
 1. Enables its required APIs in the explicitly selected project (it does not alter the active
    gcloud project).
 2. Verifies the two Secret Manager secrets exist.
-3. Creates service account `cicd-telegram-notifier` if needed and waits up to 60 seconds for IAM
-   visibility (fresh principals are eventually consistent).
-4. Grants that service account `roles/secretmanager.secretAccessor` on only the Telegram secrets.
+3. Creates service account `cicd-telegram-notifier` if needed.
+4. Grants that service account `roles/secretmanager.secretAccessor` on only the Telegram secrets,
+   retrying each grant for up to 60 seconds because fresh principals are eventually consistent.
 5. Discovers the regional `backend-main-deploy` trigger ID.
 6. Deploys the Node.js 22 Gen2 function with a `cloud-builds` Pub/Sub trigger.
 
