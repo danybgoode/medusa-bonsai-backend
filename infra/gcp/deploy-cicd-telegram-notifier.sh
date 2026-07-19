@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:-miyagisanchez-prod}"
 REGION="${REGION:-us-east4}"
 BUILD_TRIGGER_REGION="${BUILD_TRIGGER_REGION:-us-east4}"
+FUNCTION_RUNTIME="${FUNCTION_RUNTIME:-nodejs22}"
 FUNCTION_NAME="${FUNCTION_NAME:-cicd-telegram-build-notifier}"
 SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-cicd-telegram-notifier}"
 BACKEND_REPO_OWNER="${BACKEND_REPO_OWNER:-danybgoode}"
@@ -51,6 +52,23 @@ if ! gcloud iam service-accounts describe "${SERVICE_ACCOUNT_EMAIL}" --project="
     >/dev/null
 fi
 
+# IAM is eventually consistent after service-account creation. The create command can return before
+# Secret Manager can resolve the new principal; wait a bounded minute instead of failing a fresh deploy.
+service_account_visible=false
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  if gcloud iam service-accounts describe "${SERVICE_ACCOUNT_EMAIL}" \
+    --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    service_account_visible=true
+    break
+  fi
+  echo "Waiting for service account visibility (${attempt}/12)..."
+  sleep 5
+done
+if [ "${service_account_visible}" != "true" ]; then
+  echo "Service account did not become visible within 60s: ${SERVICE_ACCOUNT_EMAIL}" >&2
+  exit 1
+fi
+
 echo "Granting notifier access to Telegram secrets..."
 for secret in TELEGRAM_BOT_TOKEN TELEGRAM_CICD_CHAT_ID; do
   gcloud secrets add-iam-policy-binding "${secret}" \
@@ -79,7 +97,7 @@ gcloud functions deploy "${FUNCTION_NAME}" \
   --gen2 \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
-  --runtime=nodejs20 \
+  --runtime="${FUNCTION_RUNTIME}" \
   --source="${SOURCE_DIR}" \
   --entry-point=notifyCloudBuild \
   --trigger-topic=cloud-builds \

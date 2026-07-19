@@ -23,3 +23,18 @@ test('required API enablement is explicitly scoped to the selected project', () 
   assert.ok(servicesEnable, 'expected the required API enablement command')
   assert.match(servicesEnable[0], /--project="\$\{PROJECT_ID\}"/)
 })
+
+test('fresh service accounts get a bounded visibility wait before secret IAM grants', () => {
+  const waitIdx = src.indexOf('service_account_visible=false')
+  const grantIdx = src.indexOf('gcloud secrets add-iam-policy-binding')
+  assert.ok(waitIdx !== -1, 'expected a service-account visibility wait')
+  assert.ok(waitIdx < grantIdx, 'visibility wait must finish before Secret Manager IAM grants')
+  assert.match(src, /Waiting for service account visibility/)
+  assert.match(src, /did not become visible within 60s/)
+})
+
+test('Cloud Function defaults to the supported Node.js 22 runtime', () => {
+  assert.match(src, /FUNCTION_RUNTIME="\$\{FUNCTION_RUNTIME:-nodejs22\}"/)
+  assert.match(src, /--runtime="\$\{FUNCTION_RUNTIME\}"/)
+  assert.doesNotMatch(src, /nodejs20/)
+})
