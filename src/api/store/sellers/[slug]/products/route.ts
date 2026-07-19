@@ -3,6 +3,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { isHiddenCatalogProduct } from '../../../_utils/support'
 import { stripPrivateVariantMetadata } from '../../../_utils/listing'
+import { resolveSellerProductIds } from '../../../_utils/seller-catalog-query'
 
 // GET /store/sellers/:slug/products — all active products for a seller storefront
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -20,15 +21,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const limit = Math.min(parseInt(req.query.limit as string ?? '20'), 50)
   const offset = parseInt(req.query.offset as string ?? '0')
 
-  const { data: sellerRows } = await remoteQuery.graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: seller.id },
-  })
-
-  const linkedIds = (((sellerRows?.[0] as { products?: Array<{ id: string }> } | undefined)?.products ?? [])
-    .map((product) => product.id))
-  const linkedIdSet = new Set(linkedIds)
+  const linkedIdSet = await resolveSellerProductIds(req.scope, seller.id)
+  const linkedIds = [...linkedIdSet]
 
   if (linkedIds.length === 0) {
     return res.json({

@@ -24,8 +24,9 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
+import { Modules } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
+import { resolveSellerProductIds } from '../../../../../_utils/seller-catalog-query'
 import { deriveProofRestatement } from '../../../../../../../lib/proof-restatement'
 
 async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
@@ -33,8 +34,6 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   if (!sellerAuth) return { order: null, code: 401 as const }
 
   const orderService: any = req.scope.resolve(Modules.ORDER)
-  const remoteQuery = req.scope.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
-
   const [order] = await orderService.listOrders(
     { id: orderId },
     { select: ['id', 'metadata'], relations: ['items'] },
@@ -50,12 +49,11 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   const productIds = ((order.items ?? []) as any[]).map((i: any) => i.product_id).filter(Boolean)
   if (productIds.length === 0) return { order: null, code: 403 as const }
 
-  const { data: sellerRows } = await (remoteQuery as any).graph({
-    entity: 'seller',
-    fields: ['id', 'products.id'],
-    filters: { id: sellerAuth.sellerId },
-  })
-  const sellerProductIds = new Set(((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id as string))
+  const sellerProductIds = await resolveSellerProductIds(
+    req.scope,
+    sellerAuth.sellerId,
+    { includeDeleted: true },
+  )
   // Require ownership of EVERY item, not just one — this write is ORDER-level,
   // so a seller who owns only some items must not be able to send/replace a
   // proof affecting another seller's item (cross-agent review catch,

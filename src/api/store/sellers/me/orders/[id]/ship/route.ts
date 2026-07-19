@@ -19,13 +19,14 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { Modules } from '@medusajs/framework/utils'
 import {
   createOrderFulfillmentWorkflow,
   createOrderShipmentWorkflow,
 } from '@medusajs/medusa/core-flows'
 import { resolveSeller } from '../../../../../_utils/clerk-auth'
 import { resolveShippingOptionIds, resolveStockLocationId } from '../../../../../_utils/fulfillment'
+import { resolveSellerProductIds } from '../../../../../_utils/seller-catalog-query'
 import { SELLER_MODULE } from '../../../../../../../modules/seller'
 import SellerModuleService from '../../../../../../../modules/seller/service'
 import {
@@ -84,17 +85,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // Ownership check
-  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
   try {
-    const { data: sellerRows } = await query.graph({
-      entity: 'seller',
-      fields: ['id', 'products.id'],
-      filters: { id: seller.sellerId },
-    })
-    const productIds: string[] = ((sellerRows?.[0] as any)?.products ?? []).map((p: any) => p.id)
-    if (productIds.length > 0) {
+    const productIds = await resolveSellerProductIds(
+      req.scope,
+      seller.sellerId,
+      { includeDeleted: true },
+    )
+    if (productIds.size > 0) {
       const orderProductIds = ((order.items as any[]) ?? []).map((i: any) => i.product_id)
-      if (!orderProductIds.some((id: string) => productIds.includes(id))) {
+      if (!orderProductIds.some((id: string) => productIds.has(id))) {
         return res.status(403).json({ message: 'Forbidden' })
       }
     }
