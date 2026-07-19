@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-miyagisanchezback-497722}"
+PROJECT_ID="${PROJECT_ID:-miyagisanchez-prod}"
 REGION="${REGION:-us-east4}"
 BUILD_TRIGGER_REGION="${BUILD_TRIGGER_REGION:-us-east4}"
 FUNCTION_NAME="${FUNCTION_NAME:-cicd-telegram-build-notifier}"
@@ -17,8 +17,6 @@ echo "Preparing CI/CD Telegram notifier in project ${PROJECT_ID} (${REGION})"
 echo "Function: ${FUNCTION_NAME}"
 echo "Backend trigger: ${BACKEND_TRIGGER_NAME} (${BUILD_TRIGGER_REGION})"
 
-gcloud config set project "${PROJECT_ID}" >/dev/null
-
 echo "Enabling required APIs..."
 gcloud services enable \
   cloudbuild.googleapis.com \
@@ -27,6 +25,7 @@ gcloud services enable \
   pubsub.googleapis.com \
   run.googleapis.com \
   secretmanager.googleapis.com \
+  --project="${PROJECT_ID}" \
   >/dev/null
 
 if ! gcloud pubsub topics describe cloud-builds --project="${PROJECT_ID}" >/dev/null 2>&1; then

@@ -14,7 +14,8 @@ The Telegram payload uses `parse_mode=HTML` and escapes `&`, `<`, and `>`.
 
 ## Secrets
 
-Required Secret Manager entries in project `miyagisanchezback-497722`:
+Required Secret Manager entries in the production project `miyagisanchez-prod`
+(gcloud configuration `lolis-profile`):
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CICD_CHAT_ID`
@@ -23,12 +24,12 @@ Create/update them from a secure shell session. Do not paste values into source-
 
 ```bash
 printf '%s' "$TELEGRAM_BOT_TOKEN" | gcloud secrets create TELEGRAM_BOT_TOKEN \
-  --project=miyagisanchezback-497722 \
+  --project=miyagisanchez-prod \
   --replication-policy=automatic \
   --data-file=-
 
 printf '%s' "$TELEGRAM_CICD_CHAT_ID" | gcloud secrets create TELEGRAM_CICD_CHAT_ID \
-  --project=miyagisanchezback-497722 \
+  --project=miyagisanchez-prod \
   --replication-policy=automatic \
   --data-file=-
 ```
@@ -40,12 +41,13 @@ For rotation, use `gcloud secrets versions add ... --data-file=-` with the same 
 From `apps/backend`:
 
 ```bash
-bash infra/gcp/deploy-cicd-telegram-notifier.sh
+gcloud config configurations activate lolis-profile
+PROJECT_ID=miyagisanchez-prod bash infra/gcp/deploy-cicd-telegram-notifier.sh
 ```
 
 Defaults:
 
-- Project: `miyagisanchezback-497722`
+- Project: `miyagisanchez-prod`
 - Function region: `us-east4`
 - Cloud Build trigger region: `us-east4`
 - Trigger name: `backend-main-deploy`
@@ -54,11 +56,13 @@ Defaults:
 
 The deploy script:
 
-1. Verifies the two Secret Manager secrets exist.
-2. Creates service account `cicd-telegram-notifier` if needed.
-3. Grants that service account `roles/secretmanager.secretAccessor` on only the Telegram secrets.
-4. Discovers the regional `backend-main-deploy` trigger ID.
-5. Deploys the Gen2 function with a `cloud-builds` Pub/Sub trigger.
+1. Enables its required APIs in the explicitly selected project (it does not alter the active
+   gcloud project).
+2. Verifies the two Secret Manager secrets exist.
+3. Creates service account `cicd-telegram-notifier` if needed.
+4. Grants that service account `roles/secretmanager.secretAccessor` on only the Telegram secrets.
+5. Discovers the regional `backend-main-deploy` trigger ID.
+6. Deploys the Gen2 function with a `cloud-builds` Pub/Sub trigger.
 
 ## Local Tests
 
@@ -75,9 +79,15 @@ CloudEvent Pub/Sub payload parsing, and Telegram failure swallowing.
 ```bash
 gcloud functions delete cicd-telegram-build-notifier \
   --gen2 \
-  --project=miyagisanchezback-497722 \
+  --project=miyagisanchez-prod \
   --region=us-east4
 ```
 
 Deleting the function removes the subscriber path. It does not affect `cloudbuild.yaml`, the backend
 Cloud Build trigger, or the Cloud Run service.
+
+## Migration boundary
+
+`miyagisanchezback-497722` retains its old notifier only as a rollback path while the new
+production project is observed. Do not deploy or update notifier resources there during normal
+operations. All current production provisioning uses `miyagisanchez-prod` under `lolis-profile`.
