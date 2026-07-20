@@ -6,7 +6,7 @@
 # package.json, so the runtime stage installs only production deps from there.
 
 # ---- Builder ---------------------------------------------------------------
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 ENV NODE_ENV=development
 WORKDIR /app
 
@@ -20,7 +20,7 @@ COPY . .
 RUN npm run build
 
 # ---- Runner ----------------------------------------------------------------
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 ENV NODE_ENV=production
 # Cloud Run injects PORT (default 8080); Medusa binds process.env.PORT.
 ENV PORT=8080
