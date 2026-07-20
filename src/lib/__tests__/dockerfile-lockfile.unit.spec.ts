@@ -41,6 +41,14 @@ describe('backend Dockerfile + lockfile — deploy-pipeline-tuning S1 self-check
     expect(dockerfile).not.toMatch(/RUN npm install\b/)
   })
 
+  it('builder, runner, package engine, and CI stay on the Node 22 runtime floor', () => {
+    expect(dockerfile.match(/^FROM node:22-slim AS /gm)).toHaveLength(2)
+    expect(pkg.engines.node).toBe('>=22 <25')
+
+    const workflow = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')
+    expect(workflow).toMatch(/node-version:\s*22/)
+  })
+
   it('CI also installs via npm ci (with the lockfile-hash cache), not npm install', () => {
     const workflow = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')
     expect(workflow).toMatch(/run: npm ci\b/)
