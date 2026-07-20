@@ -23,3 +23,21 @@ test('required API enablement is explicitly scoped to the selected project', () 
   assert.ok(servicesEnable, 'expected the required API enablement command')
   assert.match(servicesEnable[0], /--project="\$\{PROJECT_ID\}"/)
 })
+
+test('Secret Manager IAM grants retry the operation that actually observes propagation', () => {
+  const retryBlock = src.match(
+    /secret_access_granted=false[\s\S]*?Could not grant \$\{SERVICE_ACCOUNT_EMAIL\} access to \$\{secret\} within 60s\./,
+  )
+  assert.ok(retryBlock, 'expected a bounded Secret Manager grant retry block')
+  assert.match(retryBlock[0], /if gcloud secrets add-iam-policy-binding/)
+  assert.match(retryBlock[0], /for attempt in 1 2 3 4 5 6 7 8 9 10 11 12/)
+  assert.match(retryBlock[0], /sleep 5/)
+  assert.doesNotMatch(retryBlock[0], /2>&1/, 'grant failures must stay visible while retrying')
+  assert.doesNotMatch(src, /Waiting for service account visibility/)
+})
+
+test('Cloud Function defaults to the supported Node.js 22 runtime', () => {
+  assert.match(src, /FUNCTION_RUNTIME="\$\{FUNCTION_RUNTIME:-nodejs22\}"/)
+  assert.match(src, /--runtime="\$\{FUNCTION_RUNTIME\}"/)
+  assert.doesNotMatch(src, /nodejs20/)
+})

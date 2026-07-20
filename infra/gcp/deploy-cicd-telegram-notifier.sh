@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:-miyagisanchez-prod}"
 REGION="${REGION:-us-east4}"
 BUILD_TRIGGER_REGION="${BUILD_TRIGGER_REGION:-us-east4}"
+FUNCTION_RUNTIME="${FUNCTION_RUNTIME:-nodejs22}"
 FUNCTION_NAME="${FUNCTION_NAME:-cicd-telegram-build-notifier}"
 SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-cicd-telegram-notifier}"
 BACKEND_REPO_OWNER="${BACKEND_REPO_OWNER:-danybgoode}"
@@ -53,13 +54,25 @@ fi
 
 echo "Granting notifier access to Telegram secrets..."
 for secret in TELEGRAM_BOT_TOKEN TELEGRAM_CICD_CHAT_ID; do
-  gcloud secrets add-iam-policy-binding "${secret}" \
-    --project="${PROJECT_ID}" \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/secretmanager.secretAccessor" \
-    --condition=None \
-    --quiet \
-    >/dev/null
+  secret_access_granted=false
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if gcloud secrets add-iam-policy-binding "${secret}" \
+      --project="${PROJECT_ID}" \
+      --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --condition=None \
+      --quiet \
+      >/dev/null; then
+      secret_access_granted=true
+      break
+    fi
+    echo "Waiting for ${SERVICE_ACCOUNT_EMAIL} to resolve in Secret Manager (${attempt}/12)..." >&2
+    sleep 5
+  done
+  if [ "${secret_access_granted}" != "true" ]; then
+    echo "Could not grant ${SERVICE_ACCOUNT_EMAIL} access to ${secret} within 60s." >&2
+    exit 1
+  fi
 done
 
 BACKEND_TRIGGER_ID="${BACKEND_TRIGGER_ID:-$(gcloud builds triggers list \
@@ -79,7 +92,7 @@ gcloud functions deploy "${FUNCTION_NAME}" \
   --gen2 \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
-  --runtime=nodejs20 \
+  --runtime="${FUNCTION_RUNTIME}" \
   --source="${SOURCE_DIR}" \
   --entry-point=notifyCloudBuild \
   --trigger-topic=cloud-builds \

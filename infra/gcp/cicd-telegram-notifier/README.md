@@ -49,6 +49,7 @@ Defaults:
 
 - Project: `miyagisanchez-prod`
 - Function region: `us-east4`
+- Runtime: Node.js 22
 - Cloud Build trigger region: `us-east4`
 - Trigger name: `backend-main-deploy`
 - Repo: `danybgoode/medusa-bonsai-backend`
@@ -60,9 +61,10 @@ The deploy script:
    gcloud project).
 2. Verifies the two Secret Manager secrets exist.
 3. Creates service account `cicd-telegram-notifier` if needed.
-4. Grants that service account `roles/secretmanager.secretAccessor` on only the Telegram secrets.
+4. Grants that service account `roles/secretmanager.secretAccessor` on only the Telegram secrets,
+   retrying each grant for up to 60 seconds because fresh principals are eventually consistent.
 5. Discovers the regional `backend-main-deploy` trigger ID.
-6. Deploys the Gen2 function with a `cloud-builds` Pub/Sub trigger.
+6. Deploys the Node.js 22 Gen2 function with a `cloud-builds` Pub/Sub trigger.
 
 ## Local Tests
 
