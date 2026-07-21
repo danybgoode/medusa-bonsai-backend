@@ -42,7 +42,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (!seller) return res.status(404).json({ message: `Seller '${slug}' not found` })
 
   const linkedIdSet = await resolveSellerProductIds(req.scope, seller.id)
-  if (linkedIdSet.size === 0) {
+  const linkedIds = [...linkedIdSet]
+  if (linkedIds.length === 0) {
     return res.json({ seller, products: [], count: 0 })
   }
 
@@ -57,13 +58,15 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       'type.*',
       'tags.*',
     ],
-    // The whole point of this route: DRAFT, not published.
-    filters: { status: 'draft' },
-    pagination: { take: 2000, skip: 0 },
+    // Filter by THIS seller's linked ids (not a global draft scan) so a system-wide
+    // draft count above any page size can never truncate a seller's proposal —
+    // the published seller-products route's in-memory intersection has that latent
+    // cap; scoping the query removes it here.
+    filters: { id: linkedIds, status: 'draft' },
+    pagination: { take: linkedIds.length, skip: 0 },
   })
 
   const products = (allProducts ?? [])
-    .filter((product: { id: string }) => linkedIdSet.has(product.id))
     // A paused live listing is also Medusa `status:'draft'` (metadata.paused);
     // it is NOT part of a preview proposal, so exclude it — only genuinely
     // unpublished proposal products belong here.
