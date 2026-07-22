@@ -277,6 +277,25 @@ export function normalizeMedusaOrder(
     // and the pending-payment state.
     payment_method: (metadata.payment_method as string) ?? null,
     payment_received: metadata.payment_received === true,
+    // Raw Medusa payment state + the derived "money actually landed" answer.
+    //
+    // WHY THIS IS EXPOSED (miyagisanchezcommerce#298, fresh-reviewer finding): `status`
+    // above is NOT an assertion that payment was captured. It initialises to 'paid' and
+    // is only demoted for cancel/refund/return or a MANUAL method that is not yet
+    // captured — so a card/MercadoPago order sitting at `payment_status: 'authorized'`
+    // normalises to 'paid'. Every consumer that reads `status === 'paid'` as "we have the
+    // money" is therefore reading a fall-through default. That is harmless for the seller
+    // order list it was written for (which shows lifecycle, not accounting) and NOT
+    // harmless for the merchant-lifecycle projection, whose `first_sale` milestone is
+    // write-once and unwithdrawable.
+    //
+    // `payment_captured` is the honest answer and is deliberately narrow: real capture
+    // for automatic methods, or the seller's explicit confirmation of receipt for manual
+    // ones (SPEI/cash/DiMo are only ever *authorized* at checkout — `payment_received` is
+    // how the money is acknowledged). It says nothing about refunds: a refunded order was
+    // still captured once, so callers that care combine this with `status`.
+    payment_status: paymentStatus || null,
+    payment_captured: isCaptured || (isManualPay && manualConfirmed),
     // Durable manual-payment lifecycle (Sprint 1): the buyer's "Ya hice el pago"
     // persists here and survives reload; manual_payment_state is the shared vocabulary.
     buyer_reported_paid: buyerReportedPaid,
