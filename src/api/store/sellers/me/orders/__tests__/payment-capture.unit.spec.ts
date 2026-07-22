@@ -101,6 +101,30 @@ describe('normalizeMedusaOrder · payment_captured', () => {
     expect(r.payment_captured).toBe(false)
   })
 
+  it.each(['card', 'spei'])(
+    'a PARTIALLY REFUNDED %s order IS captured — funds landed and some remain',
+    (method) => {
+      // Method parity, checked as a pair rather than asserted in prose. Cross-agent
+      // review caught this exact status splitting the two ways: automatic orders fell
+      // out of `isCaptured` and reported false, while a manual order with
+      // `payment_received: true` reported true for the identical payment_status.
+      const r = norm(
+        order({
+          payment_status: 'partially_refunded',
+          metadata: { payment_method: method, payment_received: true },
+        }),
+      )
+      expect(r.payment_captured).toBe(true)
+    },
+  )
+
+  it.each(['card', 'spei'])('a FULLY refunded %s order is not captured', (method) => {
+    const r = norm(
+      order({ payment_status: 'refunded', metadata: { payment_method: method, payment_received: true } }),
+    )
+    expect(r.payment_captured).toBe(false)
+  })
+
   it('a CANCELED manual order is not captured', () => {
     const r = norm(
       order({ status: 'canceled', metadata: { payment_method: 'spei', payment_received: true } }),

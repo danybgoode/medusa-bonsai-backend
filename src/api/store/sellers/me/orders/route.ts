@@ -162,6 +162,21 @@ export function normalizeMedusaOrder(
     (order.payment_status as string) === 'refunded' ||
     (order.fulfillment_status as string) === 'returned'
 
+  // "Money landed and was not given back", for `payment_captured` below. Computed here,
+  // beside the inputs it shares with `status`, but deliberately NOT folded into
+  // `isCaptured` — that variable drives the `status` vocabulary and widening it would
+  // silently change how existing orders are labelled, which is not this change's job.
+  //
+  // `partially_refunded` counts as captured: funds were taken and some remain. Getting
+  // this wrong was method-dependent in both directions (cross-agent review, twice) —
+  // automatic orders fell out of `isCaptured` and reported false, while a manual order
+  // with `payment_received` reported true for the identical status. Whatever the answer
+  // is, it has to be the same one for both.
+  const isPartiallyRefunded = paymentStatus === 'partially_refunded'
+  const hasCapturedFunds =
+    !isRefundedOrCanceled &&
+    (isCaptured || isPartiallyRefunded || (isManualPay && manualConfirmed))
+
   // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
   // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
   let status = 'paid'
@@ -306,8 +321,7 @@ export function normalizeMedusaOrder(
     // had `payment_received: true` and reported true. One meaning, both methods: money
     // landed and was not given back.
     payment_status: paymentStatus || null,
-    payment_captured:
-      !isRefundedOrCanceled && (isCaptured || (isManualPay && manualConfirmed)),
+    payment_captured: hasCapturedFunds,
     // Durable manual-payment lifecycle (Sprint 1): the buyer's "Ya hice el pago"
     // persists here and survives reload; manual_payment_state is the shared vocabulary.
     buyer_reported_paid: buyerReportedPaid,
