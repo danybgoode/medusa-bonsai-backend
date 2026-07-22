@@ -162,19 +162,27 @@ export function normalizeMedusaOrder(
     (order.payment_status as string) === 'refunded' ||
     (order.fulfillment_status as string) === 'returned'
 
-  // "Money landed and was not given back", for `payment_captured` below. Computed here,
-  // beside the inputs it shares with `status`, but deliberately NOT folded into
-  // `isCaptured` — that variable drives the `status` vocabulary and widening it would
-  // silently change how existing orders are labelled, which is not this change's job.
+  // `payment_captured` below: did the MONEY land, and has it been given back?
+  //
+  // Strictly a payment fact. An earlier revision gated this on `isRefundedOrCanceled`,
+  // which folds in FULFILLMENT and ORDER state — so a captured order that was later
+  // returned or canceled reported `payment_captured: false` even though nothing had
+  // been refunded (cross-agent review). A return is not a refund; only payment state
+  // proves funds went back. Callers that want "a sale that stuck" combine this with
+  // `status`, which is where returns and cancellations belong.
   //
   // `partially_refunded` counts as captured: funds were taken and some remain. Getting
   // this wrong was method-dependent in both directions (cross-agent review, twice) —
   // automatic orders fell out of `isCaptured` and reported false, while a manual order
   // with `payment_received` reported true for the identical status. Whatever the answer
-  // is, it has to be the same one for both.
+  // is, it has to be the same one for both, which is why the tests assert it as a pair.
+  //
+  // Deliberately NOT folded into `isCaptured`: that variable drives the `status`
+  // vocabulary, and widening it would silently relabel existing orders.
   const isPartiallyRefunded = paymentStatus === 'partially_refunded'
+  const isPaymentRefunded = paymentStatus === 'refunded'
   const hasCapturedFunds =
-    !isRefundedOrCanceled &&
+    !isPaymentRefunded &&
     (isCaptured || isPartiallyRefunded || (isManualPay && manualConfirmed))
 
   // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the

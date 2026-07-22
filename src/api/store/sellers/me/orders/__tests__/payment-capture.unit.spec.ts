@@ -125,20 +125,37 @@ describe('normalizeMedusaOrder · payment_captured', () => {
     expect(r.payment_captured).toBe(false)
   })
 
-  it('a CANCELED manual order is not captured', () => {
-    const r = norm(
-      order({ status: 'canceled', metadata: { payment_method: 'spei', payment_received: true } }),
-    )
-    expect(r.payment_captured).toBe(false)
-  })
+  it.each(['card', 'spei'])(
+    'a captured-then-RETURNED %s order is still captured — a return is not a refund',
+    (method) => {
+      // `payment_captured` is a PAYMENT fact. Folding fulfillment state into it reported
+      // false for money that had demonstrably landed and had not been given back
+      // (cross-agent review). Callers wanting "a sale that stuck" read `status`, which is
+      // 'refunded' here — and that is what actually gates the first_sale milestone.
+      const r = norm(
+        order({
+          payment_status: 'captured',
+          fulfillment_status: 'returned',
+          metadata: { payment_method: method, payment_received: true },
+        }),
+      )
+      expect(r.status).toBe('refunded')
+      expect(r.payment_captured).toBe(true)
+    },
+  )
 
-  it('a RETURNED manual order is not captured', () => {
-    const r = norm(
-      order({
-        fulfillment_status: 'returned',
-        metadata: { payment_method: 'spei', payment_received: true },
-      }),
-    )
-    expect(r.payment_captured).toBe(false)
-  })
+  it.each(['card', 'spei'])(
+    'a captured-then-CANCELED %s order is still captured until a refund actually happens',
+    (method) => {
+      const r = norm(
+        order({
+          status: 'canceled',
+          payment_status: 'captured',
+          metadata: { payment_method: method, payment_received: true },
+        }),
+      )
+      expect(r.status).toBe('refunded')
+      expect(r.payment_captured).toBe(true)
+    },
+  )
 })
