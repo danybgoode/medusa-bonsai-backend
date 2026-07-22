@@ -321,13 +321,20 @@ export function normalizeMedusaOrder(
     // ones (SPEI/cash/DiMo are only ever *authorized* at checkout — `payment_received` is
     // how the money is acknowledged).
     //
-    // Refunded/canceled/returned orders report FALSE, on every payment method. An earlier
-    // revision said the field "says nothing about refunds" and let callers combine it with
-    // `status` — but that made it answer differently depending on the METHOD, which is the
-    // worst of both readings (cross-agent review): an automatic refund flips
-    // `payment_status` off 'captured' so it reported false, while a manual refund still
-    // had `payment_received: true` and reported true. One meaning, both methods: money
-    // landed and was not given back.
+    // THE CONTRACT, precisely — only `payment_status === 'refunded'` clears capture, and
+    // it clears it on BOTH payment methods:
+    //   captured / partially_captured / partially_refunded  → true
+    //   manual + payment_received                           → true
+    //   refunded                                            → false
+    //   authorized / awaiting / not_paid / absent           → false
+    //   canceled or returned, but NOT refunded              → true (see below)
+    //
+    // A return or a cancellation does NOT clear it: those are fulfillment and order
+    // state, and neither proves the money went back. A caller wanting "a sale that
+    // stuck" reads `status` (which is 'refunded' for those orders) alongside this.
+    // Splitting the two axes is deliberate — three cross-agent rounds each caught this
+    // field quietly meaning slightly more than its name, in a different direction each
+    // time (the payment method, then a refund sub-state, then fulfillment).
     payment_status: paymentStatus || null,
     payment_captured: hasCapturedFunds,
     // Durable manual-payment lifecycle (Sprint 1): the buyer's "Ya hice el pago"
