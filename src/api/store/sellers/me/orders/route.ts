@@ -321,16 +321,23 @@ export function normalizeMedusaOrder(
     // ones (SPEI/cash/DiMo are only ever *authorized* at checkout — `payment_received` is
     // how the money is acknowledged).
     //
-    // THE CONTRACT, precisely — only `payment_status === 'refunded'` clears capture, and
-    // it clears it on BOTH payment methods:
-    //   captured / partially_captured / partially_refunded  → true
-    //   manual + payment_received                           → true
-    //   refunded                                            → false
-    //   authorized / awaiting / not_paid / absent           → false
-    //   canceled or returned, but NOT refunded              → true (see below)
+    // THE CONTRACT, as a RULE rather than a value list — Medusa v2's PaymentStatus union
+    // has ten members (`not_paid | awaiting | authorized | partially_authorized |
+    // captured | partially_captured | partially_refunded | refunded | canceled |
+    // requires_action`) and an enumeration here would go stale the moment one is added:
     //
-    // A return or a cancellation does NOT clear it: those are fulfillment and order
-    // state, and neither proves the money went back. A caller wanting "a sale that
+    //   1. `payment_status === 'refunded'`  → FALSE, always, on both methods.
+    //   2. otherwise `captured` / `partially_captured` / `partially_refunded` → true
+    //   3. otherwise a MANUAL method with `payment_received` → true
+    //   4. otherwise → false
+    //
+    // Rule 3 is why an unrecognised or absent payment_status still reports true for a
+    // manual order the seller has confirmed: Medusa's payment-collection state is not
+    // authoritative for money that moved off-platform. Everything unmatched falls to
+    // rule 4, which fails closed — the safe direction for a write-once consumer.
+    //
+    // A return or a cancellation does NOT appear above, deliberately: those are
+    // fulfillment and order state, and neither proves the money went back. A caller wanting "a sale that
     // stuck" reads `status` (which is 'refunded' for those orders) alongside this.
     // Splitting the two axes is deliberate — three cross-agent rounds each caught this
     // field quietly meaning slightly more than its name, in a different direction each
