@@ -154,14 +154,18 @@ export function normalizeMedusaOrder(
   const isCaptured = paymentStatus === 'captured' || paymentStatus === 'partially_captured'
   const manualConfirmed = metadata.payment_received === true
 
-  // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
-  // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
-  let status = 'paid'
-  if (
+  // Money that was given back (or never taken). Extracted so `status` below and
+  // `payment_captured` further down cannot drift apart — they were duplicated conditions
+  // once and disagreed for manual payments.
+  const isRefundedOrCanceled =
     order.status === 'canceled' ||
     (order.payment_status as string) === 'refunded' ||
     (order.fulfillment_status as string) === 'returned'
-  ) {
+
+  // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
+  // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
+  let status = 'paid'
+  if (isRefundedOrCanceled) {
     status = 'refunded'
   } else if (isManualPay && !isCaptured && !manualConfirmed) {
     status = 'pending_payment'
@@ -292,10 +296,18 @@ export function normalizeMedusaOrder(
     // `payment_captured` is the honest answer and is deliberately narrow: real capture
     // for automatic methods, or the seller's explicit confirmation of receipt for manual
     // ones (SPEI/cash/DiMo are only ever *authorized* at checkout — `payment_received` is
-    // how the money is acknowledged). It says nothing about refunds: a refunded order was
-    // still captured once, so callers that care combine this with `status`.
+    // how the money is acknowledged).
+    //
+    // Refunded/canceled/returned orders report FALSE, on every payment method. An earlier
+    // revision said the field "says nothing about refunds" and let callers combine it with
+    // `status` — but that made it answer differently depending on the METHOD, which is the
+    // worst of both readings (cross-agent review): an automatic refund flips
+    // `payment_status` off 'captured' so it reported false, while a manual refund still
+    // had `payment_received: true` and reported true. One meaning, both methods: money
+    // landed and was not given back.
     payment_status: paymentStatus || null,
-    payment_captured: isCaptured || (isManualPay && manualConfirmed),
+    payment_captured:
+      !isRefundedOrCanceled && (isCaptured || (isManualPay && manualConfirmed)),
     // Durable manual-payment lifecycle (Sprint 1): the buyer's "Ya hice el pago"
     // persists here and survives reload; manual_payment_state is the shared vocabulary.
     buyer_reported_paid: buyerReportedPaid,

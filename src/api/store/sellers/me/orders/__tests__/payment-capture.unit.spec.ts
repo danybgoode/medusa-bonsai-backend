@@ -80,15 +80,41 @@ describe('normalizeMedusaOrder · payment_captured', () => {
     expect(r.payment_captured).toBe(false)
   })
 
-  it('a REFUNDED order is not captured — Medusa has moved payment_status off "captured"', () => {
-    // Worth pinning because it is easy to assume otherwise: the money DID land once, but
-    // `payment_status` is now 'refunded', so `isCaptured` is false. Consumers get the same
-    // answer from two directions here (`status` is also 'refunded'), which is the safe
-    // alignment for a write-once milestone — neither path grants `first_sale`.
+  it('a REFUNDED card order is not captured', () => {
     const r = norm(
       order({ payment_status: 'refunded', metadata: { payment_method: 'card', payment_received: true } }),
     )
     expect(r.status).toBe('refunded')
+    expect(r.payment_captured).toBe(false)
+  })
+
+  it('a REFUNDED MANUAL order is not captured either — the answer must not depend on method', () => {
+    // The bug a cross-agent pass caught: `isManualPay && manualConfirmed` was evaluated
+    // without the refund guard, so a refunded SPEI order still carried
+    // `payment_received: true` and reported captured — while a refunded CARD order
+    // reported false, because Medusa had moved `payment_status` off 'captured'. One field
+    // answering differently per payment method is worse than either reading alone.
+    const r = norm(
+      order({ payment_status: 'refunded', metadata: { payment_method: 'spei', payment_received: true } }),
+    )
+    expect(r.status).toBe('refunded')
+    expect(r.payment_captured).toBe(false)
+  })
+
+  it('a CANCELED manual order is not captured', () => {
+    const r = norm(
+      order({ status: 'canceled', metadata: { payment_method: 'spei', payment_received: true } }),
+    )
+    expect(r.payment_captured).toBe(false)
+  })
+
+  it('a RETURNED manual order is not captured', () => {
+    const r = norm(
+      order({
+        fulfillment_status: 'returned',
+        metadata: { payment_method: 'spei', payment_received: true },
+      }),
+    )
     expect(r.payment_captured).toBe(false)
   })
 })
