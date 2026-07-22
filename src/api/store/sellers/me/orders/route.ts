@@ -154,14 +154,41 @@ export function normalizeMedusaOrder(
   const isCaptured = paymentStatus === 'captured' || paymentStatus === 'partially_captured'
   const manualConfirmed = metadata.payment_received === true
 
-  // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
-  // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
-  let status = 'paid'
-  if (
+  // Money that was given back (or never taken). Extracted so `status` below and
+  // `payment_captured` further down cannot drift apart — they were duplicated conditions
+  // once and disagreed for manual payments.
+  const isRefundedOrCanceled =
     order.status === 'canceled' ||
     (order.payment_status as string) === 'refunded' ||
     (order.fulfillment_status as string) === 'returned'
-  ) {
+
+  // `payment_captured` below: did the MONEY land, and has it been given back?
+  //
+  // Strictly a payment fact. An earlier revision gated this on `isRefundedOrCanceled`,
+  // which folds in FULFILLMENT and ORDER state — so a captured order that was later
+  // returned or canceled reported `payment_captured: false` even though nothing had
+  // been refunded (cross-agent review). A return is not a refund; only payment state
+  // proves funds went back. Callers that want "a sale that stuck" combine this with
+  // `status`, which is where returns and cancellations belong.
+  //
+  // `partially_refunded` counts as captured: funds were taken and some remain. Getting
+  // this wrong was method-dependent in both directions (cross-agent review, twice) —
+  // automatic orders fell out of `isCaptured` and reported false, while a manual order
+  // with `payment_received` reported true for the identical status. Whatever the answer
+  // is, it has to be the same one for both, which is why the tests assert it as a pair.
+  //
+  // Deliberately NOT folded into `isCaptured`: that variable drives the `status`
+  // vocabulary, and widening it would silently relabel existing orders.
+  const isPartiallyRefunded = paymentStatus === 'partially_refunded'
+  const isPaymentRefunded = paymentStatus === 'refunded'
+  const hasCapturedFunds =
+    !isPaymentRefunded &&
+    (isCaptured || isPartiallyRefunded || (isManualPay && manualConfirmed))
+
+  // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
+  // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
+  let status = 'paid'
+  if (isRefundedOrCanceled) {
     status = 'refunded'
   } else if (isManualPay && !isCaptured && !manualConfirmed) {
     status = 'pending_payment'
@@ -277,6 +304,46 @@ export function normalizeMedusaOrder(
     // and the pending-payment state.
     payment_method: (metadata.payment_method as string) ?? null,
     payment_received: metadata.payment_received === true,
+    // Raw Medusa payment state + the derived "money actually landed" answer.
+    //
+    // WHY THIS IS EXPOSED (miyagisanchezcommerce#298, fresh-reviewer finding): `status`
+    // above is NOT an assertion that payment was captured. It initialises to 'paid' and
+    // is only demoted for cancel/refund/return or a MANUAL method that is not yet
+    // captured — so a card/MercadoPago order sitting at `payment_status: 'authorized'`
+    // normalises to 'paid'. Every consumer that reads `status === 'paid'` as "we have the
+    // money" is therefore reading a fall-through default. That is harmless for the seller
+    // order list it was written for (which shows lifecycle, not accounting) and NOT
+    // harmless for the merchant-lifecycle projection, whose `first_sale` milestone is
+    // write-once and unwithdrawable.
+    //
+    // `payment_captured` is the honest answer and is deliberately narrow: real capture
+    // for automatic methods, or the seller's explicit confirmation of receipt for manual
+    // ones (SPEI/cash/DiMo are only ever *authorized* at checkout — `payment_received` is
+    // how the money is acknowledged).
+    //
+    // THE CONTRACT, as a RULE rather than a value list — Medusa v2's PaymentStatus union
+    // has ten members (`not_paid | awaiting | authorized | partially_authorized |
+    // captured | partially_captured | partially_refunded | refunded | canceled |
+    // requires_action`) and an enumeration here would go stale the moment one is added:
+    //
+    //   1. `payment_status === 'refunded'`  → FALSE, always, on both methods.
+    //   2. otherwise `captured` / `partially_captured` / `partially_refunded` → true
+    //   3. otherwise a MANUAL method with `payment_received` → true
+    //   4. otherwise → false
+    //
+    // Rule 3 is why an unrecognised or absent payment_status still reports true for a
+    // manual order the seller has confirmed: Medusa's payment-collection state is not
+    // authoritative for money that moved off-platform. Everything unmatched falls to
+    // rule 4, which fails closed — the safe direction for a write-once consumer.
+    //
+    // A return or a cancellation does NOT appear above, deliberately: those are
+    // fulfillment and order state, and neither proves the money went back. A caller wanting "a sale that
+    // stuck" reads `status` (which is 'refunded' for those orders) alongside this.
+    // Splitting the two axes is deliberate — three cross-agent rounds each caught this
+    // field quietly meaning slightly more than its name, in a different direction each
+    // time (the payment method, then a refund sub-state, then fulfillment).
+    payment_status: paymentStatus || null,
+    payment_captured: hasCapturedFunds,
     // Durable manual-payment lifecycle (Sprint 1): the buyer's "Ya hice el pago"
     // persists here and survives reload; manual_payment_state is the shared vocabulary.
     buyer_reported_paid: buyerReportedPaid,
