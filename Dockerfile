@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Medusa v2 backend — production image for Cloud Run (us-east4).
 # Build context is apps/backend (this directory), NOT the monorepo root:
 #   docker build -t <region>-docker.pkg.dev/<project>/medusa/backend:latest apps/backend
@@ -32,7 +33,20 @@ WORKDIR /app
 COPY --from=builder /app/.medusa/server ./
 COPY --from=builder /app/.npmrc ./
 COPY --from=builder /app/package-lock.json ./
-RUN npm ci --omit=dev
+# BuildKit CACHE MOUNT on the one install the registry layer-cache structurally cannot help.
+#
+# The layer above invalidates on every build by design: .medusa/server/package.json is not
+# byte-stable across `medusa build` runs, so its COPY hash changes and this RUN always re-executes.
+# A cache mount is a DIFFERENT primitive from the registry layer cache already configured — it
+# persists the downloaded npm store independently of the layer hash, so the reinstall still runs but
+# fetches from disk instead of the network.
+#
+# ⚠️ UNMEASURED as of 2026-07-26. This only pays off if Cloud Build persists the mount BETWEEN builds,
+# which is the open question and cannot be answered locally: it needs two consecutive real Cloud Build
+# runs compared against the pre-change baseline. Per the sprint contract this change is NOT to be kept
+# on faith — if two consecutive builds show no improvement, revert it and record the negative result.
+# A change that bought nothing is not "harmless"; it is noise that the next person has to re-evaluate.
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
