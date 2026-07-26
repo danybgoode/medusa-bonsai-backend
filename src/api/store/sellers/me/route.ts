@@ -83,7 +83,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // slug: '', matching POST /internal/sellers' existing fallback for the same
   // reason (found live, 2026-07-15 — a seller-less orphaned catalog item
   // downstream got the frontend's "Unknown" placeholder with slug: '').
-  let baseSlug = (body.slug ? slugify(body.slug) : slugify(body.name)) || 'tienda'
+  const baseSlug = (body.slug ? slugify(body.slug) : slugify(body.name)) || 'tienda'
   let slug = baseSlug
   let attempt = 0
   while (true) {
