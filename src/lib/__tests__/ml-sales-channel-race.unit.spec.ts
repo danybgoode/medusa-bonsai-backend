@@ -141,3 +141,36 @@ describe('resolveMlSalesChannelId — concurrent callers share ONE attempt', () 
     expect(second).toBe(1)
   })
 })
+
+/**
+ * The memoization itself — added after a fresh-reviewer pass showed the other specs were
+ * under-constrained.
+ *
+ * A `finally`-clear variant (single-flight, but no cross-call memo) passed all four earlier specs
+ * while destroying the cache's stated purpose: "re-resolving on every sale is wasted work". The
+ * concurrency assertions cannot see that, because they only ever make ONE round of calls. This pins
+ * the sequential case, which is the one a plausible future refactor would break.
+ */
+describe('resolveMlSalesChannelId — memoizes across SEQUENTIAL calls', () => {
+  beforeEach(() => __resetMlSalesChannelCacheForTests())
+
+  it('resolves once and reuses it for later, non-concurrent callers', async () => {
+    let lookups = 0
+    const scope = {
+      resolve: () => ({
+        listSalesChannels: async () => {
+          lookups++
+          return [{ id: 'sc_existing' }]
+        },
+        createSalesChannels: async () => ({ id: 'sc_created' }),
+      }),
+    } as any
+
+    // Sequential, fully awaited — no concurrency for a single-flight guard to absorb.
+    await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
+    await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
+    await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
+
+    expect(lookups).toBe(1)
+  })
+})

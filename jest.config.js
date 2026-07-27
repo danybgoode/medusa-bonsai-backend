@@ -14,7 +14,13 @@ module.exports = {
   },
   testEnvironment: "node",
   moduleFileExtensions: ["js", "ts", "json"],
-  modulePathIgnorePatterns: ["dist/", "<rootDir>/.medusa/"],
+  // `.worktrees/` is load-bearing, not tidiness. Without it jest's `**/src/**/__tests__/**` glob walks
+  // into any git worktree checked out under this repo and runs ANOTHER BRANCH's specs alongside this
+  // one. Measured 2026-07-27: 96 test files locally, 48 of them from `.worktrees/lint-in-ci` — so a
+  // local "922 passing" was really ~455 for this branch plus a different branch's suite. Every local
+  // count quoted in a PR body was inflated roughly 2x, and a spec deleted on this branch could still
+  // "pass" from the worktree copy. CI never saw it because CI has no worktrees.
+  modulePathIgnorePatterns: ["dist/", "<rootDir>/.medusa/", "<rootDir>/.worktrees/"],
   // Kept even though the integration tiers are gone: this is the setupFiles hook for EVERY test
   // type, including unit. Deleting the directory would break `npm run test:unit`.
   setupFiles: ["./integration-tests/setup.js"],
