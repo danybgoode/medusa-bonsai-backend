@@ -33,6 +33,13 @@
 # build regardless of caching technique. The real, measured win here is the
 # builder stage's install (~180s of ~360s total install time) — a genuine
 # but partial improvement, not a full elimination of both installs.
+#
+# Refined 2026-07-27 by per-layer measurement (`gcloud builds log <id> | grep '#17 DONE'`): the runner
+# install is ~300s when it runs and ~1.3s when the layer cache hits, and it DOES hit on repeat builds
+# of byte-identical output. The claim above holds for any build carrying a real source change, which is
+# every deploy that ships something. A BuildKit cache mount was added to that step in the Dockerfile —
+# it does NOT help here (a fresh docker-container builder starts each ephemeral VM with empty mount
+# state, and mounts are not exported by cache-to registry); it helps local iterative builds only.
 
 substitutions:
   _REGION: us-east4

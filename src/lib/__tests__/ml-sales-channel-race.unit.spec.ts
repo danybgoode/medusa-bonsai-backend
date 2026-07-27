@@ -19,6 +19,17 @@ import {
 
 type Call = { list: number; create: number }
 
+// The resolver resolves TWO modules now: SALES_CHANNEL and LOCKING. A scope mock that returns one
+// service for every resolve() would hand the resolver a sales-channel service where it expects a lock.
+// `execute` runs the critical section inline, which is the correct single-process model — the lock's
+// job is cross-INSTANCE mutual exclusion, and these specs assert the in-process invariants.
+const lockingStub = { execute: async (_key: string, fn: () => Promise<unknown>) => fn() }
+function scopeWith(svc: any) {
+  return {
+    resolve: (mod: any) => (String(mod).toLowerCase().includes('lock') ? lockingStub : svc),
+  } as any
+}
+
 function makeScope(counts: Call, existing: { id: string } | null) {
   const svc = {
     listSalesChannels: async () => {
@@ -34,7 +45,7 @@ function makeScope(counts: Call, existing: { id: string } | null) {
       return { id: 'sc_created' }
     },
   }
-  return { resolve: () => svc } as any
+  return scopeWith(svc)
 }
 
 describe('resolveMlSalesChannelId — concurrent find-or-create', () => {
@@ -63,8 +74,7 @@ describe('resolveMlSalesChannelId — concurrent find-or-create', () => {
   it('clears the slot on failure so a transient error does not poison later calls', async () => {
     const counts: Call = { list: 0, create: 0 }
     let fail = true
-    const scope = {
-      resolve: () => ({
+    const scope = scopeWith({
         listSalesChannels: async () => {
           counts.list++
           if (fail) throw new Error('transient')
@@ -74,8 +84,7 @@ describe('resolveMlSalesChannelId — concurrent find-or-create', () => {
           counts.create++
           return { id: 'sc_created' }
         },
-      }),
-    } as any
+      })
     await expect(resolveMlSalesChannelId(scope)).rejects.toThrow('transient')
     fail = false
     await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_recovered')
@@ -104,16 +113,14 @@ describe('resolveMlSalesChannelId — concurrent callers share ONE attempt', () 
 
   it('runs the underlying lookup once for many concurrent callers, and clears once on failure', async () => {
     let lookups = 0
-    const scope = {
-      resolve: () => ({
+    const scope = scopeWith({
         listSalesChannels: async () => {
           lookups++
           await new Promise((r) => setTimeout(r, 5))
           throw new Error('transient')
         },
         createSalesChannels: async () => ({ id: 'sc_created' }),
-      }),
-    } as any
+      })
 
     const settled = await Promise.all([
       resolveMlSalesChannelId(scope).catch(() => 'failed'),
@@ -128,15 +135,13 @@ describe('resolveMlSalesChannelId — concurrent callers share ONE attempt', () 
     // And the slot really was retracted, so the next caller retries rather than inheriting a
     // permanently rejected promise.
     let second = 0
-    const ok = {
-      resolve: () => ({
-        listSalesChannels: async () => {
-          second++
-          return [{ id: 'sc_existing' }]
-        },
-        createSalesChannels: async () => ({ id: 'sc_created' }),
-      }),
-    } as any
+    const ok = scopeWith({
+      listSalesChannels: async () => {
+        second++
+        return [{ id: 'sc_existing' }]
+      },
+      createSalesChannels: async () => ({ id: 'sc_created' }),
+    })
     await expect(resolveMlSalesChannelId(ok)).resolves.toBe('sc_existing')
     expect(second).toBe(1)
   })
@@ -156,15 +161,13 @@ describe('resolveMlSalesChannelId — memoizes across SEQUENTIAL calls', () => {
 
   it('resolves once and reuses it for later, non-concurrent callers', async () => {
     let lookups = 0
-    const scope = {
-      resolve: () => ({
+    const scope = scopeWith({
         listSalesChannels: async () => {
           lookups++
           return [{ id: 'sc_existing' }]
         },
         createSalesChannels: async () => ({ id: 'sc_created' }),
-      }),
-    } as any
+      })
 
     // Sequential, fully awaited — no concurrency for a single-flight guard to absorb.
     await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
@@ -172,5 +175,65 @@ describe('resolveMlSalesChannelId — memoizes across SEQUENTIAL calls', () => {
     await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
 
     expect(lookups).toBe(1)
+  })
+})
+
+/**
+ * The DISTRIBUTED lock — and the honest limit of what a unit test can say about it.
+ *
+ * `medusa-web` runs maxScale=4, so the in-process single-flight above closes only the intra-instance
+ * half; four instances could still each find-nothing and each create. `Modules.LOCKING` closes the
+ * rest. But a single-process test **cannot observe cross-instance mutual exclusion** — every spec
+ * above passes identically with the lock stubbed out to a pass-through (verified by mutation).
+ *
+ * So this asserts the part that IS observable: the critical section really is wrapped, under a stable
+ * key. That fails the moment someone removes or renames the lock, which is the regression worth
+ * catching. The cross-instance behaviour itself is covered by the lock module, not by us.
+ */
+describe('resolveMlSalesChannelId — the find-or-create runs inside a distributed lock', () => {
+  beforeEach(() => __resetMlSalesChannelCacheForTests())
+
+  it('runs the re-check and the create INSIDE the lock, under a stable key', async () => {
+    // Ordering is the property that matters, and asserting only "execute was called" did NOT protect
+    // it: a fresh-reviewer mutation moved the re-check OUTSIDE the lock — destroying the whole point —
+    // and the old version of this spec stayed green. It also carried a comment claiming the opposite.
+    //
+    // Recording a trace makes the invariant observable: the lookup must happen BETWEEN lock-enter and
+    // lock-exit. Verified red against both mutations (lock removed; re-check hoisted out).
+    const trace: string[] = []
+    const svc = {
+      listSalesChannels: async () => {
+        trace.push('list')
+        return [{ id: 'sc_existing' }]
+      },
+      createSalesChannels: async () => {
+        trace.push('create')
+        return { id: 'sc_created' }
+      },
+    }
+    const keys: string[] = []
+    const scope = {
+      resolve: (mod: any) =>
+        String(mod).toLowerCase().includes('lock')
+          ? {
+              execute: async (key: string, fn: () => Promise<string>) => {
+                keys.push(key)
+                trace.push('lock-enter')
+                try {
+                  return await fn()
+                } finally {
+                  trace.push('lock-exit')
+                }
+              },
+            }
+          : svc,
+    } as any
+
+    await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
+
+    // Stable and specific: a key that varied per call would serialize nothing.
+    expect(keys).toEqual(['ml-sales-channel:Mercado Libre'])
+    // THE assertion — the read must be inside the critical section, not before it.
+    expect(trace).toEqual(['lock-enter', 'list', 'lock-exit'])
   })
 })

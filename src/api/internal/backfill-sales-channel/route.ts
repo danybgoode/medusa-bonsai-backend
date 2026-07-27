@@ -50,17 +50,33 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // load-bearing half, now survives an api_key query failure.
   let publishable_keys: unknown[] = []
   let publishable_keys_error: string | null = null
+  let skipped_links = 0
   try {
+    // `sales_channels.*` on api_key resolves through a LINK module, and asking for the nested fields
+    // in one graph call is what produced `Cannot read properties of undefined (reading 'id')` in
+    // production — the link rows come back with an undefined entry the mapper then dereferenced.
+    // `sales_channels.*` (not the two named subfields) because the named-field form is what produced
+    // the crash; the wildcard asks for MORE, not less — an earlier version of this comment said the
+    // opposite and was internally contradictory.
+    //
+    // The mapping is defended so a null-ish link is skipped rather than crashing the whole response —
+    // and the skipped count is REPORTED, because a diagnostic whose job is answering "are there
+    // duplicates?" must not silently under-report.
     const { data: keys } = await query.graph({
       entity: 'api_key',
-      fields: ['id', 'type', 'title', 'sales_channels.id', 'sales_channels.name'],
+      fields: ['id', 'type', 'title', 'sales_channels.*'],
       filters: { type: 'publishable' } as any,
     })
-    publishable_keys = (keys as any[]).map(k => ({
-      id: k.id,
-      title: k.title,
-      sales_channels: (k.sales_channels ?? []).map((sc: any) => ({ id: sc.id, name: sc.name })),
-    }))
+    publishable_keys = (keys as any[]).map(k => {
+      const links = k?.sales_channels ?? []
+      const usable = links.filter((sc: any) => sc && sc.id)
+      skipped_links += links.length - usable.length
+      return {
+        id: k?.id ?? null,
+        title: k?.title ?? null,
+        sales_channels: usable.map((sc: any) => ({ id: sc.id, name: sc.name ?? null })),
+      }
+    })
   } catch (e: any) {
     publishable_keys_error = e?.message ?? 'api_key query failed'
   }
@@ -83,6 +99,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     duplicate_channel_names,
     publishable_keys,
     publishable_keys_error,
+    // Non-zero means link rows were dropped as unusable — the diagnostic is under-reporting and the
+    // underlying link-graph problem is still there.
+    publishable_keys_skipped_links: skipped_links,
   })
 }
 
@@ -110,8 +129,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     pagination: { take: 5000, skip: 0 },
   })
 
+  // Same unguarded link dereference the GET half was crashing on — `sc.id` on a null-ish link row.
+  // A fresh reviewer caught that hardening only the GET left this one, and this is the MUTATING half:
+  // a throw here aborts the backfill, and a link row that reads as "no channel" would re-link a product
+  // that is already linked. Guard the population, not the door you found.
   const toAdd = (products as Array<{ id: string; sales_channels?: Array<{ id: string }> }>)
-    .filter(p => !(p.sales_channels ?? []).some(sc => sc.id === channelId))
+    .filter(p => !(p.sales_channels ?? []).some(sc => sc && sc.id === channelId))
     .map(p => p.id)
 
   if (toAdd.length === 0) {

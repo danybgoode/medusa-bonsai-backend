@@ -34,11 +34,17 @@ describe('backend Dockerfile + lockfile — deploy-pipeline-tuning S1 self-check
 
   it('runner stage also copies the lockfile and uses npm ci --omit=dev', () => {
     expect(dockerfile).toMatch(/COPY --from=builder \/app\/package-lock\.json/)
-    expect(dockerfile).toMatch(/RUN npm ci --omit=dev/)
+    // Match the INVARIANT (a production-only install in the runner stage), not the exact spelling.
+    // A BuildKit cache mount was added to this step and the old literal `RUN npm ci --omit=dev`
+    // pattern read a correct change as a regression — the same trap LEARNINGS records: pin what must
+    // be true, not how it is currently written.
+    expect(dockerfile).toMatch(/RUN (?:--mount=\S+ )*npm ci --omit=dev/)
   })
 
   it('neither stage regresses to a bare npm install', () => {
-    expect(dockerfile).not.toMatch(/RUN npm install\b/)
+    // The mount prefix must be part of the NEGATIVE pattern too, or `RUN --mount=... npm install`
+    // slips straight past the guard that exists to keep caret-pinned installs out of the image.
+    expect(dockerfile).not.toMatch(/RUN (?:--mount=\S+ )*npm install\b/)
   })
 
   it('builder, runner, package engine, and CI stay on the Node 22 runtime floor', () => {
