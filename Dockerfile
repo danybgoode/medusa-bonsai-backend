@@ -43,11 +43,22 @@ COPY --from=builder /app/package-lock.json ./
 #     ~306s / ~293s   when this layer actually runs
 #     ~1.3s           when the registry layer cache hits it
 #
-# That also corrects the comment above: the layer does NOT invalidate on every build — it cache-HIT on
-# 3 of 5 sampled builds. So the mount pays only on the minority of builds where the layer genuinely
-# re-runs, and there it takes a real bite out of ~5 minutes by fetching the npm store from disk instead
-# of the network. Kept on that basis: a bounded win on the slow path, and inert on the fast one, since
-# a skipped layer never evaluates its mount.
+# Reconciling with cloudbuild.yaml, which says this layer is "NOT expected to cache across builds":
+# both are true, and neither was precise. The layer caches only when `medusa build`'s output is
+# byte-identical — which is what the 3 cache-hit samples were (repeat builds of effectively unchanged
+# source, several triggered minutes apart). On a build carrying a REAL source change it invalidates and
+# runs the full ~300s, exactly as cloudbuild.yaml says. So: ~1.3s on no-op rebuilds, ~300s on every
+# deploy that actually ships something.
+#
+# ⚠️ WHERE THIS ACTUALLY HELPS — narrower than the numbers above suggest. A fresh reviewer pointed out
+# that those timings measure the registry LAYER cache, not this mount, and that cloudbuild.yaml
+# bootstraps a fresh `buildx --driver docker-container` builder on every ephemeral VM. BuildKit
+# `type=cache` mounts live in builder-local state and are NOT exported by
+# `--cache-to type=registry,mode=max` (mode=max exports layers, not cache mounts). So in Cloud Build
+# this mount starts EMPTY every run and saves nothing there.
+#
+# Kept because it is free and genuinely helps LOCAL iterative builds, where the store persists. Not
+# kept on a claim of Cloud Build savings — that claim would be false.
 #
 # Requires the `# syntax=docker/dockerfile:1` directive at the top of this file — which this Dockerfile
 # did not have, a prerequisite the audit proposing the change never mentioned.

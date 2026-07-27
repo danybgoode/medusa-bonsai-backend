@@ -193,24 +193,37 @@ describe('resolveMlSalesChannelId — memoizes across SEQUENTIAL calls', () => {
 describe('resolveMlSalesChannelId — the find-or-create runs inside a distributed lock', () => {
   beforeEach(() => __resetMlSalesChannelCacheForTests())
 
-  it('wraps the find-or-create in locking.execute under a stable key', async () => {
-    const keys: string[] = []
-    let ranInside = false
+  it('runs the re-check and the create INSIDE the lock, under a stable key', async () => {
+    // Ordering is the property that matters, and asserting only "execute was called" did NOT protect
+    // it: a fresh-reviewer mutation moved the re-check OUTSIDE the lock — destroying the whole point —
+    // and the old version of this spec stayed green. It also carried a comment claiming the opposite.
+    //
+    // Recording a trace makes the invariant observable: the lookup must happen BETWEEN lock-enter and
+    // lock-exit. Verified red against both mutations (lock removed; re-check hoisted out).
+    const trace: string[] = []
     const svc = {
       listSalesChannels: async () => {
-        // If this runs outside the lock, `ranInside` is never set by the wrapper below.
+        trace.push('list')
         return [{ id: 'sc_existing' }]
       },
-      createSalesChannels: async () => ({ id: 'sc_created' }),
+      createSalesChannels: async () => {
+        trace.push('create')
+        return { id: 'sc_created' }
+      },
     }
+    const keys: string[] = []
     const scope = {
       resolve: (mod: any) =>
         String(mod).toLowerCase().includes('lock')
           ? {
               execute: async (key: string, fn: () => Promise<string>) => {
                 keys.push(key)
-                ranInside = true
-                return fn()
+                trace.push('lock-enter')
+                try {
+                  return await fn()
+                } finally {
+                  trace.push('lock-exit')
+                }
               },
             }
           : svc,
@@ -218,9 +231,9 @@ describe('resolveMlSalesChannelId — the find-or-create runs inside a distribut
 
     await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_existing')
 
-    expect(ranInside).toBe(true)
-    expect(keys).toHaveLength(1)
     // Stable and specific: a key that varied per call would serialize nothing.
-    expect(keys[0]).toBe('ml-sales-channel:Mercado Libre')
+    expect(keys).toEqual(['ml-sales-channel:Mercado Libre'])
+    // THE assertion — the read must be inside the critical section, not before it.
+    expect(trace).toEqual(['lock-enter', 'list', 'lock-exit'])
   })
 })

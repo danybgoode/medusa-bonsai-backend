@@ -42,7 +42,9 @@ describe('backend Dockerfile + lockfile — deploy-pipeline-tuning S1 self-check
   })
 
   it('neither stage regresses to a bare npm install', () => {
-    expect(dockerfile).not.toMatch(/RUN npm install\b/)
+    // The mount prefix must be part of the NEGATIVE pattern too, or `RUN --mount=... npm install`
+    // slips straight past the guard that exists to keep caret-pinned installs out of the image.
+    expect(dockerfile).not.toMatch(/RUN (?:--mount=\S+ )*npm install\b/)
   })
 
   it('builder, runner, package engine, and CI stay on the Node 22 runtime floor', () => {

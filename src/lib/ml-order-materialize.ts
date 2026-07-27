@@ -95,11 +95,23 @@ async function resolveMlSalesChannelId(scope: Scope): Promise<string> {
   // The re-check INSIDE the lock is the load-bearing part: whoever loses the race must observe the
   // winner's row rather than proceeding on a stale "not found" read from before the lock.
   //
-  // Evidence this matters: production carried 16 duplicate "Default Sales Channel" rows from exactly
-  // this shape of race (2026-07-27), pruned to 2.
+  // NO borrowed evidence. An earlier version of this comment cited production's 16 duplicate
+  // "Default Sales Channel" rows as proof of "exactly this shape of race" — a fresh reviewer showed
+  // that is false: this resolver can only ever create a channel named 'Mercado Libre', and the only
+  // producer of "Default Sales Channel" is the seed script, whose own header attributes those rows to
+  // re-invocation against a populated DB, not to concurrency. Different bug, already guarded there.
+  //
+  // The lock stands on its own merits — maxScale=4 makes an in-process guard structurally incomplete
+  // for a find-or-create. Citing a neighbouring incident to make it sound more urgent is the
+  // paraphrase-drifts-permissive failure this repo keeps recording, committed here in a source comment.
   const p = (async () => {
     const scService = scope.resolve(Modules.SALES_CHANNEL)
     const locking = scope.resolve(Modules.LOCKING)
+    // Explicit timeout, matching the sibling call sites (ml-sync-apply, ml-order-cancel-apply) — this
+    // was the only lock call in the codebase relying on the implicit default. Medusa uses this single
+    // value as BOTH the acquire-wait and the key TTL, so 5s bounds a waiter's wait and caps how long a
+    // key is stranded if an instance dies mid-create. The in-process memo means this lock is touched
+    // at most once per instance lifetime, so a short TTL costs nothing and a stranded key clears fast.
     return locking.execute(`ml-sales-channel:${ML_SALES_CHANNEL_NAME}`, async () => {
       const [existing] = await scService.listSalesChannels({ name: ML_SALES_CHANNEL_NAME }, { take: 1 })
       if (existing) return existing.id
@@ -109,7 +121,7 @@ async function resolveMlSalesChannelId(scope: Scope): Promise<string> {
       })
       const row = Array.isArray(created) ? created[0] : created
       return row.id
-    })
+    }, { timeout: 5 })
   })()
   inFlightMlSalesChannel = p
 
