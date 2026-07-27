@@ -1,0 +1,19 @@
+#!/bin/sh
+# post-merge — fire the prose merge report after a pull that brought new commits.
+#
+# This is the AUTOMATIC trigger for scripts/merge-report.mjs. It exists because the prose writers
+# (devin/agy) have no headless auth, so the report cannot live in the GitHub Actions notifier — and
+# that notifier is also out of hosted-minutes quota.
+#
+# Over-triggering is safe and deliberate: the hook fires on every merge-y git operation, including a
+# pull that fetched nothing. merge-report.mjs owns the once-per-commit guarantee via its state file
+# and exits silently when there is nothing new, so a noisy hook cannot produce a noisy channel.
+#
+# Backgrounded and always-true: a prose report must NEVER slow down or fail a git operation.
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+script="$root/scripts/merge-report.mjs"
+# App repos have no scripts/ of their own — they borrow the root repo's copy.
+[ -f "$script" ] || script="$root/../../scripts/merge-report.mjs"
+[ -f "$script" ] || exit 0
+( cd "$root" && node "$script" >>"$root/.git/merge-report.log" 2>&1 || true ) &
+exit 0
