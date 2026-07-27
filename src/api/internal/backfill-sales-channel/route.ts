@@ -51,15 +51,22 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   let publishable_keys: unknown[] = []
   let publishable_keys_error: string | null = null
   try {
+    // `sales_channels.*` on api_key resolves through a LINK module, and asking for the nested fields
+    // in one graph call is what produced `Cannot read properties of undefined (reading 'id')` in
+    // production — the link rows come back with an undefined entry the mapper then dereferenced.
+    // Ask only for what this diagnostic needs, and defend the mapping: a null-ish link is skipped
+    // rather than crashing the whole response.
     const { data: keys } = await query.graph({
       entity: 'api_key',
-      fields: ['id', 'type', 'title', 'sales_channels.id', 'sales_channels.name'],
+      fields: ['id', 'type', 'title', 'sales_channels.*'],
       filters: { type: 'publishable' } as any,
     })
     publishable_keys = (keys as any[]).map(k => ({
-      id: k.id,
-      title: k.title,
-      sales_channels: (k.sales_channels ?? []).map((sc: any) => ({ id: sc.id, name: sc.name })),
+      id: k?.id ?? null,
+      title: k?.title ?? null,
+      sales_channels: (k?.sales_channels ?? [])
+        .filter((sc: any) => sc && sc.id)
+        .map((sc: any) => ({ id: sc.id, name: sc.name ?? null })),
     }))
   } catch (e: any) {
     publishable_keys_error = e?.message ?? 'api_key query failed'

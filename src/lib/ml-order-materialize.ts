@@ -84,16 +84,32 @@ async function resolveMlSalesChannelId(scope: Scope): Promise<string> {
   //
   // Clearing only when the slot still holds the promise that actually failed makes a late waiter a
   // no-op instead of a clobber.
+  // ── The in-process single-flight above is NOT enough on its own ────────────────────────────
+  // `medusa-web` runs with maxScale=4, so the module-level slot is per-INSTANCE: four instances
+  // handling ML webhooks concurrently could each miss and each create, which is the same duplicate
+  // this function exists to prevent — just one level up. A fresh-reviewer pass caught that the
+  // original fix closed only the intra-instance half.
+  //
+  // `Modules.LOCKING` is the distributed answer and is already used eight lines away in
+  // ml-sync-apply.ts for the per-link lock, so this is the established primitive, not a new one.
+  // The re-check INSIDE the lock is the load-bearing part: whoever loses the race must observe the
+  // winner's row rather than proceeding on a stale "not found" read from before the lock.
+  //
+  // Evidence this matters: production carried 16 duplicate "Default Sales Channel" rows from exactly
+  // this shape of race (2026-07-27), pruned to 2.
   const p = (async () => {
     const scService = scope.resolve(Modules.SALES_CHANNEL)
-    const [existing] = await scService.listSalesChannels({ name: ML_SALES_CHANNEL_NAME }, { take: 1 })
-    if (existing) return existing.id
-    const created = await scService.createSalesChannels({
-      name: ML_SALES_CHANNEL_NAME,
-      description: 'Ventas importadas de Mercado Libre',
+    const locking = scope.resolve(Modules.LOCKING)
+    return locking.execute(`ml-sales-channel:${ML_SALES_CHANNEL_NAME}`, async () => {
+      const [existing] = await scService.listSalesChannels({ name: ML_SALES_CHANNEL_NAME }, { take: 1 })
+      if (existing) return existing.id
+      const created = await scService.createSalesChannels({
+        name: ML_SALES_CHANNEL_NAME,
+        description: 'Ventas importadas de Mercado Libre',
+      })
+      const row = Array.isArray(created) ? created[0] : created
+      return row.id
     })
-    const row = Array.isArray(created) ? created[0] : created
-    return row.id
   })()
   inFlightMlSalesChannel = p
 
