@@ -38,21 +38,51 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     entity: 'sales_channel',
     fields: ['id', 'name', 'is_disabled'],
   })
-  const { data: keys } = await query.graph({
-    entity: 'api_key',
-    fields: ['id', 'type', 'title', 'sales_channels.id', 'sales_channels.name'],
-    filters: { type: 'publishable' } as any,
-  })
+
+  // The api_key half is wrapped because it was taking the WHOLE diagnostic down.
+  //
+  // Confirmed against production 2026-07-27: this route returned `unknown_error` while auth passed
+  // and every sibling internal route answered normally. A diagnostic that 500s is worse than one that
+  // returns partial data — it is consulted precisely when something else is already wrong, and it was
+  // the only endpoint that could answer "are there duplicate sales channels?".
+  //
+  // Degrade and NAME the gap rather than failing the request: the sales-channel list, which is the
+  // load-bearing half, now survives an api_key query failure.
+  let publishable_keys: unknown[] = []
+  let publishable_keys_error: string | null = null
+  try {
+    const { data: keys } = await query.graph({
+      entity: 'api_key',
+      fields: ['id', 'type', 'title', 'sales_channels.id', 'sales_channels.name'],
+      filters: { type: 'publishable' } as any,
+    })
+    publishable_keys = (keys as any[]).map(k => ({
+      id: k.id,
+      title: k.title,
+      sales_channels: (k.sales_channels ?? []).map((sc: any) => ({ id: sc.id, name: sc.name })),
+    }))
+  } catch (e: any) {
+    publishable_keys_error = e?.message ?? 'api_key query failed'
+  }
+
+  // Duplicate names are the thing this route is most often consulted about: sales_channel.name has no
+  // unique constraint, so a find-or-create race can leave two channels with the same name and split
+  // orders across them permanently. Surface it here rather than making every caller re-derive it.
+  const byName = new Map<string, string[]>()
+  for (const c of channels as any[]) {
+    byName.set(c.name, [...(byName.get(c.name) ?? []), c.id])
+  }
+  const duplicate_channel_names = [...byName.entries()]
+    .filter(([, ids]) => ids.length > 1)
+    .map(([name, ids]) => ({ name, ids }))
 
   return res.json({
     store_default_sales_channel_id: store?.default_sales_channel_id ?? null,
     env_MEDUSA_SALES_CHANNEL_ID: process.env.MEDUSA_SALES_CHANNEL_ID ?? null,
     sales_channels: channels,
-    publishable_keys: (keys as any[]).map(k => ({
-      id: k.id,
-      title: k.title,
-      sales_channels: (k.sales_channels ?? []).map((sc: any) => ({ id: sc.id, name: sc.name })),
-    })),
+    duplicate_channel_names,
+    publishable_keys,
+    publishable_keys_error,
   })
 }
 
