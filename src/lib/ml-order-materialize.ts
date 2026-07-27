@@ -47,26 +47,70 @@ const ML_SALES_CHANNEL_NAME = 'Mercado Libre'
 
 // Process-lifetime caches — both are effectively static per deployment (one ML
 // sales channel, one MXN region), so re-resolving on every sale is wasted work.
-let cachedMlSalesChannelId: string | null = null
 let cachedMxnRegionId: string | null = null
+
+/**
+ * IN-FLIGHT PROMISE cache, not a value cache — and the difference is a real bug, not a nicety.
+ *
+ * This resolver is find-or-CREATE. The previous version cached the resolved *value*, so two
+ * concurrent ML order materializations could both read `null`, both call `listSalesChannels` and find
+ * nothing, and both call `createSalesChannels` — leaving TWO persistent duplicate sales channels for
+ * Mercado Libre. That is duplicate commerce data, not a duplicated lookup, and no amount of retrying
+ * cleans it up afterwards.
+ *
+ * The sibling caches in this file (and in `_utils/fulfillment.ts`) are read-only lookups where a lost
+ * race costs one extra query, so they are deliberately left as value caches. The distinction is the
+ * side effect, not the caching: **a read-then-write race matters exactly when the write creates
+ * something.** (LEARNINGS: "a read is not a claim".)
+ *
+ * Caching the PROMISE means a concurrent caller awaits the same in-flight find-or-create instead of
+ * starting a second one. On failure the slot is cleared so the next caller retries rather than
+ * inheriting a permanently rejected promise.
+ */
+let inFlightMlSalesChannel: Promise<string> | null = null
 
 /** Idempotent find-or-create the dedicated ML sales channel (pattern: `internal/backfill-sales-channel`). */
 async function resolveMlSalesChannelId(scope: Scope): Promise<string> {
-  if (cachedMlSalesChannelId) return cachedMlSalesChannelId
-  const scService = scope.resolve(Modules.SALES_CHANNEL)
-  const [existing] = await scService.listSalesChannels({ name: ML_SALES_CHANNEL_NAME }, { take: 1 })
-  if (existing) {
-    cachedMlSalesChannelId = existing.id
-    return existing.id
+  if (inFlightMlSalesChannel) return inFlightMlSalesChannel
+
+  // Hold a LOCAL reference. The clear below must be a compare-and-clear against THIS promise, not an
+  // unconditional reset — cross-review caught the difference and it is a real reintroduction of the
+  // very race this function exists to close:
+  //
+  //   P1 rejects. Callers A and B are both awaiting it, so both will run the catch.
+  //   A's catch clears the slot. Caller C sees null, starts P2, stores it.
+  //   B's catch NOW runs and — unconditionally — clears the slot, wiping P2.
+  //   Caller D sees null and starts P3, concurrent with the still-running P2 → two createSalesChannels.
+  //
+  // Clearing only when the slot still holds the promise that actually failed makes a late waiter a
+  // no-op instead of a clobber.
+  const p = (async () => {
+    const scService = scope.resolve(Modules.SALES_CHANNEL)
+    const [existing] = await scService.listSalesChannels({ name: ML_SALES_CHANNEL_NAME }, { take: 1 })
+    if (existing) return existing.id
+    const created = await scService.createSalesChannels({
+      name: ML_SALES_CHANNEL_NAME,
+      description: 'Ventas importadas de Mercado Libre',
+    })
+    const row = Array.isArray(created) ? created[0] : created
+    return row.id
+  })()
+  inFlightMlSalesChannel = p
+
+  try {
+    return await p
+  } catch (e) {
+    // Compare-and-clear: only retract the slot if it still holds the promise that failed.
+    if (inFlightMlSalesChannel === p) inFlightMlSalesChannel = null
+    throw e
   }
-  const created = await scService.createSalesChannels({
-    name: ML_SALES_CHANNEL_NAME,
-    description: 'Ventas importadas de Mercado Libre',
-  })
-  const row = Array.isArray(created) ? created[0] : created
-  cachedMlSalesChannelId = row.id
-  return row.id
 }
+
+/** Test seams: reset the in-flight cache and drive the resolver directly. Not used in production. */
+export function __resetMlSalesChannelCacheForTests(): void {
+  inFlightMlSalesChannel = null
+}
+export const __resolveMlSalesChannelIdForTests = resolveMlSalesChannelId
 
 /** The MXN region every marketplace order resolves through (mirrors `checkout-options`' own lookup). */
 async function resolveMxnRegionId(scope: Scope): Promise<string | null> {
