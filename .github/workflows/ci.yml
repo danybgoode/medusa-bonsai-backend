@@ -28,6 +28,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The backend's FIRST static analysis of any kind — it was the only one of the three repos with no
+  # ESLint/Prettier config at all. Deliberately minimal and green today (see eslint.config.mjs for why
+  # a maximal first config is worse than none), and meant to grow rule by rule.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+
   type-check-build:
     name: Type-check + build + unit
     runs-on: ubuntu-latest
@@ -43,5 +58,9 @@ jobs:
         run: npm run build
       - name: Type-check
         run: npx tsc --noEmit
+      # Coverage is REPORTED, never gated (qa-guardrail-hardening D4). We had file counts and no idea
+      # what fraction they touched; the first measured number was 50.93% statements / 44.39% branches
+      # (2026-07-26). A threshold picked before anyone had seen a number would be arbitrary, and an
+      # arbitrary threshold gets bypassed. Pick one later, from data.
       - name: Unit tests
-        run: npm run test:unit
+        run: npm run test:unit:coverage

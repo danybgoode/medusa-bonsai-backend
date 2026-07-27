@@ -364,7 +364,7 @@ export function redactSyncMessage(raw: unknown): string | null {
   s = s
     .replace(/\bAPP[_-]USR-[\w-]+/gi, '[redacted]')
     .replace(/\bTG-[\w-]+/gi, '[redacted]')
-    .replace(/\bBearer\s+[\w.\-]+/gi, 'Bearer [redacted]')
+    .replace(/\bBearer\s+[\w.-]+/gi, 'Bearer [redacted]')
     .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[redacted]') // JWT
     .trim()
   if (!s) return null

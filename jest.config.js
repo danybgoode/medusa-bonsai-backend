@@ -15,13 +15,22 @@ module.exports = {
   testEnvironment: "node",
   moduleFileExtensions: ["js", "ts", "json"],
   modulePathIgnorePatterns: ["dist/", "<rootDir>/.medusa/"],
+  // Kept even though the integration tiers are gone: this is the setupFiles hook for EVERY test
+  // type, including unit. Deleting the directory would break `npm run test:unit`.
   setupFiles: ["./integration-tests/setup.js"],
 };
 
-if (process.env.TEST_TYPE === "integration:http") {
-  module.exports.testMatch = ["**/integration-tests/http/*.spec.[jt]s"];
-} else if (process.env.TEST_TYPE === "integration:modules") {
-  module.exports.testMatch = ["**/src/modules/*/__tests__/**/*.[jt]s"];
-} else if (process.env.TEST_TYPE === "unit") {
+// ── Why there is only one tier here (qa-guardrail-hardening S2, 2026-07-26) ──────────────────
+// There used to be two more: `TEST_TYPE=integration:http` matched
+// `**/integration-tests/http/*.spec.[jt]s` — a directory that has never existed, so the script found
+// zero tests and exited 0. A script that passes by running nothing is worse than no script, because
+// it reads as a green gate. `TEST_TYPE=integration:modules` matched `src/modules/*/__tests__/`,
+// which is the same files the unit suite already runs — a second label on one tier, not a second tier.
+//
+// Both were removed rather than repaired. Writing a real HTTP integration tier needs a Postgres (and
+// Redis) service in CI and is genuine scope; inventing tests to justify an existing script is not a
+// reason to write them. So: this repo has NO integration tier today. That absence is now visible
+// instead of disguised, which is the whole point of removing them.
+if (process.env.TEST_TYPE === "unit") {
   module.exports.testMatch = ["**/src/**/__tests__/**/*.unit.spec.[jt]s"];
 }
