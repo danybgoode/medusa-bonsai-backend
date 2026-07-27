@@ -73,7 +73,18 @@ let inFlightMlSalesChannel: Promise<string> | null = null
 async function resolveMlSalesChannelId(scope: Scope): Promise<string> {
   if (inFlightMlSalesChannel) return inFlightMlSalesChannel
 
-  inFlightMlSalesChannel = (async () => {
+  // Hold a LOCAL reference. The clear below must be a compare-and-clear against THIS promise, not an
+  // unconditional reset — cross-review caught the difference and it is a real reintroduction of the
+  // very race this function exists to close:
+  //
+  //   P1 rejects. Callers A and B are both awaiting it, so both will run the catch.
+  //   A's catch clears the slot. Caller C sees null, starts P2, stores it.
+  //   B's catch NOW runs and — unconditionally — clears the slot, wiping P2.
+  //   Caller D sees null and starts P3, concurrent with the still-running P2 → two createSalesChannels.
+  //
+  // Clearing only when the slot still holds the promise that actually failed makes a late waiter a
+  // no-op instead of a clobber.
+  const p = (async () => {
     const scService = scope.resolve(Modules.SALES_CHANNEL)
     const [existing] = await scService.listSalesChannels({ name: ML_SALES_CHANNEL_NAME }, { take: 1 })
     if (existing) return existing.id
@@ -84,12 +95,13 @@ async function resolveMlSalesChannelId(scope: Scope): Promise<string> {
     const row = Array.isArray(created) ? created[0] : created
     return row.id
   })()
+  inFlightMlSalesChannel = p
 
   try {
-    return await inFlightMlSalesChannel
+    return await p
   } catch (e) {
-    // Clear on failure so a transient error doesn't poison every later call with a rejected promise.
-    inFlightMlSalesChannel = null
+    // Compare-and-clear: only retract the slot if it still holds the promise that failed.
+    if (inFlightMlSalesChannel === p) inFlightMlSalesChannel = null
     throw e
   }
 }

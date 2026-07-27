@@ -81,3 +81,63 @@ describe('resolveMlSalesChannelId — concurrent find-or-create', () => {
     await expect(resolveMlSalesChannelId(scope)).resolves.toBe('sc_recovered')
   })
 })
+
+/**
+ * The cross-review finding on the first version of this fix — and why it does NOT reproduce.
+ *
+ * Codex reported (blocking): "multiple callers awaiting rejected P1 each execute
+ * `inFlightMlSalesChannel = null`; a late clear can wipe a newer retry promise, reintroducing
+ * concurrent createSalesChannels."
+ *
+ * Verified and REJECTED, with the reasoning pinned here so nobody re-litigates it: a non-creating
+ * caller never reaches the try/catch at all. It hits the early return
+ * (`if (inFlightMlSalesChannel) return inFlightMlSalesChannel`) and gets the shared promise directly.
+ * Only the caller that CREATED the promise runs the clear, exactly once — measured: 3 concurrent
+ * callers, 1 clear.
+ *
+ * The compare-and-clear guard was kept anyway as defence in depth: it costs nothing and becomes
+ * load-bearing the moment someone refactors that early return away. This test pins the invariant that
+ * makes the whole thing safe — so it fails if that early return is ever removed.
+ */
+describe('resolveMlSalesChannelId — concurrent callers share ONE attempt', () => {
+  beforeEach(() => __resetMlSalesChannelCacheForTests())
+
+  it('runs the underlying lookup once for many concurrent callers, and clears once on failure', async () => {
+    let lookups = 0
+    const scope = {
+      resolve: () => ({
+        listSalesChannels: async () => {
+          lookups++
+          await new Promise((r) => setTimeout(r, 5))
+          throw new Error('transient')
+        },
+        createSalesChannels: async () => ({ id: 'sc_created' }),
+      }),
+    } as any
+
+    const settled = await Promise.all([
+      resolveMlSalesChannelId(scope).catch(() => 'failed'),
+      resolveMlSalesChannelId(scope).catch(() => 'failed'),
+      resolveMlSalesChannelId(scope).catch(() => 'failed'),
+    ])
+
+    // One shared attempt — the early return is what makes the multi-waiter clobber unreachable.
+    expect(lookups).toBe(1)
+    expect(settled).toEqual(['failed', 'failed', 'failed'])
+
+    // And the slot really was retracted, so the next caller retries rather than inheriting a
+    // permanently rejected promise.
+    let second = 0
+    const ok = {
+      resolve: () => ({
+        listSalesChannels: async () => {
+          second++
+          return [{ id: 'sc_existing' }]
+        },
+        createSalesChannels: async () => ({ id: 'sc_created' }),
+      }),
+    } as any
+    await expect(resolveMlSalesChannelId(ok)).resolves.toBe('sc_existing')
+    expect(second).toBe(1)
+  })
+})
