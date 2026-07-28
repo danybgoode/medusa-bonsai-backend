@@ -90,6 +90,8 @@ Cloud Build trigger, or the Cloud Run service.
 
 ## Migration boundary
 
-`miyagisanchezback-497722` retains its old notifier only as a rollback path while the new
-production project is observed. Do not deploy or update notifier resources there during normal
-operations. All current production provisioning uses `miyagisanchez-prod` under `lolis-profile`.
+`miyagisanchezback-497722` retained its old notifier only as a rollback path while the new
+production project was observed. That project was **decommissioned on 2026-07-28** (services
+`ingress=internal`, Cloud SQL `STOPPED`, build triggers deleted); it has not been deleted yet, but it
+is no longer a usable rollback and nothing should be deployed to it. All current production
+provisioning uses `miyagisanchez-prod` under `lolis-profile`.
