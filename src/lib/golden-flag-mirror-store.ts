@@ -13,7 +13,7 @@ const TABLE = 'golden_flag_snapshot_mirror'
 const MIRROR_CACHE_TTL_MS = 60_000
 const MIRROR_FETCH_TIMEOUT_MS = 2_000
 
-let cache: { snapshot: FlagSnapshot | undefined; environment: GoldenFlagEnvironment | undefined; fetchedAt: number | undefined } = {
+const cache: { snapshot: FlagSnapshot | undefined; environment: GoldenFlagEnvironment | undefined; fetchedAt: number | undefined } = {
   snapshot: undefined,
   environment: undefined,
   fetchedAt: undefined,
