@@ -17,7 +17,7 @@ describe('Golden Beans flag-provider migration mode', () => {
 
   it('records one PII-free observation per flag and Golden snapshot', () => {
     const records: FlagShadowObservation[] = []
-    const observe = createFlagShadowObserver((observation) => records.push(observation))
+    const observe = createFlagShadowObserver((observation) => records.push(observation), 2)
     const base: FlagShadowObservation = {
       flagKey: 'checkout.stripe_enabled',
       defaultValue: true,
@@ -31,6 +31,13 @@ describe('Golden Beans flag-provider migration mode', () => {
     expect(observe(base)).toBe(true)
     expect(observe({ ...base, goldenValue: true })).toBe(false)
     expect(observe({ ...base, snapshotVersion: 4 })).toBe(true)
-    expect(records).toEqual([base, { ...base, snapshotVersion: 4 }])
+    expect(observe({ ...base, snapshotVersion: 5 })).toBe(true)
+    expect(observe(base)).toBe(true) // bounded observer evicts the oldest record
+    expect(records).toEqual([
+      base,
+      { ...base, snapshotVersion: 4 },
+      { ...base, snapshotVersion: 5 },
+      base,
+    ])
   })
 })

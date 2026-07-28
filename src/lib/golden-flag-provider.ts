@@ -14,13 +14,14 @@ export type GoldenBooleanEvaluation = {
   reason: FlagResolutionReason
 }
 
-const baseUrl = process.env.GROWTH_ENGINE_URL?.replace(/\/+$/, '')
-const flagReadKey = process.env.GOLDEN_BEANS_FLAG_READ_KEY
-
 let provider: FlagProvider | undefined
 let started = false
 
 function getProvider(): FlagProvider | undefined {
+  // Read configuration lazily so runtime setup cannot permanently cache an
+  // absent credential during module evaluation.
+  const baseUrl = process.env.GROWTH_ENGINE_URL?.replace(/\/+$/, '')
+  const flagReadKey = process.env.GOLDEN_BEANS_FLAG_READ_KEY
   if (!baseUrl || !flagReadKey) return undefined
 
   if (!provider) {

@@ -242,7 +242,9 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
 
   if (mode === 'local') return localValue
 
-  const golden = evaluateGoldenBooleanFlag(flag, DEFAULT_FLAGS[flag])
+  // A missing Golden definition must preserve the durable local value, even
+  // when an operator has deliberately overridden the compile-time default.
+  const golden = evaluateGoldenBooleanFlag(flag, localValue)
   if (!golden) return localValue
 
   if (mode === 'shadow') {
