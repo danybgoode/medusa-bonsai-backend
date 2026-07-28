@@ -1,5 +1,28 @@
 import { createFlagShadowObserver, type FlagShadowObservation } from '../flag-shadow-observation'
 import { parseFlagProviderMode, parseGoldenFlagEnvironment } from '../flag-provider-mode'
+import { evaluateDurableGoldenBooleanFlag, parseDurableGoldenSnapshot } from '../golden-flag-mirror'
+
+const durableSnapshot = {
+  contractVersion: 1,
+  environment: 'production',
+  snapshotVersion: 7,
+  flags: [
+    {
+      key: 'checkout.stripe_enabled',
+      definitionVersion: 3,
+      definition: {
+        valueType: 'boolean',
+        description: 'Durable mirror test fixture.',
+        defaultVariantKey: 'off',
+        variants: [
+          { key: 'off', value: false },
+          { key: 'on', value: true },
+        ],
+        rules: [],
+      },
+    },
+  ],
+}
 
 describe('Golden Beans flag-provider migration mode', () => {
   it('defaults to local for absent or malformed configuration', () => {
@@ -47,5 +70,18 @@ describe('Golden Beans flag-provider migration mode', () => {
       { ...base, snapshotVersion: 5 },
       base,
     ])
+  })
+
+  it('uses only a valid matching-environment snapshot as the durable fallback', () => {
+    const snapshot = parseDurableGoldenSnapshot(durableSnapshot, 'production')
+    expect(snapshot).toBeDefined()
+    expect(evaluateDurableGoldenBooleanFlag(snapshot!, 'checkout.stripe_enabled', true)).toMatchObject({
+      value: false,
+      snapshotVersion: 7,
+      flagVersion: 3,
+      reason: 'STATIC',
+    })
+    expect(parseDurableGoldenSnapshot(durableSnapshot, 'preview')).toBeUndefined()
+    expect(parseDurableGoldenSnapshot({ ...durableSnapshot, snapshotVersion: -1 }, 'production')).toBeUndefined()
   })
 })

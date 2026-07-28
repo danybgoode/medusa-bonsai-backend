@@ -7,6 +7,7 @@
  */
 import { createFlagProvider, type FlagProvider, type FlagResolutionReason } from '@golden-beans/sdk'
 import { parseGoldenFlagEnvironment } from './flag-provider-mode'
+import { scheduleDurableGoldenSnapshot } from './golden-flag-mirror-store'
 
 export type GoldenBooleanEvaluation = {
   value: boolean
@@ -68,6 +69,7 @@ export function evaluateGoldenBooleanFlag(
 
     const snapshot = currentProvider.getSnapshot()
     if (!snapshot) return undefined
+    scheduleDurableGoldenSnapshot(snapshot)
 
     const details = currentProvider.resolveBooleanEvaluation(flagKey, defaultValue)
     return {
