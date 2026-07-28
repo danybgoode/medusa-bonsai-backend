@@ -32,6 +32,8 @@ import {
 } from './flags-cache'
 import { parseFlagProviderMode } from './flag-provider-mode'
 import { evaluateGoldenBooleanFlag } from './golden-flag-provider'
+import { evaluateDurableGoldenBooleanFlag } from './golden-flag-mirror'
+import { getDurableGoldenSnapshot } from './golden-flag-mirror-store'
 import { createFlagShadowObserver } from './flag-shadow-observation'
 
 export type FlagKey =
@@ -257,7 +259,13 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
   // A missing Golden definition must preserve the durable local value, even
   // when an operator has deliberately overridden the compile-time default.
   const golden = evaluateGoldenBooleanFlag(flag, localValue)
-  if (!golden) return localValue
+  if (!golden) {
+    if (mode !== 'golden') return localValue
+    const durableSnapshot = await getDurableGoldenSnapshot()
+    return durableSnapshot
+      ? evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, DEFAULT_FLAGS[flag]).value
+      : DEFAULT_FLAGS[flag]
+  }
 
   if (mode === 'shadow') {
     recordShadowObservation({

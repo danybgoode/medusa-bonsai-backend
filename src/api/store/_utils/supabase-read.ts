@@ -3,7 +3,7 @@
  *
  * Boundary note (AGENTS rule #2): Supabase owns the non-commerce marketplace data
  * (favorites / offers / conversations) and the FRONTEND owns all WRITES to it. This
- * client is READ-ONLY — the marketplace-static-shell epic moved the homepage's
+ * client is READ-ONLY except for one narrow flag-serving resilience RPC — the marketplace-static-shell epic moved the homepage's
  * personalization read onto Cloud Run, so the backend reads (never writes) that data
  * here, with the frontend's service-role key. Supabase stays the source of truth.
  *
@@ -66,7 +66,10 @@ function getSupabase(): SupabaseClient {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!url || !key) {
     console.warn('[supabase-read] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — using stub')
-    _db = { from: () => makeMissingConfigQuery() } as unknown as SupabaseClient
+    _db = {
+      from: () => makeMissingConfigQuery(),
+      rpc: () => Promise.resolve({ data: null, error: { message: 'supabase not configured' } }),
+    } as unknown as SupabaseClient
     return _db
   }
   _db = createClient(url, key, {
