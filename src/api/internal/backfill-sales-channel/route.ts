@@ -70,11 +70,19 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     publishable_keys = (keys as any[]).map(k => {
       const links = k?.sales_channels ?? []
       const usable = links.filter((sc: any) => sc && sc.id)
-      skipped_links += links.length - usable.length
+      const skipped = links.length - usable.length
+      skipped_links += skipped
       return {
         id: k?.id ?? null,
         title: k?.title ?? null,
         sales_channels: usable.map((sc: any) => ({ id: sc.id, name: sc.name ?? null })),
+        // PER-KEY count, because the array above collapses two different facts
+        // into one empty array: "this key has a link row pointing at a deleted
+        // channel" and "this key has no link row at all". Confirmed live
+        // 2026-07-27 — 71 keys rendered `[]` while only 70 links were skipped,
+        // and nothing in the response said which key was which.
+        // Three states, never two (AGENTS).
+        skipped_links: skipped,
       }
     })
   } catch (e: any) {
