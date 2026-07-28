@@ -48,13 +48,10 @@ function getProvider(): FlagProvider | undefined {
 
   if (!started) {
     started = true
-    void provider.initialize()
-      .then((result) => {
-        if (!result.ok) started = false
-      })
-      .catch(() => {
-        started = false
-      })
+    // SDK initialize starts its bounded periodic refresh before its initial
+    // attempt. Preserve `started` after failure to avoid request-path retry
+    // storms; the provider performs the next retry on that timer.
+    void provider.initialize().catch(() => undefined)
   }
 
   return provider
