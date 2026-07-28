@@ -263,8 +263,8 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
     if (mode !== 'golden') return localValue
     const durableSnapshot = await getDurableGoldenSnapshot()
     return durableSnapshot
-      ? evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, DEFAULT_FLAGS[flag]).value
-      : DEFAULT_FLAGS[flag]
+      ? evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, localValue).value
+      : localValue
   }
 
   if (mode === 'shadow') {
