@@ -36,7 +36,28 @@ export type PublishableKeyRow = {
   id?: string | null
   title?: string | null
   token?: string | null
+  revoked_at?: string | Date | null
   sales_channels?: Array<{ id?: string | null; name?: string | null } | null | undefined> | null
+}
+
+/**
+ * Mirror of the delete precondition in the api-key module service — NOT a
+ * paraphrase of it. Source:
+ * `@medusajs/api-key/dist/services/api-key-module-service.js` `deleteApiKeys_`,
+ * which refuses any key matching `revoked_at IS NULL OR revoked_at > now()`:
+ *
+ *     Cannot delete api keys that are not revoked - apk_…
+ *
+ * Measured in production 2026-07-27: the first apply attempt 400'd on all 71
+ * keys for exactly this reason. A future-dated `revoked_at` counts as NOT
+ * revoked, which is why this is a comparison and not a null check — restating
+ * the rule as "has a revoked_at" would fork it permissively.
+ */
+export function isRevoked(revokedAt: string | Date | null | undefined, now: Date = new Date()): boolean {
+  if (revokedAt === null || revokedAt === undefined) return false
+  const t = revokedAt instanceof Date ? revokedAt : new Date(revokedAt)
+  if (Number.isNaN(t.getTime())) return false // unparseable ⇒ cannot claim revoked
+  return t.getTime() <= now.getTime()
 }
 
 export type KeyPlanEntry = {
@@ -47,6 +68,8 @@ export type KeyPlanEntry = {
   live_links: number
   dangling_links: number
   keep_reason: 'live_sales_channel_link' | 'configured_storefront_token' | null
+  /** Per the module's own delete precondition — see `isRevoked`. A key that is not revoked CANNOT be deleted. */
+  revoked: boolean
 }
 
 /**
@@ -65,6 +88,12 @@ export type ApiKeyCleanupPlan = {
   storefront_token_check: StorefrontTokenCheck
   /** Rows with no usable `id` — we cannot reason about them, so their presence is fatal. */
   unusable_rows: number
+  /**
+   * How many of `delete` must be REVOKED before they can be deleted. The apply
+   * path revokes these first; a dry run that omitted this predicted an outcome
+   * the apply could not deliver, which is how the first production attempt 400'd.
+   */
+  requires_revoke: number
   /** Non-null ⇒ do not apply. The string is the reason, meant to be returned verbatim. */
   refuse: string | null
 }
@@ -88,10 +117,11 @@ const trimmed = (v: unknown): string | null => {
  */
 export function planApiKeyCleanup(
   rows: unknown,
-  opts: { storefrontToken?: string | null } = {},
+  opts: { storefrontToken?: string | null; now?: Date } = {},
 ): ApiKeyCleanupPlan {
   const list: PublishableKeyRow[] = Array.isArray(rows) ? (rows as PublishableKeyRow[]) : []
   const storefrontToken = trimmed(opts.storefrontToken)
+  const now = opts.now ?? new Date()
 
   const keep: KeyPlanEntry[] = []
   const toDelete: KeyPlanEntry[] = []
@@ -137,11 +167,14 @@ export function planApiKeyCleanup(
       live_links: live,
       dangling_links: dangling,
       keep_reason: keepReason,
+      revoked: isRevoked(row?.revoked_at, now),
     }
 
     if (keepReason) keep.push(entry)
     else toDelete.push(entry)
   }
+
+  const requiresRevoke = toDelete.filter(k => !k.revoked).length
 
   // `unavailable` when we had nothing to compare against — either no configured
   // token, or the token field came back empty on every row (a field-selection
@@ -160,6 +193,7 @@ export function planApiKeyCleanup(
     delete: toDelete,
     storefront_token_check: storefrontCheck,
     unusable_rows: unusableRows,
+    requires_revoke: requiresRevoke,
     refuse: refusalFor({ list, keep, storefrontCheck, unusableRows }),
   }
 }
