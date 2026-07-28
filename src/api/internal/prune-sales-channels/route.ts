@@ -13,6 +13,7 @@
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
+import { deleteSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
 
 function authed(req: MedusaRequest): boolean {
   const secret = process.env.MEDUSA_INTERNAL_SECRET
@@ -56,7 +57,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
   }
 
-  // Delete in batches of 10 to avoid overwhelming the DB
+  // Delete through the WORKFLOW, never `salesChannelService.deleteSalesChannels`.
+  //
+  // Measured on 2026-07-27: the module-service call deletes only the
+  // `sales_channel` row. `deleteSalesChannelsWorkflow` additionally runs
+  // `removeRemoteLinkStep({ [Modules.SALES_CHANNEL]: { sales_channel_id } })`
+  // (verified in the installed core-flows source), which is what clears the
+  // link rows in `publishable_api_key_sales_channel` and `product_sales_channel`.
+  //
+  // Skipping it is exactly how the 15 channels pruned that day left 15 DANGLING
+  // link rows behind — `query.graph` then expands each into a null-ish entry with
+  // no `id`, which is what used to crash `/internal/backfill-sales-channel`.
+  // The workflow also runs `canDeleteSalesChannelsOrThrowStep`, so a channel that
+  // is still a store default now refuses instead of silently orphaning a store.
   const deleted: string[] = []
   const errors: string[]  = []
 
@@ -64,8 +77,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const batch = toDelete.slice(i, i + 10)
     await Promise.all(
       batch.map(sc =>
-        salesChannelService.deleteSalesChannels(sc.id)
-          .then(() => deleted.push(sc.id))
+        deleteSalesChannelsWorkflow(req.scope).run({ input: { ids: [sc.id] } })
+          .then(() => { deleted.push(sc.id) })
           .catch((e: unknown) => errors.push(`${sc.id}: ${e instanceof Error ? e.message : String(e)}`))
       )
     )
