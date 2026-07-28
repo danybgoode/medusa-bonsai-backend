@@ -173,7 +173,19 @@ let inflight: Promise<void> | null = null
 // One control-plane-only record per flag/snapshot in each process. Shadow mode
 // is parity evidence, never request telemetry: it includes no customer data.
 const recordShadowObservation = createFlagShadowObserver((observation) => {
-  console.info('[golden-beans:flag-shadow]', JSON.stringify(observation))
+  try {
+    // Sentry's production build removes console-level debug logging. Write the
+    // deliberately PII-free control-plane record directly so Cloud Run keeps
+    // the migration evidence without making a flag read able to throw.
+    const line = `[golden-beans:flag-shadow] ${JSON.stringify(observation)}`
+    if (typeof process !== 'undefined' && typeof process.stdout?.write === 'function') {
+      process.stdout.write(`${line}\n`)
+      return
+    }
+    console.info(line)
+  } catch {
+    // Shadow evidence must never affect a feature decision.
+  }
 })
 
 /**
