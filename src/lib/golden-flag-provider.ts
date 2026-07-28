@@ -6,6 +6,7 @@
  * callers keep their local result whenever a snapshot is unavailable or stale.
  */
 import { createFlagProvider, type FlagProvider, type FlagResolutionReason } from '@golden-beans/sdk'
+import { parseGoldenFlagEnvironment } from './flag-provider-mode'
 
 export type GoldenBooleanEvaluation = {
   value: boolean
@@ -22,13 +23,14 @@ function getProvider(): FlagProvider | undefined {
   // absent credential during module evaluation.
   const baseUrl = process.env.GROWTH_ENGINE_URL?.replace(/\/+$/, '')
   const flagReadKey = process.env.GOLDEN_BEANS_FLAG_READ_KEY
-  if (!baseUrl || !flagReadKey) return undefined
+  const environment = parseGoldenFlagEnvironment(process.env.GOLDEN_BEANS_FLAG_ENVIRONMENT)
+  if (!baseUrl || !flagReadKey || !environment) return undefined
 
   if (!provider) {
     provider = createFlagProvider({
       baseUrl,
       flagReadKey,
-      environment: 'production',
+      environment,
       refreshIntervalMs: 60_000,
       maxStaleMs: 300_000,
       refreshTimeoutMs: 2_000,

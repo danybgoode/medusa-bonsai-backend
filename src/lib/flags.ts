@@ -238,7 +238,7 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
     // Defensive: refreshIfStale already swallows errors, but never let a flag read throw.
   }
   const localValue = resolveFlag(cache.rows, flag, DEFAULT_FLAGS)
-  const mode = parseFlagProviderMode(process.env.MIYAGI_FLAG_PROVIDER_MODE)
+  const mode = parseFlagProviderMode(process.env.GOLDEN_BEANS_FLAG_PROVIDER_MODE)
 
   if (mode === 'local') return localValue
 

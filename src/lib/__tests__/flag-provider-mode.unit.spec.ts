@@ -1,5 +1,5 @@
 import { createFlagShadowObserver, type FlagShadowObservation } from '../flag-shadow-observation'
-import { parseFlagProviderMode } from '../flag-provider-mode'
+import { parseFlagProviderMode, parseGoldenFlagEnvironment } from '../flag-provider-mode'
 
 describe('Golden Beans flag-provider migration mode', () => {
   it('defaults to local for absent or malformed configuration', () => {
@@ -13,6 +13,14 @@ describe('Golden Beans flag-provider migration mode', () => {
     expect(parseFlagProviderMode('local')).toBe('local')
     expect(parseFlagProviderMode('shadow')).toBe('shadow')
     expect(parseFlagProviderMode('golden')).toBe('golden')
+  })
+
+  it('requires an explicit valid Golden Beans environment', () => {
+    expect(parseGoldenFlagEnvironment(undefined)).toBeUndefined()
+    expect(parseGoldenFlagEnvironment('prod')).toBeUndefined()
+    expect(parseGoldenFlagEnvironment('development')).toBe('development')
+    expect(parseGoldenFlagEnvironment('preview')).toBe('preview')
+    expect(parseGoldenFlagEnvironment('production')).toBe('production')
   })
 
   it('records one PII-free observation per flag and Golden snapshot', () => {
