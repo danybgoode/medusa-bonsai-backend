@@ -20,7 +20,7 @@
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
-import { deleteApiKeysWorkflow } from '@medusajs/medusa/core-flows'
+import { deleteApiKeysWorkflow, revokeApiKeysWorkflow } from '@medusajs/medusa/core-flows'
 import { planApiKeyCleanup } from '../_utils/api-key-cleanup'
 
 function authed(req: MedusaRequest): boolean {
@@ -45,7 +45,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   try {
     const { data } = await query.graph({
       entity: 'api_key',
-      fields: ['id', 'type', 'title', 'token', 'sales_channels.*'],
+      fields: ['id', 'type', 'title', 'token', 'revoked_at', 'sales_channels.*'],
       filters: { type: 'publishable' } as any,
     })
     rows = data
@@ -73,6 +73,24 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const ids = plan.delete.map(k => k.id)
+
+  // REVOKE BEFORE DELETE — the module refuses to delete an unrevoked key
+  // (`deleteApiKeys_`: "Cannot delete api keys that are not revoked"). Measured
+  // in production 2026-07-27: without this, the apply 400s on all 71 keys and
+  // deletes nothing. Only keys already in the delete set are revoked, so the
+  // kept storefront credential is never touched.
+  //
+  // Not atomic: if the delete below fails after this succeeds, these orphan keys
+  // are left revoked-but-present. They are unused by construction (no live
+  // sales-channel link), and re-running the endpoint completes the job — the
+  // second pass sees them already revoked and proceeds straight to the delete.
+  const toRevoke = plan.delete.filter(k => !k.revoked).map(k => k.id)
+  if (toRevoke.length > 0) {
+    await revokeApiKeysWorkflow(req.scope).run({
+      input: { selector: { id: toRevoke }, revoke: { revoked_by: 'internal/prune-api-keys' } },
+    })
+  }
+
   await deleteApiKeysWorkflow(req.scope).run({ input: { ids } })
 
   // Re-read rather than reporting what we intended to do — a delete that
@@ -90,6 +108,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   return res.json({
     dry_run: false,
     applied: true,
+    revoked: toRevoke.length,
     deleted: ids.length,
     deleted_ids: ids,
     before: {

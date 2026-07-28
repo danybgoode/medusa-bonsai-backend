@@ -1,4 +1,4 @@
-import { planApiKeyCleanup } from '../api-key-cleanup'
+import { planApiKeyCleanup, isRevoked } from '../api-key-cleanup'
 
 /**
  * Publishable-key cleanup planner. Pure — no DB, no Medusa container.
@@ -159,6 +159,66 @@ describe('planApiKeyCleanup · refusals (this deletes production credentials)', 
     )
     expect(noTokens.storefront_token_check).toBe('unavailable')
     expect(noTokens.refuse).toBeNull()
+  })
+})
+
+/**
+ * The revoke precondition. Measured in production 2026-07-27: the first apply
+ * attempt returned HTTP 400 `Cannot delete api keys that are not revoked` for
+ * all 71 keys and deleted nothing. The dry run had happily predicted
+ * "delete 71" — a prediction the apply could not deliver.
+ */
+describe('isRevoked · mirrors the module delete precondition, never paraphrases it', () => {
+  const NOW = new Date('2026-07-27T12:00:00.000Z')
+
+  it('null / undefined revoked_at ⇒ NOT revoked (the live state of all 72 keys)', () => {
+    expect(isRevoked(null, NOW)).toBe(false)
+    expect(isRevoked(undefined, NOW)).toBe(false)
+  })
+
+  it('a past revoked_at ⇒ revoked', () => {
+    expect(isRevoked('2026-07-01T00:00:00.000Z', NOW)).toBe(true)
+    expect(isRevoked(new Date('2026-07-01T00:00:00.000Z'), NOW)).toBe(true)
+  })
+
+  it('a FUTURE revoked_at ⇒ NOT revoked — the module compares, it does not null-check', () => {
+    // `deleteApiKeys_` rejects `revoked_at > now()`. Restating the rule as
+    // "has a revoked_at" would fork it permissively and let this key through.
+    expect(isRevoked('2099-01-01T00:00:00.000Z', NOW)).toBe(false)
+  })
+
+  it('exactly now ⇒ revoked (the guard is strictly-greater-than)', () => {
+    expect(isRevoked(NOW, NOW)).toBe(true)
+  })
+
+  it('an unparseable value ⇒ NOT revoked — never claim revoked on garbage', () => {
+    expect(isRevoked('not-a-date', NOW)).toBe(false)
+  })
+})
+
+describe('planApiKeyCleanup · requires_revoke drives the apply path', () => {
+  it('counts the unrevoked members of the DELETE set only', () => {
+    const plan = planApiKeyCleanup([
+      { id: 'keep', sales_channels: [live()] },                                  // kept, unrevoked
+      { id: 'del_fresh', sales_channels: [DANGLING] },                           // needs revoke
+      { id: 'del_already', revoked_at: '2026-01-01T00:00:00.000Z', sales_channels: [DANGLING] },
+    ])
+    expect(plan.requires_revoke).toBe(1)
+    expect(plan.delete.find(k => k.id === 'del_fresh')!.revoked).toBe(false)
+    expect(plan.delete.find(k => k.id === 'del_already')!.revoked).toBe(true)
+    // the kept key's revoked flag is reported but never acted on
+    expect(plan.keep[0].revoked).toBe(false)
+  })
+
+  it('reproduces the live shape: 71 to delete, all 71 needing revocation first', () => {
+    const rows = [
+      { id: 'apk_keep', sales_channels: [live()] },
+      ...Array.from({ length: 71 }, (_, i) => ({ id: `apk_o${i}`, sales_channels: [DANGLING] })),
+    ]
+    const plan = planApiKeyCleanup(rows)
+    expect(plan.delete).toHaveLength(71)
+    expect(plan.requires_revoke).toBe(71)
+    expect(plan.refuse).toBeNull()
   })
 })
 
