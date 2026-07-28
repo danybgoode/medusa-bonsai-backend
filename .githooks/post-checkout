@@ -1,9 +1,13 @@
 #!/bin/sh
-# post-merge — fire the prose merge report after a pull that brought new commits.
+# post-checkout — fire the prose merge report after a git operation that brought new commits.
 #
-# This is the AUTOMATIC trigger for scripts/merge-report.mjs. It exists because the prose writers
-# (devin/agy) have no headless auth, so the report cannot live in the GitHub Actions notifier — and
-# that notifier is also out of hosted-minutes quota.
+# This is the ONLY trigger for scripts/merge-report.mjs, and deliberately so. Moving it to a GitHub
+# Actions workflow was considered and rejected: every prose writer in the roster (devin, agy, codex)
+# is an interactive CLI with no headless auth, so a runner has nothing to write with. See
+# Roadmap/09-platform-infra/prose-rail-headless/README.md.
+#
+# The known cost: a hook only fires on the machine that PULLS, so a squash-merge nobody pulled is
+# never reported. That gap is accepted — it is the price of a CLI-only roster.
 #
 # Over-triggering is safe and deliberate: the hook fires on every merge-y git operation, including a
 # pull that fetched nothing. merge-report.mjs owns the once-per-commit guarantee via its state file
@@ -11,9 +15,25 @@
 #
 # Backgrounded and always-true: a prose report must NEVER slow down or fail a git operation.
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-script="$root/scripts/merge-report.mjs"
+
+# Resolve paths from the MAIN checkout, never from "$root" — in a linked worktree "$root" is the
+# worktree, and BOTH of the things below break there. Fixed 2026-07-28 after finding the hook had
+# been silently dead in every worktree; this repo runs several at a time.
+#
+#   1. `.git` is a FILE in a worktree, so "$root/.git/<log>" fails with "Not a directory".
+#   2. The app repos borrow the root repo's scripts/ via ../../ — correct from apps/<name>, but
+#      from apps/<name>/.worktrees/<wt> that resolves to apps/<name>/scripts, which does not exist.
+#      The hook then hit its own `[ -f ] || exit 0` guard and vanished without a word.
+#
+# `--git-common-dir` points at the MAIN clone's git dir from anywhere, so its parent is the main
+# checkout. It can answer relatively (plain `.git`), hence the absolutise step.
+gitdir="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+case "$gitdir" in /*) ;; *) gitdir="$root/$gitdir" ;; esac
+main_root="$(CDPATH= cd -- "$(dirname -- "$gitdir")" 2>/dev/null && pwd)" || exit 0
+
+script="$main_root/scripts/merge-report.mjs"
 # App repos have no scripts/ of their own — they borrow the root repo's copy.
-[ -f "$script" ] || script="$root/../../scripts/merge-report.mjs"
+[ -f "$script" ] || script="$main_root/../../scripts/merge-report.mjs"
 [ -f "$script" ] || exit 0
-( cd "$root" && node "$script" >>"$root/.git/merge-report.log" 2>&1 || true ) &
+( cd "$root" && node "$script" >>"$gitdir/merge-report.log" 2>&1 || true ) &
 exit 0
