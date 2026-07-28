@@ -30,6 +30,9 @@ import {
   FLAG_FETCH_TIMEOUT_MS,
   type FlagRow,
 } from './flags-cache'
+import { parseFlagProviderMode } from './flag-provider-mode'
+import { evaluateGoldenBooleanFlag } from './golden-flag-provider'
+import { createFlagShadowObserver } from './flag-shadow-observation'
 
 export type FlagKey =
   | 'checkout.stripe_enabled'
@@ -167,6 +170,12 @@ const TABLE = 'platform_flags'
 let cache: { rows: FlagRow[] | null; fetchedAt: number | null } = { rows: null, fetchedAt: null }
 let inflight: Promise<void> | null = null
 
+// One control-plane-only record per flag/snapshot in each process. Shadow mode
+// is parity evidence, never request telemetry: it includes no customer data.
+const recordShadowObservation = createFlagShadowObserver((observation) => {
+  console.info('[golden-beans:flag-shadow]', JSON.stringify(observation))
+})
+
 /**
  * Read every flag row from Supabase, bounded to ~2 s (no retries) so a hung read can't
  * stall checkout. Returns null on timeout / error (an EMPTY table returns [] →
@@ -228,5 +237,28 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
   } catch {
     // Defensive: refreshIfStale already swallows errors, but never let a flag read throw.
   }
-  return resolveFlag(cache.rows, flag, DEFAULT_FLAGS)
+  const localValue = resolveFlag(cache.rows, flag, DEFAULT_FLAGS)
+  const mode = parseFlagProviderMode(process.env.GOLDEN_BEANS_FLAG_PROVIDER_MODE)
+
+  if (mode === 'local') return localValue
+
+  // A missing Golden definition must preserve the durable local value, even
+  // when an operator has deliberately overridden the compile-time default.
+  const golden = evaluateGoldenBooleanFlag(flag, localValue)
+  if (!golden) return localValue
+
+  if (mode === 'shadow') {
+    recordShadowObservation({
+      flagKey: flag,
+      defaultValue: DEFAULT_FLAGS[flag],
+      localValue,
+      goldenValue: golden.value,
+      snapshotVersion: golden.snapshotVersion,
+      flagVersion: golden.flagVersion,
+      reason: golden.reason,
+    })
+    return localValue
+  }
+
+  return golden.value
 }
