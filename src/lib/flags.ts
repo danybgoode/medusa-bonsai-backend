@@ -30,25 +30,29 @@ import {
   FLAG_FETCH_TIMEOUT_MS,
   type FlagRow,
 } from './flags-cache'
-import { parseFlagProviderMode } from './flag-provider-mode'
+import {
+  FLAG_CUTOVER_CONTRACT_VERSION,
+  parseFlagCutoverManifest,
+  parseGoldenFlagEnvironment,
+  type FlagCutoverManifest,
+  type FlagProviderMode,
+} from './flag-provider-mode'
+import {
+  BACKEND_FLAG_CATALOG,
+  BACKEND_FLAG_DEFAULTS,
+  BACKEND_FLAG_KEYS,
+  type FlagKey,
+} from './flag-catalog'
 import { evaluateGoldenBooleanFlag } from './golden-flag-provider'
 import { evaluateDurableGoldenBooleanFlag } from './golden-flag-mirror'
 import { getDurableGoldenSnapshot } from './golden-flag-mirror-store'
-import { createFlagShadowObserver } from './flag-shadow-observation'
+import {
+  createFlagAuthorityObserver,
+  createFlagShadowObserver,
+  type FlagAuthority,
+} from './flag-shadow-observation'
 
-export type FlagKey =
-  | 'checkout.stripe_enabled'
-  | 'checkout.rental_pricing_enabled'
-  | 'shipping.envia_enabled'
-  | 'shipping.correos_enabled'
-  | 'shipping.arranged_only_enabled'
-  | 'ml.sync_enabled'
-  | 'ml.orders_enabled'
-  | 'ml.sync_paywall_enabled'
-  | 'ops.profit_enabled'
-  | 'ml.publish_enabled'
-  | 'catalog.inventory_channels_enabled'
-  | 'catalog.bulk_enabled'
+export type { FlagKey } from './flag-catalog'
 
 /**
  * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
@@ -149,20 +153,7 @@ export type FlagKey =
  *    action, done only after Daniel's live money-path smoke (placing a real
  *    arranged order via pago directo).
  */
-const DEFAULT_FLAGS: Record<FlagKey, boolean> = {
-  'checkout.stripe_enabled': true,
-  'checkout.rental_pricing_enabled': false,
-  'shipping.envia_enabled': false,
-  'shipping.correos_enabled': false,
-  'shipping.arranged_only_enabled': false,
-  'ml.sync_enabled': false,
-  'ml.orders_enabled': false,
-  'ml.sync_paywall_enabled': false,
-  'ops.profit_enabled': false,
-  'ml.publish_enabled': false,
-  'catalog.inventory_channels_enabled': false,
-  'catalog.bulk_enabled': false,
-}
+const DEFAULT_FLAGS = BACKEND_FLAG_DEFAULTS
 
 const TABLE = 'platform_flags'
 
@@ -187,6 +178,19 @@ const recordShadowObservation = createFlagShadowObserver((observation) => {
     console.info(line)
   } catch {
     // Shadow evidence must never affect a feature decision.
+  }
+})
+
+const recordAuthorityObservation = createFlagAuthorityObserver((observation) => {
+  try {
+    const line = `[golden-beans:flag-authority] ${JSON.stringify(observation)}`
+    if (typeof process !== 'undefined' && typeof process.stdout?.write === 'function') {
+      process.stdout.write(`${line}\n`)
+      return
+    }
+    console.info(line)
+  } catch {
+    // Authority evidence must never affect a feature decision.
   }
 })
 
@@ -247,27 +251,136 @@ async function refreshIfStale(): Promise<void> {
  */
 export async function isEnabled(flag: FlagKey): Promise<boolean> {
   try {
+    const decision = await resolveFlagDecision(flag, getConfiguredFlagCutoverManifest())
+    maybeRecordAuthority(decision)
+    return decision.resolvedValue
+  } catch {
+    return DEFAULT_FLAGS[flag]
+  }
+}
+
+type FlagDecision = {
+  flagKey: FlagKey
+  configuredMode: FlagProviderMode
+  manifest: FlagCutoverManifest<FlagKey>
+  authority: FlagAuthority
+  defaultValue: boolean
+  localValue: boolean
+  resolvedValue: boolean
+  goldenValue?: boolean
+  snapshotVersion?: number
+  flagVersion?: number
+  reason?: string
+}
+
+export type BackendFlagAuthorityReportEntry = Omit<
+  (typeof BACKEND_FLAG_CATALOG)[number],
+  'owners'
+> & {
+  owners: readonly string[]
+  configuredMode: FlagProviderMode
+  authority: FlagAuthority
+  localValue: boolean
+  resolvedValue: boolean
+  goldenValue?: boolean
+  snapshotVersion?: number
+  flagVersion?: number
+  reason?: string
+  matchesLocal?: boolean
+}
+
+export type BackendFlagAuthorityReport = {
+  contractVersion: typeof FLAG_CUTOVER_CONTRACT_VERSION
+  service: 'medusa-backend'
+  environment?: 'development' | 'preview' | 'production'
+  manifest: {
+    source: FlagCutoverManifest<FlagKey>['source']
+    valid: boolean
+    baseline: FlagProviderMode
+    errors: readonly string[]
+  }
+  snapshotVersions: readonly number[]
+  snapshotCoverage: {
+    required: number
+    observed: number
+    complete: boolean
+  }
+  consistentSnapshot: boolean
+  parityMismatches: readonly FlagKey[]
+  flags: readonly BackendFlagAuthorityReportEntry[]
+}
+
+/**
+ * Returns only the resolved, serializable status. The raw env string is never
+ * exposed because it is operational configuration rather than report data.
+ */
+export function getConfiguredFlagCutoverManifest(): FlagCutoverManifest<FlagKey> {
+  return parseFlagCutoverManifest(
+    process.env.GOLDEN_BEANS_FLAG_CUTOVER,
+    BACKEND_FLAG_KEYS,
+    process.env.GOLDEN_BEANS_FLAG_PROVIDER_MODE,
+  )
+}
+
+async function resolveFlagDecision(
+  flag: FlagKey,
+  manifest: FlagCutoverManifest<FlagKey>,
+): Promise<FlagDecision> {
+  try {
     await refreshIfStale()
   } catch {
     // Defensive: refreshIfStale already swallows errors, but never let a flag read throw.
   }
   const localValue = resolveFlag(cache.rows, flag, DEFAULT_FLAGS)
-  const mode = parseFlagProviderMode(process.env.GOLDEN_BEANS_FLAG_PROVIDER_MODE)
+  const configuredMode = manifest.modes[flag] ?? 'local'
+  const base = {
+    flagKey: flag,
+    configuredMode,
+    manifest,
+    defaultValue: DEFAULT_FLAGS[flag],
+    localValue,
+  }
 
-  if (mode === 'local') return localValue
+  if (configuredMode === 'local') {
+    return {
+      ...base,
+      authority: 'local',
+      resolvedValue: localValue,
+    }
+  }
 
   // A missing Golden definition must preserve the durable local value, even
   // when an operator has deliberately overridden the compile-time default.
   const golden = evaluateGoldenBooleanFlag(flag, localValue)
   if (!golden) {
-    if (mode !== 'golden') return localValue
+    if (configuredMode !== 'golden') {
+      return {
+        ...base,
+        authority: 'local',
+        resolvedValue: localValue,
+      }
+    }
     const durableSnapshot = await getDurableGoldenSnapshot()
-    return durableSnapshot
-      ? evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, localValue).value
-      : localValue
+    if (!durableSnapshot) {
+      return {
+        ...base,
+        authority: 'local',
+        resolvedValue: localValue,
+      }
+    }
+    const durable = evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, localValue)
+    return {
+      ...base,
+      authority: 'golden_durable',
+      resolvedValue: durable.value,
+      goldenValue: durable.value,
+      snapshotVersion: durable.snapshotVersion,
+      flagVersion: durable.flagVersion,
+      reason: durable.reason,
+    }
   }
 
-  if (mode === 'shadow') {
+  if (configuredMode === 'shadow') {
     recordShadowObservation({
       flagKey: flag,
       defaultValue: DEFAULT_FLAGS[flag],
@@ -277,8 +390,118 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
       flagVersion: golden.flagVersion,
       reason: golden.reason,
     })
-    return localValue
+    return {
+      ...base,
+      authority: 'local',
+      resolvedValue: localValue,
+      goldenValue: golden.value,
+      snapshotVersion: golden.snapshotVersion,
+      flagVersion: golden.flagVersion,
+      reason: golden.reason,
+    }
   }
 
-  return golden.value
+  return {
+    ...base,
+    authority: 'golden_live',
+    resolvedValue: golden.value,
+    goldenValue: golden.value,
+    snapshotVersion: golden.snapshotVersion,
+    flagVersion: golden.flagVersion,
+    reason: golden.reason,
+  }
+}
+
+function maybeRecordAuthority(decision: FlagDecision): void {
+  // A default legacy-local process is intentionally quiet. Once an explicit
+  // staged manifest exists (including an invalid one), every exercised flag
+  // emits one bounded, PII-free proof of its actual authority.
+  if (
+    decision.manifest.source === 'legacy' &&
+    decision.manifest.valid &&
+    decision.configuredMode === 'local'
+  )
+    return
+
+  recordAuthorityObservation({
+    flagKey: decision.flagKey,
+    configuredMode: decision.configuredMode,
+    manifestSource: decision.manifest.source,
+    manifestValid: decision.manifest.valid,
+    authority: decision.authority,
+    defaultValue: decision.defaultValue,
+    localValue: decision.localValue,
+    resolvedValue: decision.resolvedValue,
+    goldenValue: decision.goldenValue,
+    snapshotVersion: decision.snapshotVersion,
+    flagVersion: decision.flagVersion,
+    reason: decision.reason,
+  })
+}
+
+/**
+ * Produces the backend half of the cross-repo cutover report. The closed result
+ * contains catalog/config/snapshot facts only: no request context, actor,
+ * subject, endpoint or credential can enter this shape.
+ */
+export async function getFlagAuthorityReport(): Promise<BackendFlagAuthorityReport> {
+  const manifest = getConfiguredFlagCutoverManifest()
+  const flags: BackendFlagAuthorityReportEntry[] = []
+  for (const catalog of BACKEND_FLAG_CATALOG) {
+    const decision = await resolveFlagDecision(catalog.key, manifest)
+    flags.push({
+      ...catalog,
+      configuredMode: decision.configuredMode,
+      authority: decision.authority,
+      localValue: decision.localValue,
+      resolvedValue: decision.resolvedValue,
+      goldenValue: decision.goldenValue,
+      snapshotVersion: decision.snapshotVersion,
+      flagVersion: decision.flagVersion,
+      reason: decision.reason,
+      matchesLocal:
+        decision.goldenValue === undefined
+          ? undefined
+          : decision.goldenValue === decision.localValue,
+    })
+  }
+
+  const snapshotVersions = [
+    ...new Set(
+      flags.flatMap((flag) =>
+        flag.snapshotVersion === undefined ? [] : [flag.snapshotVersion],
+      ),
+    ),
+  ].sort((left, right) => left - right)
+  const snapshotRequired = flags.filter(
+    (flag) => flag.configuredMode !== 'local',
+  )
+  const snapshotObserved = snapshotRequired.filter(
+    (flag) => flag.snapshotVersion !== undefined,
+  )
+  const snapshotComplete = snapshotObserved.length === snapshotRequired.length
+  const parityMismatches = flags
+    .filter((flag) => flag.matchesLocal === false)
+    .map((flag) => flag.key)
+
+  return {
+    contractVersion: FLAG_CUTOVER_CONTRACT_VERSION,
+    service: 'medusa-backend',
+    environment: parseGoldenFlagEnvironment(process.env.GOLDEN_BEANS_FLAG_ENVIRONMENT),
+    manifest: {
+      source: manifest.source,
+      valid: manifest.valid,
+      baseline: manifest.baseline,
+      errors: manifest.errors,
+    },
+    snapshotVersions,
+    snapshotCoverage: {
+      required: snapshotRequired.length,
+      observed: snapshotObserved.length,
+      complete: snapshotComplete,
+    },
+    consistentSnapshot: snapshotComplete && snapshotVersions.length <= 1,
+    parityMismatches,
+    flags,
+  }
 }
