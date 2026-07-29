@@ -24,6 +24,13 @@ export type GoldenBooleanEvaluation = {
 
 let provider: FlagProvider | undefined
 let started = false
+let configuration:
+  | {
+      baseUrl: string
+      flagReadKey: string
+      environment: string
+    }
+  | undefined
 
 function getProvider(): FlagProvider | undefined {
   // Read configuration lazily so runtime setup cannot permanently cache an
@@ -41,7 +48,23 @@ function getProvider(): FlagProvider | undefined {
     }
     provider = undefined
     started = false
+    configuration = undefined
     return undefined
+  }
+
+  if (
+    provider &&
+    (configuration?.baseUrl !== baseUrl ||
+      configuration.flagReadKey !== flagReadKey ||
+      configuration.environment !== environment)
+  ) {
+    try {
+      provider.shutdown()
+    } catch {
+      // Replacing a rotated credential must not affect a flag decision.
+    }
+    provider = undefined
+    started = false
   }
 
   if (!provider) {
@@ -53,6 +76,7 @@ function getProvider(): FlagProvider | undefined {
       maxStaleMs: 300_000,
       refreshTimeoutMs: 2_000,
     })
+    configuration = { baseUrl, flagReadKey, environment }
   }
 
   if (!started) {

@@ -21,6 +21,7 @@ const cache: { snapshot: FlagSnapshot | undefined; environment: GoldenFlagEnviro
 let inflight: Promise<FlagSnapshot | undefined> | undefined
 const lastSuccessfulPersistByEnvironment = new Map<string, { snapshotVersion: number; at: number }>()
 const persistenceInflightByEnvironment = new Map<string, { snapshotVersion: number; token: symbol }>()
+let lastPersistenceFailure: string | undefined
 
 /** Never let an out-of-order provider refresh or database read roll back the local LKG snapshot. */
 function retainInMemorySnapshot(snapshot: FlagSnapshot): void {
@@ -47,6 +48,24 @@ function recordSuccessfulPersistence(snapshot: FlagSnapshot): void {
     snapshotVersion: snapshot.snapshotVersion,
     at: Date.now(),
   })
+  lastPersistenceFailure = undefined
+}
+
+function recordPersistenceFailure(snapshot: FlagSnapshot): void {
+  const fingerprint = `${snapshot.environment}:${snapshot.snapshotVersion}`
+  if (lastPersistenceFailure === fingerprint) return
+  lastPersistenceFailure = fingerprint
+  try {
+    process.stderr.write(
+      `[golden-beans:flag-mirror-persist] ${JSON.stringify({
+        environment: snapshot.environment,
+        snapshotVersion: snapshot.snapshotVersion,
+        ok: false,
+      })}\n`,
+    )
+  } catch {
+    // A diagnostic must never affect the already-computed flag decision.
+  }
 }
 
 export function scheduleDurableGoldenSnapshot(snapshot: FlagSnapshot): void {
@@ -78,9 +97,11 @@ export function scheduleDurableGoldenSnapshot(snapshot: FlagSnapshot): void {
           (result as { accepted?: unknown }).accepted === true
         ) {
           recordSuccessfulPersistence(snapshot)
+        } else {
+          recordPersistenceFailure(snapshot)
         }
       })
-      .catch(() => undefined)
+      .catch(() => recordPersistenceFailure(snapshot))
       .finally(() => {
         if (persistenceInflightByEnvironment.get(snapshot.environment)?.token === token) {
           persistenceInflightByEnvironment.delete(snapshot.environment)

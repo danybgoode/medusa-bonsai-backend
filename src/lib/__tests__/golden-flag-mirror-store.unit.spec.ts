@@ -86,6 +86,7 @@ async function flushPersistence(): Promise<void> {
 
 describe('Golden flag durable mirror store monotonicity', () => {
   const originalEnv = process.env
+  let stderr: jest.SpyInstance
 
   beforeEach(() => {
     process.env = {
@@ -96,9 +97,11 @@ describe('Golden flag durable mirror store monotonicity', () => {
     mockQuery.select.mockReturnValue(mockQuery)
     mockQuery.eq.mockReturnValue(mockQuery)
     mockRpc.mockResolvedValue(accepted(1))
+    stderr = jest.spyOn(process.stderr, 'write').mockReturnValue(true)
   })
 
   afterEach(() => {
+    stderr.mockRestore()
     process.env = originalEnv
   })
 
@@ -149,6 +152,12 @@ describe('Golden flag durable mirror store monotonicity', () => {
     store.scheduleDurableGoldenSnapshot(staleSnapshot)
 
     expect(mockRpc).toHaveBeenCalledTimes(2)
+    expect(stderr).toHaveBeenCalledTimes(1)
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '"environment":"production","snapshotVersion":7,"ok":false',
+      ),
+    )
   })
 
   it('keeps persistence acknowledgements monotonic when accepted responses complete out of order', async () => {

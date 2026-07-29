@@ -99,4 +99,18 @@ describe('Golden flag provider telemetry', () => {
     )
     expect(mockTrackFlagEvaluation).not.toHaveBeenCalled()
   })
+
+  it('replaces the provider after a non-empty credential rotation', () => {
+    const { evaluateGoldenBooleanFlag } = require('../golden-flag-provider')
+
+    expect(evaluateGoldenBooleanFlag('checkout.stripe_enabled', false)?.value).toBe(true)
+    process.env.GOLDEN_BEANS_FLAG_READ_KEY = 'gb_flag_read_rotated'
+    expect(evaluateGoldenBooleanFlag('checkout.stripe_enabled', false)?.value).toBe(true)
+
+    expect(mockCreateFlagProvider).toHaveBeenCalledTimes(2)
+    expect(mockShutdown).toHaveBeenCalledTimes(1)
+    expect(mockCreateFlagProvider).toHaveBeenLastCalledWith(
+      expect.objectContaining({ flagReadKey: 'gb_flag_read_rotated' }),
+    )
+  })
 })
