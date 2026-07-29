@@ -5,14 +5,20 @@
  * ingest key here. Construction and refresh are intentionally non-blocking;
  * callers keep their local result whenever a snapshot is unavailable or stale.
  */
-import { createFlagProvider, type FlagProvider, type FlagResolutionReason } from '@golden-beans/sdk'
+import {
+  createFlagProvider,
+  type FlagProvider,
+  type FlagResolutionReason,
+} from '@golden-beans/sdk'
 import { parseGoldenFlagEnvironment } from './flag-provider-mode'
 import { scheduleDurableGoldenSnapshot } from './golden-flag-mirror-store'
+import { trackGoldenFlagEvaluation } from './golden-flag-telemetry'
 
 export type GoldenBooleanEvaluation = {
   value: boolean
   snapshotVersion: number
   flagVersion?: number
+  variant?: string
   reason: FlagResolutionReason
 }
 
@@ -24,7 +30,9 @@ function getProvider(): FlagProvider | undefined {
   // absent credential during module evaluation.
   const baseUrl = process.env.GROWTH_ENGINE_URL?.replace(/\/+$/, '')
   const flagReadKey = process.env.GOLDEN_BEANS_FLAG_READ_KEY
-  const environment = parseGoldenFlagEnvironment(process.env.GOLDEN_BEANS_FLAG_ENVIRONMENT)
+  const environment = parseGoldenFlagEnvironment(
+    process.env.GOLDEN_BEANS_FLAG_ENVIRONMENT,
+  )
   if (!baseUrl || !flagReadKey || !environment) {
     try {
       provider?.shutdown()
@@ -71,11 +79,25 @@ export function evaluateGoldenBooleanFlag(
     if (!snapshot) return undefined
     scheduleDurableGoldenSnapshot(snapshot)
 
-    const details = currentProvider.resolveBooleanEvaluation(flagKey, defaultValue)
+    const details = currentProvider.resolveBooleanEvaluation(
+      flagKey,
+      defaultValue,
+    )
+    if (details.flagVersion !== undefined && details.variant) {
+      void trackGoldenFlagEvaluation({
+        flagKey,
+        flagVersion: details.flagVersion,
+        variant: details.variant,
+        reason: details.reason,
+        snapshotVersion: snapshot.snapshotVersion,
+        environment: snapshot.environment,
+      })
+    }
     return {
       value: details.value,
       snapshotVersion: snapshot.snapshotVersion,
       flagVersion: details.flagVersion,
+      variant: details.variant,
       reason: details.reason,
     }
   } catch {
