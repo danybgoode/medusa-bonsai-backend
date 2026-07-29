@@ -6,6 +6,11 @@ import { isHiddenCatalogProduct } from '../_utils/support'
 import { resolveSellerProductIds } from '../_utils/seller-catalog-query'
 import { isEnabled } from '../../../lib/flags'
 import {
+  MARKETPLACE_CHANNEL_FIELDS,
+  filterToMarketplaceChannel,
+  resolveMarketReadGate,
+} from '../_utils/market-read'
+import {
   carMake, carYear, carTransmission, carFuel,
   matchesBrand, matchesModel, matchesYearFrom, matchesYearTo, matchesKmFrom, matchesKmTo,
   toCarFacetPoolEntry,
@@ -19,6 +24,21 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const pageNum = Math.max(1, parseInt(q.page ?? '1'))
   const limitParam = Math.min(parseInt(q.limit ?? String(PAGE_SIZE)), 100)
 
+  // ── Step 0: Resolve the market this read is for ────────────────────────────
+  // NEW enforcement (epic market-architecture-foundation, D1): before this, the
+  // marketplace catalog was every published product in the database, with no Sales
+  // Channel constraint whatsoever. `?market=` is optional and defaults to `mx` for
+  // the pre-launch window; an unknown market 400s, a market whose marketplace is
+  // `invitation` (us) 404s, and an open market whose channel cannot be addressed
+  // 503s. None of those return rows — a marketplace read must never answer with
+  // another market's catalog, and it must never answer an empty 200 that reads as
+  // "this market has no products".
+  const gate = resolveMarketReadGate(q.market, process.env)
+  if (!gate.ok) {
+    res.status(gate.status).json(gate.body)
+    return
+  }
+
   const remoteQuery = req.scope.resolve('remoteQuery')
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
@@ -27,6 +47,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     entity: 'product',
     fields: [
       'id', 'title', 'description', 'status', 'metadata', 'created_at',
+      ...MARKETPLACE_CHANNEL_FIELDS,
       'variants.*', 'variants.prices.*',
       'variants.inventory_items.inventory.location_levels.stocked_quantity',
       'variants.inventory_items.inventory.location_levels.reserved_quantity',
@@ -38,6 +59,16 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     filters: { status: 'published' },
     pagination: { take: 2000, skip: 0 },
   })
+
+  // ── Step 1b: Marketplace publication boundary (D1/D3) ──────────────────────
+  // Sales Channel membership IS marketplace-publication truth. A published product
+  // that is not in this market's channel exists, is buyable on its own shop, and is
+  // simply not admitted to this country marketplace — so it is dropped HERE, before
+  // seller enrichment, rather than being filtered later next to the metadata
+  // toggles: those are per-listing visibility preferences, this is a boundary.
+  // Owned-shop reads (`/store/sellers/:slug/products`) deliberately do NOT do this
+  // (D4) — that is the whole point of the epic.
+  const marketProducts = filterToMarketplaceChannel(products ?? [], gate.channel_id)
 
   // ── Step 2: Build product_id → seller map ──────────────────────────────────
   // Fetch all sellers (plain list, no link traversal)
@@ -59,7 +90,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   )
 
   // ── Step 3: Map to listing shape ──────────────────────────────────────────
-  let listings = (products ?? []).map((p: any) =>
+  let listings = marketProducts.map((p: any) =>
     toListingShape(p, productToSeller.get(p.id))
   )
 
@@ -166,5 +197,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const offset = (pageNum - 1) * limitParam
   const page = listings.slice(offset, offset + limitParam)
 
-  res.json({ listings: page, total, page: pageNum, limit: limitParam, offset })
+  // `market_code` on every marketplace response (D10): an agent reading this must
+  // never have to infer which country's catalog it received. Additive — existing
+  // clients ignore it.
+  res.json({ listings: page, total, page: pageNum, limit: limitParam, offset, market_code: gate.market })
 }

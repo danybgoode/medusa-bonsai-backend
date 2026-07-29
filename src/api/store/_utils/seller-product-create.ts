@@ -22,6 +22,8 @@ import {
 } from './inventory'
 import { resolveDefaultShippingProfileId } from './fulfillment'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
+import { planPublicationChannel, resolvePublicationIntent } from './product-publication'
+import type { MarketCode } from '../../../lib/markets'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 export function generateSku(): string {
@@ -81,6 +83,22 @@ export interface CreateProductBody {
    * shipping.arranged_only_enabled is ON (checkout-options ignores it OFF).
    */
   delivery_mode?: 'carrier' | 'arranged' | null
+  /**
+   * MARKETPLACE PUBLICATION INTENT, stated by the call site (epic
+   * market-architecture-foundation, story 1.3).
+   *
+   *   omitted  — publish into `DEFAULT_MARKET` (`mx`). Byte-identical to the
+   *              behaviour every existing caller has today.
+   *   'mx'     — the same thing, said out loud.
+   *   null     — OWNED-SHOP ONLY: create the product with no marketplace Sales
+   *              Channel. It stays fully visible on the seller's own shop,
+   *              subdomain, custom domain and embed, and never appears in a
+   *              country marketplace.
+   *
+   * A market whose marketplace is not open (`us` is `invitation`) is REFUSED, not
+   * silently downgraded to Mexico's channel.
+   */
+  publish_to_market?: MarketCode | null
 }
 
 const MAX_OPTION_DIMENSIONS = 3
@@ -236,12 +254,27 @@ export async function createSellerProduct(
     ...(body.metadata ?? {}),
   }
 
-  // ── Resolve the sales channel ────────────────────────────────────────────
+  // ── Resolve the sales channel from the STATED publication intent ──────────
   // The product MUST be in the store's sales channel, otherwise the standard
   // (channel-scoped) /store/products endpoint 404s and checkout fails with
   // "Product not found" even though the custom /store/listings endpoint shows it.
-  let salesChannelId: string | undefined = process.env.MEDUSA_SALES_CHANNEL_ID || undefined
-  if (!salesChannelId) {
+  //
+  // What changed (story 1.3): the channel is no longer "whatever env var is set" —
+  // it is derived from `body.publish_to_market`, so a caller can create an
+  // owned-shop-only product (no channel at all) and a caller naming a market whose
+  // marketplace is not open is refused instead of being handed Mexico's channel.
+  // The default intent resolves to exactly the previous chain (env var, then the
+  // store default), so existing callers are unchanged.
+  const publicationPlan = planPublicationChannel(
+    resolvePublicationIntent(body.publish_to_market),
+    process.env,
+  )
+  if (publicationPlan.status === 'refused') {
+    return { ok: false, status: 422, message: publicationPlan.message }
+  }
+  let salesChannelId: string | undefined =
+    publicationPlan.status === 'channel' ? publicationPlan.channel_id : undefined
+  if (publicationPlan.status === 'store_default') {
     try {
       const storeService: any = scope.resolve(Modules.STORE)
       const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
