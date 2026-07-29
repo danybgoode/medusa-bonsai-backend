@@ -3,7 +3,11 @@
  *
  * Deletes all duplicate / unused sales channels, keeping only:
  *   1. The store's default_sales_channel_id
- *   2. The channel referenced by MEDUSA_SALES_CHANNEL_ID env var
+ *   2. Every channel a registry market resolves to — today that is the MX
+ *      marketplace channel (MEDUSA_SALES_CHANNEL_ID), tomorrow it is whatever the
+ *      registry declares. Derived, never hand-listed: this route is a SIBLING write
+ *      primitive of `cleanup-default-data.ts` step 3, and guarding one door while
+ *      leaving the other open is the failure mode this epic keeps hitting.
  *
  * Safe: dry_run=true (default) only reports what would be deleted.
  * Pass { dry_run: false } to actually delete.
@@ -14,6 +18,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { deleteSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
+import { protectedSalesChannelIds } from '../../../lib/market-medusa'
 
 function authed(req: MedusaRequest): boolean {
   const secret = process.env.MEDUSA_INTERNAL_SECRET
@@ -34,10 +39,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const [store] = await storeService.listStores(
     {}, { select: ['id', 'default_sales_channel_id'], take: 1 },
   )
-  const keepIds = new Set<string>([
-    store?.default_sales_channel_id,
-    process.env.MEDUSA_SALES_CHANNEL_ID ?? '',
-  ].filter(Boolean))
+  const keepIds = new Set<string>(
+    protectedSalesChannelIds(process.env, store?.default_sales_channel_id ?? null),
+  )
 
   // List all channels
   const all: any[] = await salesChannelService.listSalesChannels(
