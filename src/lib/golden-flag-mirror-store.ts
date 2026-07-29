@@ -21,14 +21,58 @@ const cache: { snapshot: FlagSnapshot | undefined; environment: GoldenFlagEnviro
 let inflight: Promise<FlagSnapshot | undefined> | undefined
 const lastSuccessfulPersistByEnvironment = new Map<string, { snapshotVersion: number; at: number }>()
 const persistenceInflightByEnvironment = new Map<string, { snapshotVersion: number; token: symbol }>()
+let lastPersistenceFailure: string | undefined
+
+/** Never let an out-of-order provider refresh or database read roll back the local LKG snapshot. */
+function retainInMemorySnapshot(snapshot: FlagSnapshot): void {
+  if (
+    cache.environment === snapshot.environment &&
+    cache.snapshot &&
+    cache.snapshot.snapshotVersion > snapshot.snapshotVersion
+  )
+    return
+  cache.snapshot = snapshot
+  cache.environment = snapshot.environment
+  cache.fetchedAt = Date.now()
+}
+
+/**
+ * RPC responses can arrive in a different order from their database commits.
+ * Keep the local persistence acknowledgement monotonic too, so a delayed older
+ * success cannot make that older version look like the latest durable write.
+ */
+function recordSuccessfulPersistence(snapshot: FlagSnapshot): void {
+  const previous = lastSuccessfulPersistByEnvironment.get(snapshot.environment)
+  if (previous && previous.snapshotVersion > snapshot.snapshotVersion) return
+  lastSuccessfulPersistByEnvironment.set(snapshot.environment, {
+    snapshotVersion: snapshot.snapshotVersion,
+    at: Date.now(),
+  })
+  lastPersistenceFailure = undefined
+}
+
+function recordPersistenceFailure(snapshot: FlagSnapshot): void {
+  const fingerprint = `${snapshot.environment}:${snapshot.snapshotVersion}`
+  if (lastPersistenceFailure === fingerprint) return
+  lastPersistenceFailure = fingerprint
+  try {
+    process.stderr.write(
+      `[golden-beans:flag-mirror-persist] ${JSON.stringify({
+        environment: snapshot.environment,
+        snapshotVersion: snapshot.snapshotVersion,
+        ok: false,
+      })}\n`,
+    )
+  } catch {
+    // A diagnostic must never affect the already-computed flag decision.
+  }
+}
 
 export function scheduleDurableGoldenSnapshot(snapshot: FlagSnapshot): void {
   // A snapshot which reached the live provider is already contract-validated. Retain it in-process
   // immediately; the RPC below makes that same last-known-good value durable without making a flag
   // decision wait for database I/O.
-  cache.snapshot = snapshot
-  cache.environment = snapshot.environment
-  cache.fetchedAt = Date.now()
+  retainInMemorySnapshot(snapshot)
 
   const previous = lastSuccessfulPersistByEnvironment.get(snapshot.environment)
   const now = Date.now()
@@ -44,15 +88,20 @@ export function scheduleDurableGoldenSnapshot(snapshot: FlagSnapshot): void {
         p_snapshot_version: snapshot.snapshotVersion,
         p_snapshot: snapshot,
       }))
-      .then(({ error }) => {
-        if (!error) {
-          lastSuccessfulPersistByEnvironment.set(snapshot.environment, {
-            snapshotVersion: snapshot.snapshotVersion,
-            at: Date.now(),
-          })
+      .then(({ data, error }) => {
+        const result = Array.isArray(data) ? data[0] : data
+        if (
+          !error &&
+          result &&
+          typeof result === 'object' &&
+          (result as { accepted?: unknown }).accepted === true
+        ) {
+          recordSuccessfulPersistence(snapshot)
+        } else {
+          recordPersistenceFailure(snapshot)
         }
       })
-      .catch(() => undefined)
+      .catch(() => recordPersistenceFailure(snapshot))
       .finally(() => {
         if (persistenceInflightByEnvironment.get(snapshot.environment)?.token === token) {
           persistenceInflightByEnvironment.delete(snapshot.environment)
@@ -114,8 +163,7 @@ export async function getDurableGoldenSnapshot(): Promise<FlagSnapshot | undefin
   inflight = fetchDurableGoldenSnapshot(environment)
     .then((snapshot) => {
       if (snapshot) {
-        cache.snapshot = snapshot
-        cache.environment = environment
+        retainInMemorySnapshot(snapshot)
       } else if (cache.environment !== environment) {
         cache.snapshot = undefined
         cache.environment = environment
