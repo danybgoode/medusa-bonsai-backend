@@ -18,6 +18,8 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
+import { DEFAULT_MARKET } from '../../../lib/markets'
+import { setSellerOperatingMarket } from '../../../lib/seller-market'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -43,6 +45,9 @@ interface CreateUnclaimedSellerBody {
   source?: string
   source_url?: string | null
   metadata?: Record<string, unknown>
+  /** Operating market for the imported shop. Defaults to `mx` — the supply
+   *  pipeline scrapes Mexican shops. Never inferred from a locale. */
+  operating_market?: string
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
@@ -52,6 +57,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const name = body.name?.trim()
   if (!name || name.length < 2) {
     return res.status(400).json({ message: 'name is required (min 2 characters)' })
+  }
+
+  // Deliberate default, refused-on-unknown — same contract as the self-serve seam.
+  let marketMetadata: Record<string, unknown>
+  try {
+    marketMetadata = setSellerOperatingMarket(body.metadata ?? {}, body.operating_market ?? DEFAULT_MARKET)
+  } catch (e) {
+    return res.status(422).json({ message: (e as Error).message })
   }
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
@@ -86,7 +99,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     source: body.source?.trim() || 'scraped',
     source_url: sourceUrl,
     verified: false,
-    metadata: body.metadata ?? {},
+    // Stamp the operating market at the entry seam (story 1.2) so an imported shop
+    // never joins the backfill population. `setSellerOperatingMarket` is the ONLY
+    // writer of this key and throws on an unsupported market — see the 422 above.
+    metadata: marketMetadata,
   })
 
   res.status(201).json({ seller, created: true })

@@ -2,6 +2,8 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { extractClerkUserId } from '../../_utils/clerk-auth'
+import { DEFAULT_MARKET } from '../../../../lib/markets'
+import { setSellerOperatingMarket } from '../../../../lib/seller-market'
 
 export function slugify(text: string) {
   return text
@@ -72,10 +74,29 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.json({ seller: existing })
   }
 
-  const body = req.body as { name?: string; slug?: string; description?: string; location?: string }
+  const body = req.body as {
+    name?: string; slug?: string; description?: string; location?: string
+    operating_market?: string
+  }
 
   if (!body.name) {
     return res.status(400).json({ message: 'name is required' })
+  }
+
+  // ── Operating market at the entry seam (story 1.2) ────────────────────────
+  // Every new shop is stamped with a market NOW, so the pre-launch backfill
+  // converges instead of chasing a moving population. The caller may state one;
+  // otherwise we DELIBERATELY default to `mx` — this is a Mexico-native platform
+  // and `us` is invitation-only, so a self-serve signup cannot land there.
+  //
+  // The market is never inferred from the request's language header: locale is
+  // presentation and is a FIELD of a market, never a selector for one. An
+  // unsupported value is refused rather than defaulted.
+  let marketMetadata: Record<string, unknown>
+  try {
+    marketMetadata = setSellerOperatingMarket({}, body.operating_market ?? DEFAULT_MARKET)
+  } catch (e) {
+    return res.status(422).json({ message: (e as Error).message })
   }
 
   // Generate a unique slug. `|| 'tienda'` guards a name/slug that slugifies to
@@ -99,7 +120,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     description: body.description ?? null,
     location: body.location ?? null,
     verified: false,
-    metadata: {},
+    metadata: marketMetadata,
   })
 
   res.status(201).json({ seller })

@@ -18,7 +18,8 @@ import { join, relative, sep } from 'path'
  * cwd is the package root under jest, same convention as `ci-workflow.unit.spec.ts`.
  */
 
-const STORE_API = join(process.cwd(), 'src/api/store')
+const API_ROOT = join(process.cwd(), 'src/api')
+const STORE_API = join(API_ROOT, 'store')
 
 function routeFiles(dir: string): string[] {
   return readdirSync(dir, { recursive: true, encoding: 'utf8' })
@@ -73,6 +74,41 @@ describe('market boundary — population guard', () => {
       expect(source).toMatch(/MARKETPLACE_CHANNEL_FIELDS/)
       // …and use the channel for something.
       expect(source).toMatch(/gate\.channel_id/)
+    },
+  )
+
+  /**
+   * Story 1.2: "new shop creation requires or deliberately defaults an approved
+   * market at the entry seam". Enumerated mechanically for the same reason as
+   * above — there are two seller-create seams today (self-serve and the supply
+   * importer) and a third would otherwise ship un-stamped, quietly re-growing the
+   * backfill population this epic exists to close.
+   *
+   * `src/scripts/panfleto-s1-create-platform-seller.ts` is deliberately out of
+   * scope: it is a one-off `medusa exec` script for a single already-created
+   * platform seller, not a request-time entry seam.
+   */
+  const sellerCreateSeams = routeFiles(API_ROOT).filter((file) => /createSellers\(/.test(read(file)))
+
+  it('finds both seller-create entry seams', () => {
+    expect(sellerCreateSeams.map(rel).sort()).toEqual([
+      'src/api/internal/sellers/route.ts',
+      'src/api/store/sellers/me/route.ts',
+    ].map((p) => p.split('/').join(sep)))
+  })
+
+  it.each(sellerCreateSeams.map((file) => [rel(file), file]))(
+    '%s stamps operating_market through the one writer, and never from a locale',
+    (_name, file) => {
+      const source = read(file as string)
+      expect(source).toMatch(/setSellerOperatingMarket\(/)
+      // Written into the row, not merely computed.
+      expect(source).toMatch(/metadata:\s*marketMetadata/)
+      // No country inferred from the browser's language. Matched on the HEADER
+      // READ, not on the string: banning the word would redden a comment that
+      // explains the rule, and a guard that rejects correct code is worse than one
+      // that misses a rare fault (LEARNINGS) — it teaches people to delete it.
+      expect(source).not.toMatch(/headers\s*\[\s*['"]accept-language/i)
     },
   )
 
