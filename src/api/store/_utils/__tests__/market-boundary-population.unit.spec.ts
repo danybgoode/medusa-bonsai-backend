@@ -152,4 +152,66 @@ describe('market boundary — population guard', () => {
       expect(read(file)).toMatch(/toSellerShape/)
     }
   })
+
+  /**
+   * Publication and native-price writers are a population too. The original
+   * correction covered the shared seller-create helper while two sibling writers
+   * could still adopt Store.default_sales_channel_id, and the update helper still
+   * hard-coded MXN. Derive both sets from the workflow calls so a new door is a
+   * reviewed change.
+   */
+  const apiTsFiles = readdirSync(API_ROOT, { recursive: true, encoding: 'utf8' })
+    .filter((entry) => entry.endsWith('.ts') && !entry.includes(`__tests__${sep}`))
+    .map((entry) => join(API_ROOT, entry))
+
+  const publicationWriters = apiTsFiles.filter((file) =>
+    /(?:createProductsWorkflow|linkProductsToSalesChannelWorkflow)\([^)]*\)\.run\(/.test(read(file)),
+  )
+
+  it('enumerates every market-publication writer and bans Store-default publication', () => {
+    expect(publicationWriters.map(rel).sort()).toEqual([
+      'src/api/internal/market-backfill/route.ts',
+      'src/api/internal/print/placement-product/route.ts',
+      'src/api/store/_utils/seller-product-create.ts',
+    ].map((p) => p.split('/').join(sep)))
+
+    for (const file of publicationWriters) {
+      const source = read(file)
+      expect({ file: rel(file), storeDefault: /default_sales_channel_id/.test(source) })
+        .toEqual({ file: rel(file), storeDefault: false })
+      expect(source).toMatch(/planProductPublication|planMarketplaceLinkBackfill/)
+    }
+  })
+
+  it('the retired unscoped backfill cannot mutate publication membership', () => {
+    const source = read(join(API_ROOT, 'internal/backfill-sales-channel/route.ts'))
+    const post = source.slice(source.indexOf('export async function POST'))
+    expect(post).toMatch(/status\(410\)/)
+    expect(post).toMatch(/\/internal\/market-backfill/)
+    expect(post).not.toMatch(
+      /linkProductsToSalesChannelWorkflow|createProductsWorkflow|updateProductsWorkflow|default_sales_channel_id/,
+    )
+  })
+
+  const sellerMoneyWriters = apiTsFiles.filter((file) =>
+    /createProductsWorkflow|createProductVariantsWorkflow|addPrices\(\[/.test(read(file))
+      && /currency_code/.test(read(file)),
+  )
+
+  it('every seller-product money writer uses the registry currency seam', () => {
+    expect(sellerMoneyWriters.map(rel).sort()).toEqual([
+      'src/api/internal/print/placement-product/route.ts',
+      'src/api/store/_utils/seller-product-create.ts',
+      'src/api/store/_utils/seller-product-update.ts',
+    ].map((p) => p.split('/').join(sep)))
+
+    for (const file of sellerMoneyWriters) {
+      const source = read(file)
+      expect(source).toMatch(/resolveSellerProductMoneyContext/)
+      expect({ file: rel(file), hardCoded: /currency_code:\s*['"]mxn['"]/.test(source) })
+        .toEqual({ file: rel(file), hardCoded: false })
+      expect({ file: rel(file), callerChosen: /currency_code:\s*\(?body\.currency/.test(source) })
+        .toEqual({ file: rel(file), callerChosen: false })
+    }
+  })
 })

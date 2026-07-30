@@ -23,9 +23,9 @@ import {
 import { resolveDefaultShippingProfileId } from './fulfillment'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
 import { planProductPublication } from './product-publication'
-import type { MarketCode } from '../../../lib/markets'
-import { requireSellerOperatingMarket } from '../../../lib/seller-market'
 import SellerModuleService from '../../../modules/seller/service'
+import { resolveSellerProductMoneyContext } from './product-market-currency'
+import type { MarketCode } from '../../../lib/markets'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 export function generateSku(): string {
@@ -239,22 +239,6 @@ export async function createSellerProduct(
   const typeValue = body.listing_type ?? 'physical'
   const [ptype] = await productService.listProductTypes({ value: typeValue })
 
-  // ── Build metadata ───────────────────────────────────────────────────────
-  const metadata: Record<string, unknown> = {
-    ...(body.condition ? { condition: body.condition } : {}),
-    ...(body.state ? { state: body.state } : {}),
-    ...(body.municipio ? { municipio: body.municipio } : {}),
-    ...(body.location ? { location: body.location } : {}),
-    ...(body.price_cents != null ? { price_cents: body.price_cents } : {}),
-    currency: body.currency ?? 'MXN',
-    listing_type: body.listing_type ?? 'product',
-    delivery_mode: deliveryMode,
-    views: 0,
-    // Category/type-specific structured attributes (brand, size, color, year, km…)
-    ...(body.attrs && Object.keys(body.attrs).length > 0 ? { attrs: body.attrs } : {}),
-    ...(body.metadata ?? {}),
-  }
-
   // ── Resolve the sales channel from the SELLER's market ────────────────────
   // The product MUST be in the store's sales channel, otherwise the standard
   // (channel-scoped) /store/products endpoint 404s and checkout fails with
@@ -271,7 +255,8 @@ export async function createSellerProduct(
   // The seller row is read HERE rather than trusted from the caller: both callers
   // resolve a seller before calling, but neither passes its metadata, and a market
   // that a caller could assert is not a market this function can enforce.
-  let sellerMarket: MarketCode
+  let sellerMarket
+  let currencyCode: string
   try {
     const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
     const [sellerRow] = await sellerService.listSellers({ id: sellerId }, { take: 1 })
@@ -281,10 +266,12 @@ export async function createSellerProduct(
       // how a product lands in the wrong country's marketplace.
       return { ok: false, status: 404, message: 'No se encontró la tienda para este producto.' }
     }
-    sellerMarket = requireSellerOperatingMarket(sellerRow)
+    const money = resolveSellerProductMoneyContext(sellerRow, body.currency)
+    sellerMarket = money.market
+    currencyCode = money.currency_code
   } catch (e) {
-    // `requireSellerOperatingMarket` throws on a stored value we cannot classify.
-    // Repair the row rather than defaulting it — see GET /internal/market-backfill.
+    // Unknown seller markets and caller-selected foreign currencies both fail closed.
+    // Repair the row or request the registry currency; never guess a money rail.
     return { ok: false, status: 422, message: (e as Error).message }
   }
 
@@ -296,6 +283,24 @@ export async function createSellerProduct(
     return { ok: false, status: publicationPlan.http_status, message: publicationPlan.message }
   }
   const salesChannelId = publicationPlan.channel_id
+
+  // ── Build metadata ───────────────────────────────────────────────────────
+  // Currency is stamped LAST so caller metadata cannot counterfeit the market's
+  // money rail. The native Price rows below use this same registry-derived value.
+  const metadata: Record<string, unknown> = {
+    ...(body.condition ? { condition: body.condition } : {}),
+    ...(body.state ? { state: body.state } : {}),
+    ...(body.municipio ? { municipio: body.municipio } : {}),
+    ...(body.location ? { location: body.location } : {}),
+    ...(body.price_cents != null ? { price_cents: body.price_cents } : {}),
+    listing_type: body.listing_type ?? 'product',
+    delivery_mode: deliveryMode,
+    views: 0,
+    // Category/type-specific structured attributes (brand, size, color, year, km…)
+    ...(body.attrs && Object.keys(body.attrs).length > 0 ? { attrs: body.attrs } : {}),
+    ...(body.metadata ?? {}),
+    currency: currencyCode.toUpperCase(),
+  }
 
   // ── Inventory: physical `product` listings are unique-stock items ─────────
   // Managed variants let Medusa's completeCartWorkflow reserve stock on order
@@ -354,7 +359,7 @@ export async function createSellerProduct(
               manage_inventory: manageInventory,
               prices: [{
                 amount: body.variant_prices![buildVariantComboKey(combo)],
-                currency_code: (body.currency ?? 'MXN').toLowerCase(),
+                currency_code: currencyCode,
               }],
             }))
           : [{
@@ -367,7 +372,7 @@ export async function createSellerProduct(
               },
               manage_inventory: manageInventory,
               prices: body.price_cents != null && body.price_cents > 0
-                ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
+                ? [{ amount: body.price_cents, currency_code: currencyCode }]
                 : [],
               ...(body.unit_cost_cents != null
                 ? { metadata: { unit_cost_cents: body.unit_cost_cents } }

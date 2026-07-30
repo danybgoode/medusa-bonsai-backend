@@ -1,6 +1,7 @@
 import type { MedusaIdResolution } from '../../../../lib/market-medusa'
 import {
   marketBackfillBlockingReasons,
+  revalidateLinkOwners,
   stampSellerMarketIfAbsent,
   type MarketBackfillPreconditions,
 } from '../market-backfill'
@@ -130,5 +131,58 @@ describe('stampSellerMarketIfAbsent — one atomic metadata-key update', () => {
     expect(sql).toMatch(/metadata->>'operating_market'/)
     expect(sql).toMatch(/RETURNING id/)
     expect(bindings).toEqual(['mx', 'sel_1'])
+  })
+})
+
+describe('revalidateLinkOwners — concurrent market stamp interleaving', () => {
+  const ownerMap = new Map([
+    ['prod_1', 'sel_1'],
+    ['prod_2', 'sel_2'],
+  ])
+
+  it('allows the link batch only when every live owner is still explicitly in the planned market', async () => {
+    await expect(revalidateLinkOwners({
+      product_ids: ['prod_1', 'prod_2'],
+      owner_seller_by_product: ownerMap,
+      planned_market: 'mx',
+      read_seller: async (id) => ({ id, metadata: { operating_market: 'mx' } }),
+    })).resolves.toEqual([])
+  })
+
+  it('blocks ALL linking when a concurrent US stamp wins after the MX survey', async () => {
+    // Interleaving: survey saw sel_2 with no key (legacy MX), then another writer
+    // stamps US, so stampSellerMarketIfAbsent returns "skipped". The live re-read
+    // must reject the stale MX product plan before the link workflow runs.
+    const failures = await revalidateLinkOwners({
+      product_ids: ['prod_1', 'prod_2'],
+      owner_seller_by_product: ownerMap,
+      planned_market: 'mx',
+      read_seller: async (id) => ({
+        id,
+        metadata: { operating_market: id === 'sel_2' ? 'us' : 'mx' },
+      }),
+    })
+    expect(failures).toEqual([{
+      seller_id: 'sel_2',
+      reason: expect.stringMatching(/live operating_market is us.*planned mx/),
+    }])
+  })
+
+  it('treats a still-absent or unavailable owner as a blocker, never legacy-default MX', async () => {
+    const absent = await revalidateLinkOwners({
+      product_ids: ['prod_1'],
+      owner_seller_by_product: ownerMap,
+      planned_market: 'mx',
+      read_seller: async () => ({ id: 'sel_1', metadata: {} }),
+    })
+    expect(absent[0].reason).toMatch(/legacy_default/)
+
+    const unavailable = await revalidateLinkOwners({
+      product_ids: ['prod_1'],
+      owner_seller_by_product: ownerMap,
+      planned_market: 'mx',
+      read_seller: async () => null,
+    })
+    expect(unavailable[0].reason).toMatch(/unavailable/)
   })
 })

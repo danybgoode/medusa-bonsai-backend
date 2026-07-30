@@ -13,6 +13,8 @@ import type {
   SellerMarketBackfillPlan,
 } from '../../../lib/seller-market'
 import type { ScanWindow } from './scan-window'
+import type { MarketCode } from '../../../lib/markets'
+import { readSellerOperatingMarket } from '../../../lib/seller-market'
 
 export interface OwnershipScanFailure {
   readonly seller_id: string
@@ -107,4 +109,60 @@ export async function stampSellerMarketIfAbsent(
   )
   const changed = result.rowCount ?? result.rows?.length ?? 0
   return changed > 0 ? 'updated' : 'skipped'
+}
+
+export interface LinkOwnerRevalidationInput {
+  readonly product_ids: readonly string[]
+  readonly owner_seller_by_product: ReadonlyMap<string, string>
+  readonly planned_market: MarketCode
+  readonly read_seller: (sellerId: string) => Promise<unknown | null>
+}
+
+/**
+ * Re-read every owner immediately before the channel-link workflow.
+ *
+ * The survey is intentionally read-only and therefore stale by apply time. In
+ * particular, a concurrent `operating_market=us` stamp can make our conditional MX
+ * stamp return "skipped". That concurrent stamp wins, but its products must not then
+ * be linked using the old survey. This seam makes the interleaving deterministic in
+ * tests and blocks the whole link batch on any unknown/unavailable/mismatched owner.
+ */
+export async function revalidateLinkOwners(
+  input: LinkOwnerRevalidationInput,
+): Promise<OwnershipScanFailure[]> {
+  const failures: OwnershipScanFailure[] = []
+  const sellerIds = new Set<string>()
+
+  for (const productId of input.product_ids) {
+    const sellerId = input.owner_seller_by_product.get(productId)
+    if (!sellerId) {
+      failures.push({ seller_id: `product:${productId}`, reason: 'owner mapping disappeared before apply' })
+    } else {
+      sellerIds.add(sellerId)
+    }
+  }
+
+  for (const sellerId of sellerIds) {
+    try {
+      const seller = await input.read_seller(sellerId)
+      if (!seller) {
+        failures.push({ seller_id: sellerId, reason: 'seller unavailable before marketplace link apply' })
+        continue
+      }
+      const live = readSellerOperatingMarket(seller)
+      if (live.source !== 'metadata' || live.market !== input.planned_market) {
+        failures.push({
+          seller_id: sellerId,
+          reason: `live operating_market is ${live.market ?? 'invalid'} (${live.source}); planned ${input.planned_market}`,
+        })
+      }
+    } catch (error) {
+      failures.push({
+        seller_id: sellerId,
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return failures
 }

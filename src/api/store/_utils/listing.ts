@@ -14,7 +14,6 @@ import { DEFAULT_MARKET, MARKETS, type MarketCode } from '../../../lib/markets'
 import {
   publicSellerMarket,
   requireSellerOperatingMarket,
-  SELLER_OPERATING_MARKET_KEY,
 } from '../../../lib/seller-market'
 
 export interface ListingShape {
@@ -99,36 +98,90 @@ export interface SellerShape {
   marketplace_status: 'active' | 'invitation' | null
 }
 
+const objectBag = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+
+function pick(source: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  const bag = objectBag(source)
+  if (!bag) return null
+  const entries = keys
+    .filter((key) => bag[key] !== undefined)
+    .map((key) => [key, bag[key]] as const)
+  return entries.length > 0 ? Object.fromEntries(entries) : null
+}
+
 /**
- * Strip seller secrets before metadata is exposed via the public Store API.
- * MercadoPago marketplace OAuth stores the seller's access/refresh tokens in
- * settings.mercadopago — these must never reach the storefront. Safe status
- * fields (connected/enabled/live_mode/user_id/public_key) are retained so the
- * frontend can gate the MP button.
+ * Public seller metadata is an allow-list, not a credential deny-list.
+ *
+ * Seller metadata is also the private settings store. New payment integrations add
+ * fields there frequently, so a pass-through with a few known secrets removed is
+ * unsafe by default. Only storefront presentation and non-sensitive connection
+ * status cross this boundary.
  */
-export function sanitizeSellerMetadata(metadata: any): any {
-  if (!metadata || typeof metadata !== 'object') return metadata ?? null
-  // Public shop presentation still consumes theme/settings/contact fields, so this
-  // remains a deny-list of credentials and internal routing facts rather than
-  // deleting the whole bag. Add a field here at the same time its private writer is
-  // introduced; never make public callers learn credential locations.
-  const {
-    [SELLER_OPERATING_MARKET_KEY]: _market,
-    calcom_api_key: _calcomApiKey,
-    stripe_account_id: _stripeAccountId,
-    payout_bank: _payoutBank,
-    access_token: _accessToken,
-    refresh_token: _refreshToken,
-    ...publicMetadata
-  } = metadata
-  const settings = publicMetadata.settings
-  if (!settings || typeof settings !== 'object' || !settings.mercadopago) return publicMetadata
-  const {
-    access_token: _mpAccessToken,
-    refresh_token: _mpRefreshToken,
-    ...safeMp
-  } = settings.mercadopago
-  return { ...publicMetadata, settings: { ...settings, mercadopago: safeMp } }
+export function sanitizeSellerMetadata(metadata: unknown): Record<string, unknown> | null {
+  const bag = objectBag(metadata)
+  if (!bag) return null
+  const settings = objectBag(bag.settings)
+  const publicSettings: Record<string, unknown> = {}
+
+  // These blocks are authored storefront content, not commerce credentials.
+  for (const key of [
+    'theme', 'announcement', 'hero', 'theme_preset', 'about', 'faq',
+    'returns_policy', 'shipping', 'scheduling', 'offers', 'orders', 'support',
+  ] as const) {
+    if (settings?.[key] !== undefined) publicSettings[key] = settings[key]
+  }
+
+  const calcom = pick(settings?.calcom, ['connected', 'booking_url', 'event_type_title'])
+  if (calcom) publicSettings.calcom = calcom
+
+  const stripeRaw = objectBag(settings?.stripe)
+  const stripe = pick(stripeRaw, ['enabled', 'charges_enabled', 'details_submitted', 'onboarding_complete']) ?? {}
+  if (stripeRaw) {
+    publicSettings.stripe = {
+      ...stripe,
+      // Preserve the storefront's "can offer card payment" decision without
+      // disclosing the connected-account identifier.
+      connected: typeof stripeRaw.account_id === 'string' && stripeRaw.account_id.length > 0,
+    }
+  }
+
+  const mp = pick(settings?.mercadopago, ['connected', 'enabled', 'live_mode'])
+  if (mp) publicSettings.mercadopago = mp
+
+  const checkoutRaw = objectBag(settings?.checkout)
+  if (checkoutRaw) {
+    const checkout = pick(checkoutRaw, [
+      'escrow_mode', 'whatsapp_cta', 'show_phone', 'phone',
+      'show_email', 'contact_email',
+    ]) ?? {}
+    const bank = objectBag(checkoutRaw.bank_transfer)
+    const cash = pick(checkoutRaw.cash_pickup, ['enabled', 'note'])
+    const dimo = objectBag(checkoutRaw.dimo)
+    publicSettings.checkout = {
+      ...checkout,
+      ...(bank ? {
+        bank_transfer: {
+          ...(typeof bank.enabled === 'boolean' ? { enabled: bank.enabled } : {}),
+          configured: typeof bank.clabe === 'string' && bank.clabe.replace(/\D/g, '').length === 18,
+        },
+      } : {}),
+      ...(cash ? { cash_pickup: cash } : {}),
+      ...(dimo ? {
+        dimo: {
+          ...(typeof dimo.enabled === 'boolean' ? { enabled: dimo.enabled } : {}),
+          configured: typeof dimo.phone === 'string' && dimo.phone.replace(/\D/g, '').length >= 10,
+        },
+      } : {}),
+    }
+  }
+
+  return {
+    ...(typeof bag.mp_enabled === 'boolean' ? { mp_enabled: bag.mp_enabled } : {}),
+    ...(Object.keys(publicSettings).length > 0 ? { settings: publicSettings } : {}),
+  }
 }
 
 export function toSellerShape(seller: any): SellerShape {

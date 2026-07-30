@@ -20,6 +20,8 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { resolveDefaultShippingProfileId } from '../../../store/_utils/fulfillment'
 import { resolvePlatformSellerSlug } from '../../_utils/platform-seller'
+import { resolveSellerProductMoneyContext } from '../../../store/_utils/product-market-currency'
+import { planProductPublication } from '../../../store/_utils/product-publication'
 
 function generateSku(): string {
   const ts = Date.now().toString(36).toUpperCase()
@@ -68,29 +70,34 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
   }
 
-  // ── Resolve sales channel (same as sellers/me/products) ───────────────────
-  let salesChannelId: string | undefined = process.env.MEDUSA_SALES_CHANNEL_ID || undefined
-  if (!salesChannelId) {
-    try {
-      const storeService: any = req.scope.resolve(Modules.STORE)
-      const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
-      salesChannelId = store?.default_sales_channel_id ?? undefined
-    } catch (e) {
-      console.error('[print/placement-product] sales channel resolve failed:', e)
-    }
+  // ── Resolve money + publication from the PLATFORM SELLER's market ─────────
+  // A platform product is still seller-owned commerce data. The Store default is
+  // not publication intent and may point at a different country's operating rail.
+  let money
+  try {
+    money = resolveSellerProductMoneyContext(seller, body.currency)
+  } catch (e) {
+    return res.status(422).json({ message: (e as Error).message })
   }
+  const publication = planProductPublication(
+    { sellerMarket: money.market },
+    process.env,
+  )
+  if (publication.status === 'refused') {
+    return res.status(publication.http_status).json({ message: publication.message })
+  }
+  const salesChannelId = publication.channel_id
 
   // ── Product type 'digital' (non-stockable → no inventory ceremony) ────────
   const [ptype] = await productService.listProductTypes({ value: 'digital' })
   const shippingProfileId = await resolveDefaultShippingProfileId(req.scope)
-  const currency = (body.currency ?? 'MXN').toLowerCase()
   const sku = generateSku()
 
   const metadata: Record<string, unknown> = {
     listing_type: 'print_ad',
     // Excludes the placement from general browse/search (see api/store/listings).
     is_print_placement: true,
-    currency: (body.currency ?? 'MXN'),
+    currency: money.currency_code.toUpperCase(),
     price_cents: body.price_cents,
     ...(body.edition_id ? { print_edition_id: body.edition_id } : {}),
     ...(body.tier_key ? { print_tier_key: body.tier_key } : {}),
@@ -103,7 +110,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         description: body.description?.trim() || null,
         status: 'published' as const,
         ...(shippingProfileId ? { shipping_profile_id: shippingProfileId } : {}),
-        ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
+        sales_channels: [{ id: salesChannelId }],
         ...(ptype ? { type_id: ptype.id } : {}),
         options: [{ title: 'Default', values: ['Default'] }],
         metadata,
@@ -112,7 +119,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           sku,
           options: { Default: 'Default' },
           manage_inventory: false,
-          prices: [{ amount: body.price_cents, currency_code: currency }],
+          prices: [{ amount: body.price_cents, currency_code: money.currency_code }],
         }],
       }],
     },

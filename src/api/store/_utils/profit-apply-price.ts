@@ -91,7 +91,14 @@ export async function applySellerPrice(
   }
 
   const miyagiBody: SellerProductUpdateBody = { variant_id, price_cents: new_price_cents as number }
-  const miyagiResult = await updateSellerProduct(scope, product_id, miyagiBody)
+  // The shared price writer reloads this seller id to derive its registry currency.
+  // Passing no seller context used to make this path silently write MXN.
+  const miyagiResult = await updateSellerProduct(
+    scope,
+    product_id,
+    miyagiBody,
+    { id: sellerCtx.sellerId, slug: '' },
+  )
 
   if (!miyagiResult.ok) {
     await recordSyncEventBestEffort(ml, {

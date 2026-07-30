@@ -59,6 +59,7 @@ import { resolveSellerProductIds } from '../../store/_utils/seller-catalog-query
 import { describeScan } from '../_utils/scan-window'
 import {
   marketBackfillBlockingReasons,
+  revalidateLinkOwners,
   stampSellerMarketIfAbsent,
   type OwnershipScanFailure,
 } from '../_utils/market-backfill'
@@ -180,6 +181,7 @@ async function survey(req: MedusaRequest, market: MarketCode) {
   return {
     query, channel, channelRow, sellers, sellerPlan,
     published, membership, linkPlan, sellerScan, productScan, ownershipScanFailures,
+    ownerSellerByProduct,
   }
 }
 
@@ -328,6 +330,33 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const result = await stampSellerMarketIfAbsent(db, update.id, market)
     if (result === 'updated') sellersUpdated += 1
     else sellersSkipped += 1
+  }
+
+  // The survey can become stale between validation and apply. Re-read every owner
+  // after conditional stamps and immediately before the one link workflow. If a
+  // concurrent writer stamped even one seller into another market, no product is
+  // linked from the stale plan.
+  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+  const liveOwnerFailures = await revalidateLinkOwners({
+    product_ids: s.linkPlan.link,
+    owner_seller_by_product: s.ownerSellerByProduct,
+    planned_market: market,
+    read_seller: async (sellerId) => {
+      const [seller] = await sellerService.listSellers({ id: sellerId }, { take: 1 })
+      return seller ?? null
+    },
+  })
+  if (liveOwnerFailures.length > 0) {
+    return res.status(409).json({
+      applied: false,
+      market_code: market,
+      sellers_updated: sellersUpdated,
+      sellers_skipped: sellersSkipped,
+      products_linked: 0,
+      blocked_by: liveOwnerFailures.map(
+        (failure) => `${failure.seller_id}: ${failure.reason}`,
+      ),
+    })
   }
 
   // ── APPLY 2: link ONLY this market's sellers' products ────────────────────
