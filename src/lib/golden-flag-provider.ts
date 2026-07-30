@@ -11,6 +11,7 @@ import {
   type FlagResolutionReason,
 } from '@golden-beans/sdk'
 import { parseGoldenFlagEnvironment } from './flag-provider-mode'
+import { createFlagProviderRequestRefreshGate } from './flag-provider-request-refresh'
 import { scheduleDurableGoldenSnapshot } from './golden-flag-mirror-store'
 import { trackGoldenFlagEvaluation } from './golden-flag-telemetry'
 
@@ -24,6 +25,7 @@ export type GoldenBooleanEvaluation = {
 
 let provider: FlagProvider | undefined
 let started = false
+const requestRefreshGate = createFlagProviderRequestRefreshGate()
 let configuration:
   | {
       baseUrl: string
@@ -48,6 +50,7 @@ function getProvider(): FlagProvider | undefined {
     }
     provider = undefined
     started = false
+    requestRefreshGate.reset()
     configuration = undefined
     return undefined
   }
@@ -65,6 +68,7 @@ function getProvider(): FlagProvider | undefined {
     }
     provider = undefined
     started = false
+    requestRefreshGate.reset()
   }
 
   if (!provider) {
@@ -81,10 +85,16 @@ function getProvider(): FlagProvider | undefined {
 
   if (!started) {
     started = true
+    requestRefreshGate.markAttempt()
     // SDK initialize starts its bounded periodic refresh before its initial
     // attempt. Preserve `started` after failure to avoid request-path retry
     // storms; the provider performs the next retry on that timer.
     void provider.initialize().catch(() => undefined)
+  } else if (requestRefreshGate.takeIfDue()) {
+    // Cloud Run can throttle the SDK's periodic timer between requests. Kick
+    // the same deduplicated refresh from live traffic, but never await it: this
+    // request keeps resolving synchronously from the accepted snapshot/LKG.
+    void provider.refresh().catch(() => undefined)
   }
 
   return provider
