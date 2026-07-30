@@ -7,7 +7,7 @@ const DEFAULT_REQUEST_REFRESH_INTERVAL_MS = 60_000
  */
 export function createFlagProviderRequestRefreshGate(
   intervalMs = DEFAULT_REQUEST_REFRESH_INTERVAL_MS,
-  now: () => number = Date.now,
+  now: () => number = () => Date.now(),
 ) {
   let nextEligibleAt: number | undefined
 
