@@ -1,9 +1,11 @@
 const mockInitialize = jest.fn()
+const mockRefresh = jest.fn()
 const mockShutdown = jest.fn()
 const mockGetSnapshot = jest.fn()
 const mockResolveBooleanEvaluation = jest.fn()
 const mockCreateFlagProvider = jest.fn(() => ({
   initialize: mockInitialize,
+  refresh: mockRefresh,
   shutdown: mockShutdown,
   getSnapshot: mockGetSnapshot,
   resolveBooleanEvaluation: mockResolveBooleanEvaluation,
@@ -38,6 +40,12 @@ describe('Golden flag provider telemetry', () => {
     mockInitialize.mockResolvedValue({
       ok: true,
       changed: true,
+      snapshotVersion: 41,
+    })
+    mockRefresh.mockResolvedValue({
+      ok: true,
+      changed: false,
+      notModified: true,
       snapshotVersion: 41,
     })
     mockGetSnapshot.mockReturnValue({
@@ -112,5 +120,22 @@ describe('Golden flag provider telemetry', () => {
     expect(mockCreateFlagProvider).toHaveBeenLastCalledWith(
       expect.objectContaining({ flagReadKey: 'gb_flag_read_rotated' }),
     )
+  })
+
+  it('kicks one bounded refresh from a later request when periodic timers are throttled', () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000)
+    const { evaluateGoldenBooleanFlag } = require('../golden-flag-provider')
+
+    evaluateGoldenBooleanFlag('checkout.stripe_enabled', false)
+    now.mockReturnValue(60_999)
+    evaluateGoldenBooleanFlag('checkout.stripe_enabled', false)
+    expect(mockRefresh).not.toHaveBeenCalled()
+
+    now.mockReturnValue(61_000)
+    evaluateGoldenBooleanFlag('checkout.stripe_enabled', false)
+    evaluateGoldenBooleanFlag('checkout.stripe_enabled', false)
+    expect(mockRefresh).toHaveBeenCalledTimes(1)
+
+    now.mockRestore()
   })
 })
