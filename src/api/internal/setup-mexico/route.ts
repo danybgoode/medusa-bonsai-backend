@@ -18,7 +18,10 @@
  *      step re-verifies the price-safety check itself (not just trusting that
  *      one-time audit) before ever calling the delete workflow, so a future
  *      re-run on a database that somehow DOES have a real EUR price refuses
- *      instead of silently deleting live pricing data.
+ *      instead of silently deleting live pricing data. Since 2026-07-28 it is
+ *      additionally scoped by the market registry (D6): a region that any
+ *      supported market resolves to — by id or by currency — is never deletable,
+ *      so standing up a second market cannot be undone by re-running this route.
  *
  * Run once after deploy. Safe to re-run — each step checks before acting.
  * Auth: x-internal-secret header must match MEDUSA_INTERNAL_SECRET.
@@ -32,6 +35,7 @@ import {
   createTaxRegionsWorkflow,
   deleteRegionsWorkflow,
 } from '@medusajs/medusa/core-flows'
+import { describeRegionKeep, planRegionDeletions } from '../_utils/market-protected-resources'
 
 // All payment providers that should be enabled on the Mexico region. Keeping
 // pp_system_default for backward-compat with any legacy sessions.
@@ -166,37 +170,53 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   // ── 6. Delete the leftover seeded "Europe" region ────────────────────────
-  const staleRegions = regions.filter((r: any) => r.id !== mexicoRegion?.id && r.name !== 'Mexico')
-  if (!staleRegions.length) {
-    report.push('○ No stale non-Mexico regions found — skipped')
-  } else {
-    // Safety re-check: never delete a region if ANY product variant carries a
-    // real price in that region's currency — that would mean real pricing data
-    // depends on it, not just leftover seed scaffolding. Fetch every product's
-    // variant prices and filter in plain JS rather than a nested remote-query
-    // filter (no precedent for that shape anywhere in this codebase — a flat
-    // fetch is the same approach already verified live against all 76 real
-    // products before writing this route).
-    const { data: allProducts } = await query.graph({
-      entity: 'product',
-      fields: ['id', 'variants.prices.currency_code'],
-    })
-    const currenciesInUse = new Set<string>()
-    for (const p of (allProducts ?? []) as any[]) {
-      for (const v of p.variants ?? []) {
-        for (const pr of v.prices ?? []) {
-          if (pr?.currency_code) currenciesInUse.add(pr.currency_code)
-        }
+  //
+  // SCOPED TO THE REGISTRY (epic market-architecture-foundation, D6): this step used
+  // to be "delete every region that is not Mexico", which is only correct while
+  // exactly one market exists. `planRegionDeletions` now protects the Mexico region,
+  // every region a registry market resolves to, and every region whose currency
+  // belongs to a registry market — before the pre-existing price-safety re-check.
+  // `eur` is in no registry market, so the seeded Europe region this step exists to
+  // remove is still removed; nothing about today's live behaviour changes.
+  //
+  // Safety re-check (unchanged): never delete a region if ANY product variant
+  // carries a real price in that region's currency — that would mean real pricing
+  // data depends on it, not just leftover seed scaffolding. Fetch every product's
+  // variant prices and filter in plain JS rather than a nested remote-query filter
+  // (no precedent for that shape anywhere in this codebase — a flat fetch is the
+  // same approach already verified live against all 76 real products before writing
+  // this route).
+  const { data: allProducts } = await query.graph({
+    entity: 'product',
+    fields: ['id', 'variants.prices.currency_code'],
+  })
+  const currenciesInUse = new Set<string>()
+  for (const p of (allProducts ?? []) as any[]) {
+    for (const v of p.variants ?? []) {
+      for (const pr of v.prices ?? []) {
+        if (pr?.currency_code) currenciesInUse.add(String(pr.currency_code).toLowerCase())
       }
     }
+  }
 
-    for (const stale of staleRegions) {
-      if (currenciesInUse.has(stale.currency_code)) {
-        report.push(`⚠ Region "${stale.name}" (${stale.id}, ${stale.currency_code}) — at least one real product price uses this currency — NOT deleted, needs manual review`)
-        continue
-      }
+  const regionPlan = planRegionDeletions(regions as any[], {
+    mexicoRegionId: mexicoRegion?.id ?? null,
+    env: process.env,
+    currenciesInUse,
+  })
+  // Report every KEPT non-Mexico region and why. A guard that silently protects
+  // something is a guard nobody can audit — and this route's whole job is to be
+  // re-runnable against an unfamiliar database.
+  for (const kept of regionPlan.keep) {
+    if (kept.reason === 'mexico_region') continue
+    report.push(describeRegionKeep(kept))
+  }
+  if (!regionPlan.remove.length) {
+    report.push('○ No deletable non-Mexico regions found — skipped')
+  } else {
+    for (const stale of regionPlan.remove) {
       await deleteRegionsWorkflow(req.scope).run({ input: { ids: [stale.id] } })
-      report.push(`✓ Deleted stale region "${stale.name}" (${stale.id}, ${stale.currency_code}) — no real pricing depended on it`)
+      report.push(`✓ Deleted stale region "${stale.name}" (${stale.id}, ${stale.currency_code}) — no registry market and no real pricing depended on it`)
     }
   }
 

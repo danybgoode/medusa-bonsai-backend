@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto'
+import { internalSecretMissing } from '../../../lib/internal-auth'
 
 export const EVENT_TICKET_METADATA_KEY = 'event_ticket'
 export const EVENT_TICKETS_METADATA_KEY = 'event_tickets'
@@ -23,9 +24,9 @@ export type EventTicket = {
 }
 
 export function unauthorized(req: { headers: Record<string, unknown> }): boolean {
-  const expected = process.env.MEDUSA_INTERNAL_SECRET
-  const got = req.headers['x-internal-secret'] as string | undefined
-  return !!expected && got !== expected
+  // Fail CLOSED: this used to return false when the env var was unset,
+  // authorizing everyone on a misconfigured deploy. See src/lib/internal-auth.ts.
+  return internalSecretMissing(req)
 }
 
 export function mintTicketToken(): string {

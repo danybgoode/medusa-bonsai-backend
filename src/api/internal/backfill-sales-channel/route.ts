@@ -14,12 +14,12 @@
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
-import { linkProductsToSalesChannelWorkflow } from '@medusajs/medusa/core-flows'
+import { internalSecretOk } from '../../../lib/internal-auth'
 
 function authed(req: MedusaRequest): boolean {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  return !internalSecret || headerSecret === internalSecret
+  // Fail CLOSED: a missing MEDUSA_INTERNAL_SECRET denies everyone. One
+  // definition, in src/lib/internal-auth.ts — see the incident note there.
+  return internalSecretOk(req)
 }
 
 /**
@@ -114,44 +114,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 
-  // ── Resolve target channel ────────────────────────────────────────────────
-  let channelId: string | undefined = process.env.MEDUSA_SALES_CHANNEL_ID || undefined
-  if (!channelId) {
-    const storeService: any = req.scope.resolve(Modules.STORE)
-    const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
-    channelId = store?.default_sales_channel_id ?? undefined
-  }
-  if (!channelId) return res.status(500).json({ message: 'No default sales channel resolved' })
-
-  // ── Find products missing the channel ─────────────────────────────────────
-  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-  const { data: products } = await query.graph({
-    entity: 'product',
-    fields: ['id', 'sales_channels.id'],
-    pagination: { take: 5000, skip: 0 },
+  // RETIRED: this route used to attach every product to one platform/default
+  // channel. In a multi-market catalog that is an implicit cross-country publish.
+  // The replacement resolves each owning seller and links only products whose
+  // seller operates in the explicitly requested market.
+  return res.status(410).json({
+    applied: false,
+    message: 'This unscoped backfill is retired. Preview and apply /internal/market-backfill with an explicit market.',
+    replacement: '/internal/market-backfill',
   })
-
-  // Same unguarded link dereference the GET half was crashing on — `sc.id` on a null-ish link row.
-  // A fresh reviewer caught that hardening only the GET left this one, and this is the MUTATING half:
-  // a throw here aborts the backfill, and a link row that reads as "no channel" would re-link a product
-  // that is already linked. Guard the population, not the door you found.
-  const toAdd = (products as Array<{ id: string; sales_channels?: Array<{ id: string }> }>)
-    .filter(p => !(p.sales_channels ?? []).some(sc => sc && sc.id === channelId))
-    .map(p => p.id)
-
-  if (toAdd.length === 0) {
-    return res.json({ scanned: products.length, linked: 0, channel_id: channelId, message: 'All products already in channel' })
-  }
-
-  await linkProductsToSalesChannelWorkflow(req.scope).run({
-    input: { id: channelId, add: toAdd },
-  })
-
-  return res.json({ scanned: products.length, linked: toAdd.length, channel_id: channelId })
 }

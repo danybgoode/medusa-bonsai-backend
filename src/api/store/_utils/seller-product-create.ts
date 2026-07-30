@@ -22,6 +22,10 @@ import {
 } from './inventory'
 import { resolveDefaultShippingProfileId } from './fulfillment'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
+import { planProductPublication } from './product-publication'
+import SellerModuleService from '../../../modules/seller/service'
+import { resolveSellerProductMoneyContext } from './product-market-currency'
+import type { MarketCode } from '../../../lib/markets'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 export function generateSku(): string {
@@ -81,6 +85,21 @@ export interface CreateProductBody {
    * shipping.arranged_only_enabled is ON (checkout-options ignores it OFF).
    */
   delivery_mode?: 'carrier' | 'arranged' | null
+  /**
+   * MARKETPLACE PUBLICATION INTENT, stated by the call site (epic
+   * market-architecture-foundation, story 1.3).
+   *
+   *   omitted  — publish into the SELLER's own operating market. For every seller
+   *              that exists today (all `mx`) this is byte-identical to the previous
+   *              behaviour.
+   *   'mx'     — the same thing, said out loud. Must match the seller's market.
+   *
+   * A market whose marketplace is not open (`us` is `invitation`) is REFUSED with an
+   * actionable message, never silently downgraded to Mexico's channel. There is no
+   * "owned shop only" value — see the header of `product-publication.ts` for why a
+   * channel-less product is unbuyable and what would have to be built first.
+   */
+  publish_to_market?: MarketCode | null
 }
 
 const MAX_OPTION_DIMENSIONS = 3
@@ -220,35 +239,67 @@ export async function createSellerProduct(
   const typeValue = body.listing_type ?? 'physical'
   const [ptype] = await productService.listProductTypes({ value: typeValue })
 
+  // ── Resolve the sales channel from the SELLER's market ────────────────────
+  // The product MUST be in the store's sales channel, otherwise the standard
+  // (channel-scoped) /store/products endpoint 404s and checkout fails with
+  // "Product not found" even though the custom /store/listings endpoint shows it.
+  //
+  // What changed (story 1.3): the channel is no longer "whatever env var is set". It
+  // is derived from the OWNING SELLER's `operating_market` — not from a platform-wide
+  // default, because that would publish a non-Mexico shop into the Mexico marketplace
+  // and hand it Mexico's Stripe/shipping rails, which story 1.2's acceptance forbids.
+  // For every seller that exists today (all `mx`) the configured marketplace channel
+  // remains the same. A missing market channel is an outage, never permission to
+  // adopt the Store default (D0 proves those channels have different meanings).
+  //
+  // The seller row is read HERE rather than trusted from the caller: both callers
+  // resolve a seller before calling, but neither passes its metadata, and a market
+  // that a caller could assert is not a market this function can enforce.
+  let sellerMarket
+  let currencyCode: string
+  try {
+    const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
+    const [sellerRow] = await sellerService.listSellers({ id: sellerId }, { take: 1 })
+    if (!sellerRow) {
+      // Fail closed. Trusting `sellerId` for the LINK is fine — a bad id simply
+      // fails there — but silently guessing a market for an unresolvable seller is
+      // how a product lands in the wrong country's marketplace.
+      return { ok: false, status: 404, message: 'No se encontró la tienda para este producto.' }
+    }
+    const money = resolveSellerProductMoneyContext(sellerRow, body.currency)
+    sellerMarket = money.market
+    currencyCode = money.currency_code
+  } catch (e) {
+    // Unknown seller markets and caller-selected foreign currencies both fail closed.
+    // Repair the row or request the registry currency; never guess a money rail.
+    return { ok: false, status: 422, message: (e as Error).message }
+  }
+
+  const publicationPlan = planProductPublication(
+    { requested: body.publish_to_market, sellerMarket },
+    process.env,
+  )
+  if (publicationPlan.status === 'refused') {
+    return { ok: false, status: publicationPlan.http_status, message: publicationPlan.message }
+  }
+  const salesChannelId = publicationPlan.channel_id
+
   // ── Build metadata ───────────────────────────────────────────────────────
+  // Currency is stamped LAST so caller metadata cannot counterfeit the market's
+  // money rail. The native Price rows below use this same registry-derived value.
   const metadata: Record<string, unknown> = {
     ...(body.condition ? { condition: body.condition } : {}),
     ...(body.state ? { state: body.state } : {}),
     ...(body.municipio ? { municipio: body.municipio } : {}),
     ...(body.location ? { location: body.location } : {}),
     ...(body.price_cents != null ? { price_cents: body.price_cents } : {}),
-    currency: body.currency ?? 'MXN',
     listing_type: body.listing_type ?? 'product',
     delivery_mode: deliveryMode,
     views: 0,
     // Category/type-specific structured attributes (brand, size, color, year, km…)
     ...(body.attrs && Object.keys(body.attrs).length > 0 ? { attrs: body.attrs } : {}),
     ...(body.metadata ?? {}),
-  }
-
-  // ── Resolve the sales channel ────────────────────────────────────────────
-  // The product MUST be in the store's sales channel, otherwise the standard
-  // (channel-scoped) /store/products endpoint 404s and checkout fails with
-  // "Product not found" even though the custom /store/listings endpoint shows it.
-  let salesChannelId: string | undefined = process.env.MEDUSA_SALES_CHANNEL_ID || undefined
-  if (!salesChannelId) {
-    try {
-      const storeService: any = scope.resolve(Modules.STORE)
-      const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
-      salesChannelId = store?.default_sales_channel_id ?? undefined
-    } catch (e) {
-      console.error('[createSellerProduct] sales channel resolve failed:', e)
-    }
+    currency: currencyCode.toUpperCase(),
   }
 
   // ── Inventory: physical `product` listings are unique-stock items ─────────
@@ -308,7 +359,7 @@ export async function createSellerProduct(
               manage_inventory: manageInventory,
               prices: [{
                 amount: body.variant_prices![buildVariantComboKey(combo)],
-                currency_code: (body.currency ?? 'MXN').toLowerCase(),
+                currency_code: currencyCode,
               }],
             }))
           : [{
@@ -321,7 +372,7 @@ export async function createSellerProduct(
               },
               manage_inventory: manageInventory,
               prices: body.price_cents != null && body.price_cents > 0
-                ? [{ amount: body.price_cents, currency_code: (body.currency ?? 'MXN').toLowerCase() }]
+                ? [{ amount: body.price_cents, currency_code: currencyCode }]
                 : [],
               ...(body.unit_cost_cents != null
                 ? { metadata: { unit_cost_cents: body.unit_cost_cents } }

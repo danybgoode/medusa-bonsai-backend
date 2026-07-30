@@ -17,15 +17,15 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { capturePaymentWorkflow } from '@medusajs/medusa/core-flows'
+import { internalSecretOk } from '../../../lib/internal-auth'
 
 const DEFAULT_AUTO_CONFIRM_DAYS = 7
 // Escrow auto-capture window: if buyer hasn't confirmed in 3 days post-delivery, auto-capture
 const ESCROW_AUTO_CAPTURE_DAYS = 3
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 

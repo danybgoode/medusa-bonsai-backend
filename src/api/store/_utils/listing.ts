@@ -10,6 +10,11 @@
  */
 
 import { splitCategories } from './category-split'
+import { DEFAULT_MARKET, MARKETS, type MarketCode } from '../../../lib/markets'
+import {
+  publicSellerMarket,
+  requireSellerOperatingMarket,
+} from '../../../lib/seller-market'
 
 export interface ListingShape {
   id: string
@@ -87,24 +92,100 @@ export interface SellerShape {
   custom_domain: null
   custom_domain_verified: false
   custom_domain_vercel_ok: false
+  market_code: MarketCode | null
+  country_code: string | null
+  currency_code: string | null
+  marketplace_status: 'active' | 'invitation' | null
+}
+
+const objectBag = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+
+function pick(source: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  const bag = objectBag(source)
+  if (!bag) return null
+  const entries = keys
+    .filter((key) => bag[key] !== undefined)
+    .map((key) => [key, bag[key]] as const)
+  return entries.length > 0 ? Object.fromEntries(entries) : null
 }
 
 /**
- * Strip seller secrets before metadata is exposed via the public Store API.
- * MercadoPago marketplace OAuth stores the seller's access/refresh tokens in
- * settings.mercadopago — these must never reach the storefront. Safe status
- * fields (connected/enabled/live_mode/user_id/public_key) are retained so the
- * frontend can gate the MP button.
+ * Public seller metadata is an allow-list, not a credential deny-list.
+ *
+ * Seller metadata is also the private settings store. New payment integrations add
+ * fields there frequently, so a pass-through with a few known secrets removed is
+ * unsafe by default. Only storefront presentation and non-sensitive connection
+ * status cross this boundary.
  */
-function sanitizeSellerMetadata(metadata: any): any {
-  if (!metadata || typeof metadata !== 'object') return metadata ?? null
-  const settings = (metadata as any).settings
-  if (!settings || typeof settings !== 'object' || !settings.mercadopago) return metadata
-  const { access_token, refresh_token, ...safeMp } = settings.mercadopago
-  return { ...metadata, settings: { ...settings, mercadopago: safeMp } }
+export function sanitizeSellerMetadata(metadata: unknown): Record<string, unknown> | null {
+  const bag = objectBag(metadata)
+  if (!bag) return null
+  const settings = objectBag(bag.settings)
+  const publicSettings: Record<string, unknown> = {}
+
+  // These blocks are authored storefront content, not commerce credentials.
+  for (const key of [
+    'theme', 'announcement', 'hero', 'theme_preset', 'about', 'faq',
+    'returns_policy', 'shipping', 'scheduling', 'offers', 'orders', 'support',
+  ] as const) {
+    if (settings?.[key] !== undefined) publicSettings[key] = settings[key]
+  }
+
+  const calcom = pick(settings?.calcom, ['connected', 'booking_url', 'event_type_title'])
+  if (calcom) publicSettings.calcom = calcom
+
+  const stripeRaw = objectBag(settings?.stripe)
+  const stripe = pick(stripeRaw, ['enabled', 'charges_enabled', 'details_submitted', 'onboarding_complete']) ?? {}
+  if (stripeRaw) {
+    publicSettings.stripe = {
+      ...stripe,
+      // Preserve the storefront's "can offer card payment" decision without
+      // disclosing the connected-account identifier.
+      connected: typeof stripeRaw.account_id === 'string' && stripeRaw.account_id.length > 0,
+    }
+  }
+
+  const mp = pick(settings?.mercadopago, ['connected', 'enabled', 'live_mode'])
+  if (mp) publicSettings.mercadopago = mp
+
+  const checkoutRaw = objectBag(settings?.checkout)
+  if (checkoutRaw) {
+    const checkout = pick(checkoutRaw, [
+      'escrow_mode', 'whatsapp_cta', 'show_phone', 'phone',
+      'show_email', 'contact_email',
+    ]) ?? {}
+    const bank = objectBag(checkoutRaw.bank_transfer)
+    const cash = pick(checkoutRaw.cash_pickup, ['enabled', 'note'])
+    const dimo = objectBag(checkoutRaw.dimo)
+    publicSettings.checkout = {
+      ...checkout,
+      ...(bank ? {
+        bank_transfer: {
+          ...(typeof bank.enabled === 'boolean' ? { enabled: bank.enabled } : {}),
+          configured: typeof bank.clabe === 'string' && bank.clabe.replace(/\D/g, '').length === 18,
+        },
+      } : {}),
+      ...(cash ? { cash_pickup: cash } : {}),
+      ...(dimo ? {
+        dimo: {
+          ...(typeof dimo.enabled === 'boolean' ? { enabled: dimo.enabled } : {}),
+          configured: typeof dimo.phone === 'string' && dimo.phone.replace(/\D/g, '').length >= 10,
+        },
+      } : {}),
+    }
+  }
+
+  return {
+    ...(typeof bag.mp_enabled === 'boolean' ? { mp_enabled: bag.mp_enabled } : {}),
+    ...(Object.keys(publicSettings).length > 0 ? { settings: publicSettings } : {}),
+  }
 }
 
 export function toSellerShape(seller: any): SellerShape {
+  const market = publicSellerMarket(seller)
   return {
     id: seller.id,
     slug: seller.slug,
@@ -121,6 +202,7 @@ export function toSellerShape(seller: any): SellerShape {
     custom_domain: null,
     custom_domain_verified: false,
     custom_domain_vercel_ok: false,
+    ...market,
   }
 }
 
@@ -136,8 +218,10 @@ export function isFeaturedPin(l: { metadata?: Record<string, unknown> | null }):
   return l.metadata?.featured === true
 }
 
-export function toListingShape(product: any, seller?: any): ListingShape {
+export function toListingShape(product: any, seller?: any, requestedMarket?: MarketCode): ListingShape {
   const meta = (product.metadata ?? {}) as Record<string, unknown>
+  const market = requestedMarket ?? (seller ? requireSellerOperatingMarket(seller) : DEFAULT_MARKET)
+  const currencyCode = MARKETS[market].currency_code
   // Exclude any variant flagged `metadata.disabled` (hidden/non-purchasable)
   // so its price can never deflate the "desde $X" display. Nothing in this
   // codebase sets this today (an earlier option-dimensions design that did
@@ -156,22 +240,26 @@ export function toListingShape(product: any, seller?: any): ListingShape {
   const variantPrices: Array<{ amount: number; currency_code: string }> = variants
     .map((v: any) => {
       const prices: any[] = v?.prices ?? []
-      const mxnPrices = prices.filter((p: any) => p.currency_code === 'mxn')
-      // A variant can carry MULTIPLE mxn prices (Story 2.2's quantity
+      const marketPrices = prices.filter((p: any) => p.currency_code === currencyCode)
+      // A variant can carry MULTIPLE prices in the market currency (Story 2.2's quantity
       // tiers) — the display/"desde $X" price must be the base (qty=1)
       // entry, not whichever tier the DB happens to return first. Picking
       // array-order-first could show a bulk-discount tier as if it were the
       // starting price (cross-agent review catch, 2026-07-05).
-      const basePrice = mxnPrices.length > 0
-        ? mxnPrices.reduce((lowest, p) => ((p.min_quantity ?? 1) < (lowest.min_quantity ?? 1) ? p : lowest))
+      const basePrice = marketPrices.length > 0
+        ? marketPrices.reduce((lowest, p) => ((p.min_quantity ?? 1) < (lowest.min_quantity ?? 1) ? p : lowest))
         : undefined
-      return basePrice ?? prices[0]
+      return basePrice
     })
     .filter((p): p is { amount: number; currency_code: string } => !!p)
   const priceObj = variantPrices.length > 0
     ? variantPrices.reduce((min, p) => (p.amount < min.amount ? p : min))
     : undefined
-  const fallbackPrice = typeof meta.price_cents === 'number' ? meta.price_cents : null
+  const metadataCurrency = typeof meta.currency === 'string' ? meta.currency.toLowerCase() : null
+  const fallbackPrice = typeof meta.price_cents === 'number'
+    && (metadataCurrency === currencyCode || (!metadataCurrency && market === DEFAULT_MARKET))
+    ? meta.price_cents
+    : null
 
   // ── Stock (Medusa Inventory, summed across ALL variants) ──────────────────
   // Managed (physical) variants carry inventory items with location levels;
@@ -213,7 +301,7 @@ export function toListingShape(product: any, seller?: any): ListingShape {
     title: product.title,
     description: product.description ?? null,
     price_cents: priceObj?.amount ?? fallbackPrice,
-    currency: (priceObj?.currency_code ?? (meta.currency as string | undefined) ?? 'mxn').toUpperCase(),
+    currency: (priceObj?.currency_code ?? currencyCode).toUpperCase(),
     condition: (meta.condition as string) ?? null,
     listing_type: (product.type?.value ?? (meta.listing_type as string | undefined) ?? 'product') as string,
     category: platformCategory?.handle ?? null,

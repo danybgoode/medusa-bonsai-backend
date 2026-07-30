@@ -33,6 +33,9 @@ import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
 import { splitCategories } from './category-split'
 import { resolveOwnedCollectionIds } from './seller-collections'
+import { SELLER_MODULE } from '../../../modules/seller'
+import SellerModuleService from '../../../modules/seller/service'
+import { resolveSellerProductMoneyContext } from './product-market-currency'
 
 export interface SellerProductUpdateBody {
   title?: string
@@ -219,6 +222,7 @@ async function applyOptionDimensions(
   id: string,
   dimensionsRaw: Array<{ title: string; values: string[] }>,
   variantPrices: Record<string, number> | undefined,
+  currencyCode: string,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   const remoteQuery = scope.resolve('remoteQuery')
 
@@ -299,7 +303,7 @@ async function applyOptionDimensions(
         sku: generateSku(),
         options: combo,
         manage_inventory: oldManageInventory,
-        prices: [{ amount: variantPrices![buildVariantComboKey(combo)], currency_code: 'mxn' }],
+        prices: [{ amount: variantPrices![buildVariantComboKey(combo)], currency_code: currencyCode }],
       })),
     },
   })
@@ -331,11 +335,36 @@ export async function updateSellerProduct(
   scope: MedusaRequest['scope'],
   id: string,
   body: SellerProductUpdateBody,
-  seller?: { id: string; slug: string },
+  seller?: { id: string; slug: string; metadata?: unknown },
 ): Promise<SellerProductUpdateResult> {
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
   const remoteQuery = scope.resolve('remoteQuery')
+
+  // Every native Price mutation resolves the owning seller's registry currency
+  // before the first workflow runs. Partial internal contexts are reloaded rather
+  // than silently inheriting Mexico.
+  const writesMoney = body.option_dimensions !== undefined
+    || body.price_cents !== undefined
+    || body.variant_tiers !== undefined
+  let currencyCode: string | undefined
+  if (writesMoney) {
+    if (!seller?.id) {
+      return { ok: false, status: 422, message: 'Una actualización de precio requiere contexto de vendedor.' }
+    }
+    let sellerForMarket: unknown = seller
+    if (seller.metadata === undefined) {
+      const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
+      const [sellerRow] = await sellerService.listSellers({ id: seller.id }, { take: 1 })
+      if (!sellerRow) return { ok: false, status: 404, message: 'Seller not found' }
+      sellerForMarket = sellerRow
+    }
+    try {
+      currencyCode = resolveSellerProductMoneyContext(sellerForMarket).currency_code
+    } catch (e) {
+      return { ok: false, status: 422, message: (e as Error).message }
+    }
+  }
 
   // A caller can't know the newly-created variant ids until AFTER
   // option_dimensions commits, so combining it with price_cents/quantity/
@@ -361,7 +390,9 @@ export async function updateSellerProduct(
 
   // ── Priced option dimensions (print-configurator listings) ───────────────
   if (body.option_dimensions !== undefined) {
-    const result = await applyOptionDimensions(scope, id, body.option_dimensions, body.variant_prices)
+    const result = await applyOptionDimensions(
+      scope, id, body.option_dimensions, body.variant_prices, currencyCode!,
+    )
     if (!result.ok) return result
   }
 
@@ -526,8 +557,8 @@ export async function updateSellerProduct(
         : { ok: false, status: 404, message: 'variant_id no encontrado en este producto.' }
     }
     const prices: Array<{ id: string; currency_code: string; min_quantity: number | null; max_quantity: number | null }> = variant?.prices ?? []
-    const mxnPrices = prices.filter(p => p.currency_code === 'mxn')
-    // A variant with REAL quantity tiers (Story 2.2) carries multiple mxn
+    const marketPrices = prices.filter(p => p.currency_code === currencyCode)
+    // A variant with REAL quantity tiers (Story 2.2) carries multiple market-currency
     // prices with DIFFERENT [min_quantity, max_quantity] bands. Distinguish
     // that from a harmless duplicate: Medusa Admin's price editor shows one
     // column per currency PLUS one column per region, so filling in both the
@@ -542,19 +573,19 @@ export async function updateSellerProduct(
     // catch, 2026-07-05). A same-band duplicate is safe to collapse: update
     // every one of them to the new amount, since they all represent the
     // exact same intended price.
-    if (isRealTierLadder(mxnPrices)) {
+    if (isRealTierLadder(marketPrices)) {
       return {
         ok: false,
         status: 422,
         message: 'Esta variante tiene niveles de precio por cantidad; usa variant_tiers para actualizarlos, no price_cents.',
       }
     }
-    const existing = mxnPrices[0] ?? prices[0]
+    const existing = marketPrices[0]
 
-    if (mxnPrices.length > 1) {
+    if (marketPrices.length > 1) {
       // Same-band duplicate (the Admin multi-column artifact) — update every
       // row so none of them silently keeps a stale amount.
-      await (pricingService as any).updatePrices(mxnPrices.map((p) => ({ id: p.id, amount: body.price_cents })))
+      await (pricingService as any).updatePrices(marketPrices.map((p) => ({ id: p.id, amount: body.price_cents })))
     } else if (existing?.id) {
       await (pricingService as any).updatePrices([{ id: existing.id, amount: body.price_cents }])
     } else if (variant?.id) {
@@ -586,7 +617,7 @@ export async function updateSellerProduct(
         // "no price_set at all" fallback below.
         await (pricingService as any).addPrices([{
           priceSetId,
-          prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
+          prices: [{ amount: body.price_cents, currency_code: currencyCode!, rules: {} }],
         }])
       } else {
         // The variant has no price_set at all — true edge case now that the
@@ -611,7 +642,7 @@ export async function updateSellerProduct(
         // with Medusa's own usage; the `!newPriceSet?.id` guard is the real
         // safety net if this fallback is ever actually reached.
         const [newPriceSet] = await (pricingService as any).createPriceSets([{
-          prices: [{ amount: body.price_cents, currency_code: 'mxn', rules: {} }],
+          prices: [{ amount: body.price_cents, currency_code: currencyCode!, rules: {} }],
         }])
         if (!newPriceSet?.id) {
           return { ok: false, status: 500, message: 'No se pudo crear el precio para esta variante. Inténtalo de nuevo.' }
@@ -655,14 +686,13 @@ export async function updateSellerProduct(
       return { ok: false, status: 422, message: 'Esta variante no tiene un conjunto de precios; agrega un precio primero.' }
     }
 
-    // Replace: soft-delete the variant's existing MXN prices (the flat
-    // no-tier price included), then add the full tier ladder — avoids two
-    // simultaneously-matching MXN prices for the same quantity.
-    const existingMxnPriceIds: string[] = ((variant.prices ?? []) as Array<{ id: string; currency_code: string }>)
-      .filter((p) => p.currency_code === 'mxn')
+    // Replace: soft-delete the variant's existing market-currency prices (the
+    // flat no-tier price included), then add the full tier ladder.
+    const existingMarketPriceIds: string[] = ((variant.prices ?? []) as Array<{ id: string; currency_code: string }>)
+      .filter((p) => p.currency_code === currencyCode)
       .map((p) => p.id)
-    if (existingMxnPriceIds.length > 0) {
-      await (pricingService as any).softDeletePrices(existingMxnPriceIds)
+    if (existingMarketPriceIds.length > 0) {
+      await (pricingService as any).softDeletePrices(existingMarketPriceIds)
     }
     // Same key-name bug as the flat price_cents branch above — Medusa's
     // AddPricesDTO field is `priceSetId` (camelCase), not `price_set_id`.
@@ -670,7 +700,7 @@ export async function updateSellerProduct(
       priceSetId,
       prices: body.variant_tiers.map((tier) => ({
         amount: tier.amount,
-        currency_code: 'mxn',
+        currency_code: currencyCode!,
         min_quantity: tier.min_quantity,
         max_quantity: tier.max_quantity,
         rules: {},

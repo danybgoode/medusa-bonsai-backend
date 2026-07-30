@@ -3,7 +3,11 @@
  *
  * Deletes all duplicate / unused sales channels, keeping only:
  *   1. The store's default_sales_channel_id
- *   2. The channel referenced by MEDUSA_SALES_CHANNEL_ID env var
+ *   2. Every channel a registry market resolves to — today that is the MX
+ *      marketplace channel (MEDUSA_SALES_CHANNEL_ID), tomorrow it is whatever the
+ *      registry declares. Derived, never hand-listed: this route is a SIBLING write
+ *      primitive of `cleanup-default-data.ts` step 3, and guarding one door while
+ *      leaving the other open is the failure mode this epic keeps hitting.
  *
  * Safe: dry_run=true (default) only reports what would be deleted.
  * Pass { dry_run: false } to actually delete.
@@ -14,11 +18,13 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { deleteSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
+import { internalSecretOk } from '../../../lib/internal-auth'
+import { planProtectedSalesChannels } from '../_utils/market-protected-resources'
 
 function authed(req: MedusaRequest): boolean {
-  const secret = process.env.MEDUSA_INTERNAL_SECRET
-  const provided = req.headers['x-internal-secret'] as string | undefined
-  return !secret || provided === secret
+  // Fail CLOSED: a missing MEDUSA_INTERNAL_SECRET denies everyone. One
+  // definition, in src/lib/internal-auth.ts — see the incident note there.
+  return internalSecretOk(req)
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
@@ -31,18 +37,52 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const salesChannelService: any = req.scope.resolve(Modules.SALES_CHANNEL)
 
   // Resolve the two channels we must keep
-  const [store] = await storeService.listStores(
-    {}, { select: ['id', 'default_sales_channel_id'], take: 1 },
+  let storeDefaultChannelId: unknown
+  try {
+    const stores = await storeService.listStores(
+      {}, { select: ['id', 'default_sales_channel_id'], take: 1 },
+    )
+    storeDefaultChannelId = stores?.[0]?.default_sales_channel_id
+  } catch (e) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: [`Could not list stores: ${e instanceof Error ? e.message : String(e)}`],
+    })
+  }
+  const protectedPlan = planProtectedSalesChannels(
+    process.env,
+    storeDefaultChannelId,
   )
-  const keepIds = new Set<string>([
-    store?.default_sales_channel_id,
-    process.env.MEDUSA_SALES_CHANNEL_ID ?? '',
-  ].filter(Boolean))
+  if (!protectedPlan.ok) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: protectedPlan.blocked_by,
+    })
+  }
+  const keepIds = new Set<string>(protectedPlan.ids)
 
   // List all channels
-  const all: any[] = await salesChannelService.listSalesChannels(
-    {}, { select: ['id', 'name', 'is_disabled'], take: 500 },
-  ).catch(() => [] as any[])
+  let all: any[]
+  try {
+    all = await salesChannelService.listSalesChannels(
+      {}, { select: ['id', 'name', 'is_disabled'], take: 501 },
+    )
+  } catch (e) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: [`Could not list Sales Channels: ${e instanceof Error ? e.message : String(e)}`],
+    })
+  }
+  if (all.length > 500) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: ['Sales Channel scan exceeded 500 rows; refusing a truncated destructive plan.'],
+    })
+  }
 
   const toDelete = all.filter(sc => !keepIds.has(sc.id))
   const toKeep   = all.filter(sc =>  keepIds.has(sc.id))
