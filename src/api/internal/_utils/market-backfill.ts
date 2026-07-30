@@ -75,3 +75,36 @@ export function marketBackfillBlockingReasons(
 
   return reasons
 }
+
+export interface SqlExecutor {
+  raw: (sql: string, bindings: readonly unknown[]) => Promise<{ rows?: unknown[]; rowCount?: number }>
+}
+
+/**
+ * Stamp only the missing JSON key in one atomic UPDATE. The WHERE predicate and
+ * jsonb_set execute under the same row lock, so a concurrent metadata write is
+ * preserved and a concurrent market stamp wins without being overwritten.
+ */
+export async function stampSellerMarketIfAbsent(
+  db: SqlExecutor,
+  sellerId: string,
+  market: string,
+): Promise<'updated' | 'skipped'> {
+  const result = await db.raw(
+    `UPDATE seller
+       SET metadata = jsonb_set(
+         CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+         '{operating_market}',
+         to_jsonb(?::text),
+         true
+       ),
+       updated_at = now()
+     WHERE id = ?
+       AND deleted_at IS NULL
+       AND btrim(coalesce(metadata->>'operating_market', '')) = ''
+     RETURNING id`,
+    [market, sellerId],
+  )
+  const changed = result.rowCount ?? result.rows?.length ?? 0
+  return changed > 0 ? 'updated' : 'skipped'
+}

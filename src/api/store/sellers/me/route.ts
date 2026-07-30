@@ -3,7 +3,7 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { extractClerkUserId } from '../../_utils/clerk-auth'
 import { DEFAULT_MARKET } from '../../../../lib/markets'
-import { setSellerOperatingMarket } from '../../../../lib/seller-market'
+import { SELLER_OPERATING_MARKET_KEY, setSellerOperatingMarket } from '../../../../lib/seller-market'
 
 export function slugify(text: string) {
   return text
@@ -146,6 +146,12 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
     logo_url?: string
     slug?: string
     metadata?: Record<string, unknown>
+  }
+  if (body.metadata && Object.prototype.hasOwnProperty.call(body.metadata, SELLER_OPERATING_MARKET_KEY)) {
+    return res.status(422).json({
+      message: `metadata.${SELLER_OPERATING_MARKET_KEY} is reserved; use the operating-market workflow.`,
+      field: `metadata.${SELLER_OPERATING_MARKET_KEY}`,
+    })
   }
 
   // Slug change — validate format/reserved (422) + uniqueness (409). Only when it

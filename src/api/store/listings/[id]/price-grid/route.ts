@@ -5,24 +5,8 @@ import {
   productInMarketplaceChannel,
   resolveMarketReadGate,
 } from '../../../_utils/market-read'
-
-export interface PriceGridTier {
-  min_quantity: number
-  max_quantity: number | null
-  amount: number
-}
-
-export interface PriceGridVariant {
-  id: string
-  options: Record<string, string>
-  manage_inventory: boolean
-  tiers: PriceGridTier[]
-}
-
-export interface PriceGridResponse {
-  product_id: string
-  variants: PriceGridVariant[]
-}
+import { MARKETS } from '../../../../../lib/markets'
+import { buildPriceGrid } from '../../../_utils/price-grid'
 
 /**
  * GET /store/listings/:id/price-grid — each buyable variant's quantity price
@@ -67,24 +51,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return res.status(404).json({ message: 'Listing not found' })
   }
 
-  const variants: PriceGridVariant[] = ((product.variants ?? []) as any[])
-    .filter((v) => v?.metadata?.disabled !== true)
-    .map((v) => {
-      const options: Record<string, string> = {}
-      for (const ov of (v.options ?? []) as Array<{ value?: string; option?: { title?: string } }>) {
-        if (ov?.option?.title && ov.value != null) options[ov.option.title] = ov.value
-      }
-      const tiers: PriceGridTier[] = ((v.prices ?? []) as any[])
-        .filter((p) => p.currency_code === 'mxn')
-        .map((p) => ({
-          min_quantity: p.min_quantity ?? 1,
-          max_quantity: p.max_quantity ?? null,
-          amount: p.amount,
-        }))
-        .sort((a, b) => a.min_quantity - b.min_quantity)
-      return { id: v.id, options, manage_inventory: !!v.manage_inventory, tiers }
-    })
-
-  const response: PriceGridResponse = { product_id: product.id, variants }
-  res.json({ price_grid: response })
+  const response = buildPriceGrid(product, MARKETS[gate.market].currency_code)
+  res.json({ price_grid: response, market_code: gate.market })
 }

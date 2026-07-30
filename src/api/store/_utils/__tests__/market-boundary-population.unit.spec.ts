@@ -121,4 +121,35 @@ describe('market boundary — population guard', () => {
         .toEqual({ file: rel(file), matches: false })
     }
   })
+
+  it('owned-shop detail and price-grid reads enforce seller ownership + publish state', () => {
+    const ownedReads = [
+      'src/api/store/sellers/[slug]/products/[id]/route.ts',
+      'src/api/store/sellers/[slug]/products/[id]/price-grid/route.ts',
+    ].map((path) => join(process.cwd(), ...path.split('/')))
+    for (const file of ownedReads) {
+      const source = read(file)
+      expect(source).toMatch(/resolveSellerProductIds\(/)
+      expect(source).toMatch(/owned\.has\(id\)/)
+      expect(source).toMatch(/status:\s*'published'/)
+      expect(source).not.toMatch(/MARKETPLACE_CHANNEL_FIELDS|sales_channels/)
+    }
+  })
+
+  it('the generic seller metadata PATCH reserves operating_market', () => {
+    const source = read(join(STORE_API, 'sellers/me/route.ts'))
+    expect(source).toMatch(/hasOwnProperty\.call\(body\.metadata,\s*SELLER_OPERATING_MARKET_KEY\)/)
+    expect(source).toMatch(/status\(422\)/)
+  })
+
+  it('public seller reads use the sanitized projection', () => {
+    const publicReads = [
+      'src/api/store/sellers/route.ts',
+      'src/api/store/sellers/[slug]/route.ts',
+      'src/api/store/sellers/[slug]/products/route.ts',
+    ].map((path) => join(process.cwd(), ...path.split('/')))
+    for (const file of publicReads) {
+      expect(read(file)).toMatch(/toSellerShape/)
+    }
+  })
 })

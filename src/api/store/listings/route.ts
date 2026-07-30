@@ -91,7 +91,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   // ── Step 3: Map to listing shape ──────────────────────────────────────────
   let listings = marketProducts.map((p: any) =>
-    toListingShape(p, productToSeller.get(p.id))
+    toListingShape(p, productToSeller.get(p.id), gate.market)
   )
 
   // ── Step 4: Apply filters ─────────────────────────────────────────────────
@@ -125,7 +125,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // — the caller wants only the pool, not the heavy listing bodies.
   if (q.facets === '1' && q.category === 'autos') {
     const facet_pool = listings.map(toCarFacetPoolEntry)
-    res.json({ facet_pool, total: facet_pool.length })
+    res.json({ facet_pool, total: facet_pool.length, market_code: gate.market })
     return
   }
 

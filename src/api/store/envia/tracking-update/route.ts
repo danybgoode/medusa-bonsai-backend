@@ -22,6 +22,7 @@
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
+import { internalSecretOk } from '../../../../lib/internal-auth'
 import { markOrderFulfillmentAsDeliveredWorkflow } from '@medusajs/medusa/core-flows'
 
 // Envia status → our fulfillment_state (only advance, never retreat)
@@ -41,14 +42,7 @@ const STATE_RANK: Record<string, number> = {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  // Internal secret guard — matches the pattern used by all /internal/* routes
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  if (internalSecret) {
-    const provided = req.headers['x-internal-secret'] as string | undefined
-    if (provided !== internalSecret) {
-      return res.status(401).json({ message: 'Unauthorized' })
-    }
-  }
+  if (!internalSecretOk(req)) return res.status(401).json({ message: 'Unauthorized' })
 
   const body = req.body as {
     orderId?: string

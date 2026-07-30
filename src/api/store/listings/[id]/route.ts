@@ -68,5 +68,5 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     }
   }
 
-  res.json({ listing: toListingShape(product, seller), market_code: gate.market })
+  res.json({ listing: toListingShape(product, seller, gate.market), market_code: gate.market })
 }

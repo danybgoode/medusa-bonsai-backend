@@ -1,6 +1,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
+import { toSellerShape } from '../../_utils/listing'
 
 // GET /store/sellers/:slug — public seller profile
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -13,5 +14,5 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return res.status(404).json({ message: `Seller '${slug}' not found` })
   }
 
-  res.json({ seller })
+  res.json({ seller: toSellerShape(seller) })
 }

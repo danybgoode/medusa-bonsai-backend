@@ -4,7 +4,7 @@
  * lying around.
  *
  * Before this seam, every create did `sales_channels: [{ id: MEDUSA_SALES_CHANNEL_ID
- * ?? store.default_sales_channel_id }]` — one hard-coded channel for one hard-coded
+ * ?? store.default_sales_channel_id }]` — one fallback chain for one hard-coded
  * country. Fine while exactly one market exists; a silent cross-market publication the
  * moment a second one does.
  *
@@ -64,23 +64,17 @@ export interface PublicationRequest {
 /**
  * How the create path should resolve a Sales Channel.
  *
- *   channel       — link this exact channel id.
- *   store_default — legacy fallback: the marketplace is open but
- *                   `MEDUSA_SALES_CHANNEL_ID` is unset, so fall back to
- *                   `store.default_sales_channel_id` exactly as before. Preserved
- *                   because a product in NO channel is unbuyable (see above). The
- *                   fallback is an I/O read, so the shell performs it; this pure
- *                   function only says that it should.
+ *   channel       — link this exact market channel id.
  *   refused       — the create must not proceed. Carries an actionable message.
  */
 export type PublicationChannelPlan =
   | { readonly status: 'channel'; readonly market: MarketCode; readonly channel_id: string }
-  | { readonly status: 'store_default'; readonly market: MarketCode; readonly reason: string }
-  | { readonly status: 'refused'; readonly market: MarketCode; readonly message: string }
-
-export type RequiredPublicationChannel =
-  | { readonly ok: true; readonly channel_id: string }
-  | { readonly ok: false; readonly message: string }
+  | {
+      readonly status: 'refused'
+      readonly market: MarketCode
+      readonly http_status: 422 | 503
+      readonly message: string
+    }
 
 export function planProductPublication(
   input: PublicationRequest,
@@ -92,6 +86,7 @@ export function planProductPublication(
     return {
       status: 'refused',
       market: sellerMarket,
+      http_status: 422,
       message: 'La publicación "solo tienda propia" no está disponible: un producto sin canal de venta ' +
         'no se puede comprar. Omite publish_to_market para publicar en el marketplace de tu tienda.',
     }
@@ -110,6 +105,7 @@ export function planProductPublication(
     return {
       status: 'refused',
       market: target,
+      http_status: 422,
       message: `Tu tienda opera en ${sellerMarket.toUpperCase()} y no puede publicar en el marketplace de ` +
         `${target.toUpperCase()}. La publicación es específica de cada país.`,
     }
@@ -125,6 +121,7 @@ export function planProductPublication(
     return {
       status: 'refused',
       market: record.code,
+      http_status: 422,
       message: `El marketplace de ${record.code.toUpperCase()} todavía no está abierto ` +
         `(${record.marketplace_status}). Tu tienda existe, pero aún no se puede publicar ahí.`,
     }
@@ -135,51 +132,11 @@ export function planProductPublication(
     return { status: 'channel', market: record.code, channel_id: channel.id }
   }
   return {
-    status: 'store_default',
+    status: 'refused',
     market: record.code,
-    reason: channel.status === 'unconfigured'
+    http_status: 503,
+    message: channel.status === 'unconfigured'
       ? channel.reason
       : `Market "${record.code}" has no marketplace channel configured.`,
   }
-}
-
-/**
- * Resolve the publication plan to the concrete Sales Channel the product workflow
- * MUST receive.
- *
- * The injected callback is the I/O shell around `store.default_sales_channel_id`.
- * D12b removed the explicit channel-less outcome, but that guarantee is meaningless
- * if a missing/throwing fallback lookup can still flow into product creation with
- * `salesChannelId === undefined`. Every failure therefore returns a refusal that the
- * caller handles BEFORE `createProductsWorkflow` runs.
- */
-export async function resolveRequiredPublicationChannel(
-  plan: Exclude<PublicationChannelPlan, { status: 'refused' }>,
-  readStoreDefaultChannelId: () => Promise<unknown>,
-): Promise<RequiredPublicationChannel> {
-  if (plan.status === 'channel') {
-    return { ok: true, channel_id: plan.channel_id }
-  }
-
-  let raw: unknown
-  try {
-    raw = await readStoreDefaultChannelId()
-  } catch {
-    return {
-      ok: false,
-      message: 'No se pudo resolver el canal de venta predeterminado. ' +
-        'El producto no fue creado; revisa la configuración de Sales Channels.',
-    }
-  }
-
-  const channelId = typeof raw === 'string' ? raw.trim() : ''
-  if (!channelId) {
-    return {
-      ok: false,
-      message: 'La tienda no tiene un canal de venta predeterminado configurado. ' +
-        'El producto no fue creado porque quedaría imposible de comprar.',
-    }
-  }
-
-  return { ok: true, channel_id: channelId }
 }

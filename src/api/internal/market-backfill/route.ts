@@ -49,7 +49,6 @@ import {
   planMarketplaceLinkBackfill,
   planSellerMarketBackfill,
   readSellerOperatingMarket,
-  setSellerOperatingMarket,
 } from '../../../lib/seller-market'
 import {
   MARKETPLACE_CHANNEL_FIELDS,
@@ -60,6 +59,7 @@ import { resolveSellerProductIds } from '../../store/_utils/seller-catalog-query
 import { describeScan } from '../_utils/scan-window'
 import {
   marketBackfillBlockingReasons,
+  stampSellerMarketIfAbsent,
   type OwnershipScanFailure,
 } from '../_utils/market-backfill'
 import { internalSecretOk } from '../../../lib/internal-auth'
@@ -316,26 +316,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
   }
 
-  const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const salesChannelService: any = req.scope.resolve(Modules.SALES_CHANNEL)
+  const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
 
   // ── APPLY 1: seller operating_market ──────────────────────────────────────
-  // Re-read each seller immediately before writing. A read is not a claim: the plan
-  // was computed from a list read, and `updateSellers` replaces the whole metadata
-  // bag — a value written between the two would be clobbered. The re-read narrows the
-  // window AND makes the apply idempotent: a seller that already has a value is
-  // skipped, so a second run is a no-op rather than a rewrite.
+  // One conditional JSONB UPDATE owns both the "still absent?" check and the write.
+  // Replacing the whole metadata bag here would lose a concurrent shop-settings edit.
   let sellersUpdated = 0
   let sellersSkipped = 0
   for (const update of s.sellerPlan.updates) {
-    const [fresh] = await sellerService.listSellers({ id: update.id }, { take: 1 })
-    if (!fresh) { sellersSkipped += 1; continue }
-    if (readSellerOperatingMarket(fresh).source !== 'legacy_default') { sellersSkipped += 1; continue }
-    await sellerService.updateSellers({
-      id: fresh.id,
-      metadata: setSellerOperatingMarket(fresh.metadata, market),
-    })
-    sellersUpdated += 1
+    const result = await stampSellerMarketIfAbsent(db, update.id, market)
+    if (result === 'updated') sellersUpdated += 1
+    else sellersSkipped += 1
   }
 
   // ── APPLY 2: link ONLY this market's sellers' products ────────────────────

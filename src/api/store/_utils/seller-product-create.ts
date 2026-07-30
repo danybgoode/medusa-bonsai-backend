@@ -22,10 +22,7 @@ import {
 } from './inventory'
 import { resolveDefaultShippingProfileId } from './fulfillment'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
-import {
-  planProductPublication,
-  resolveRequiredPublicationChannel,
-} from './product-publication'
+import { planProductPublication } from './product-publication'
 import type { MarketCode } from '../../../lib/markets'
 import { requireSellerOperatingMarket } from '../../../lib/seller-market'
 import SellerModuleService from '../../../modules/seller/service'
@@ -267,8 +264,9 @@ export async function createSellerProduct(
   // is derived from the OWNING SELLER's `operating_market` — not from a platform-wide
   // default, because that would publish a non-Mexico shop into the Mexico marketplace
   // and hand it Mexico's Stripe/shipping rails, which story 1.2's acceptance forbids.
-  // For every seller that exists today (all `mx`) the resolved chain is exactly the
-  // previous one: env var, then the store default.
+  // For every seller that exists today (all `mx`) the configured marketplace channel
+  // remains the same. A missing market channel is an outage, never permission to
+  // adopt the Store default (D0 proves those channels have different meanings).
   //
   // The seller row is read HERE rather than trusted from the caller: both callers
   // resolve a seller before calling, but neither passes its metadata, and a market
@@ -295,24 +293,9 @@ export async function createSellerProduct(
     process.env,
   )
   if (publicationPlan.status === 'refused') {
-    return { ok: false, status: 422, message: publicationPlan.message }
+    return { ok: false, status: publicationPlan.http_status, message: publicationPlan.message }
   }
-
-  // D12b's "channel-less products are unreachable" guarantee has to hold at the I/O
-  // boundary too. A missing or failed store-default lookup is a configuration outage,
-  // not permission to create an unbuyable product with no Sales Channel.
-  const requiredChannel = await resolveRequiredPublicationChannel(
-    publicationPlan,
-    async () => {
-      const storeService: any = scope.resolve(Modules.STORE)
-      const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
-      return store?.default_sales_channel_id
-    },
-  )
-  if (!requiredChannel.ok) {
-    return { ok: false, status: 503, message: requiredChannel.message }
-  }
-  const salesChannelId = requiredChannel.channel_id
+  const salesChannelId = publicationPlan.channel_id
 
   // ── Inventory: physical `product` listings are unique-stock items ─────────
   // Managed variants let Medusa's completeCartWorkflow reserve stock on order

@@ -2,7 +2,8 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { isHiddenCatalogProduct } from '../../../_utils/support'
-import { stripPrivateVariantMetadata } from '../../../_utils/listing'
+import { stripPrivateVariantMetadata, toSellerShape } from '../../../_utils/listing'
+import { requireSellerOperatingMarket } from '../../../../../lib/seller-market'
 import { resolveSellerProductIds } from '../../../_utils/seller-catalog-query'
 
 // GET /store/sellers/:slug/products — all active products for a seller storefront
@@ -14,6 +15,13 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (!seller) {
     return res.status(404).json({ message: `Seller '${slug}' not found` })
   }
+  let market
+  try {
+    market = requireSellerOperatingMarket(seller)
+  } catch (e) {
+    return res.status(422).json({ message: (e as Error).message })
+  }
+  const publicSeller = toSellerShape(seller)
 
   // Use the remote query to join seller → products via the link table
   const remoteQuery = req.scope.resolve('remoteQuery')
@@ -26,8 +34,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   if (linkedIds.length === 0) {
     return res.json({
-      seller,
+      seller: publicSeller,
       products: [],
+      market_code: market,
       count: 0,
       limit,
       offset,
@@ -66,8 +75,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     .map(stripPrivateVariantMetadata)
 
   res.json({
-    seller,
+    seller: publicSeller,
     products,
+    market_code: market,
     count: matchedProducts.length,
     limit,
     offset,

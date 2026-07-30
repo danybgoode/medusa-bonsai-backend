@@ -1,6 +1,7 @@
 import type { MedusaIdResolution } from '../../../../lib/market-medusa'
 import {
   marketBackfillBlockingReasons,
+  stampSellerMarketIfAbsent,
   type MarketBackfillPreconditions,
 } from '../market-backfill'
 import { describeScan } from '../scan-window'
@@ -114,5 +115,20 @@ describe('describeScan — a filled cap is never called complete', () => {
     expect(scan.complete).toBe(false)
     expect(scan.reason).toMatch(/not authoritative/)
     expect(scan.reason).toMatch(/no write may be applied/)
+  })
+})
+
+describe('stampSellerMarketIfAbsent — one atomic metadata-key update', () => {
+  it.each([
+    [{ rowCount: 1 }, 'updated'],
+    [{ rowCount: 0 }, 'skipped'],
+  ] as const)('maps the conditional UPDATE result %#', async (result, expected) => {
+    const raw = jest.fn(async (_sql: string, _bindings: readonly unknown[]) => result)
+    await expect(stampSellerMarketIfAbsent({ raw }, 'sel_1', 'mx')).resolves.toBe(expected)
+    const [sql, bindings] = raw.mock.calls[0]
+    expect(sql).toMatch(/jsonb_set/)
+    expect(sql).toMatch(/metadata->>'operating_market'/)
+    expect(sql).toMatch(/RETURNING id/)
+    expect(bindings).toEqual(['mx', 'sel_1'])
   })
 })

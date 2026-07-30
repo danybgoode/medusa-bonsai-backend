@@ -18,8 +18,8 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { deleteSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
-import { protectedSalesChannelIds } from '../../../lib/market-medusa'
 import { internalSecretOk } from '../../../lib/internal-auth'
+import { planProtectedSalesChannels } from '../_utils/market-protected-resources'
 
 function authed(req: MedusaRequest): boolean {
   // Fail CLOSED: a missing MEDUSA_INTERNAL_SECRET denies everyone. One
@@ -37,17 +37,52 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const salesChannelService: any = req.scope.resolve(Modules.SALES_CHANNEL)
 
   // Resolve the two channels we must keep
-  const [store] = await storeService.listStores(
-    {}, { select: ['id', 'default_sales_channel_id'], take: 1 },
+  let storeDefaultChannelId: unknown
+  try {
+    const stores = await storeService.listStores(
+      {}, { select: ['id', 'default_sales_channel_id'], take: 1 },
+    )
+    storeDefaultChannelId = stores?.[0]?.default_sales_channel_id
+  } catch (e) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: [`Could not list stores: ${e instanceof Error ? e.message : String(e)}`],
+    })
+  }
+  const protectedPlan = planProtectedSalesChannels(
+    process.env,
+    storeDefaultChannelId,
   )
-  const keepIds = new Set<string>(
-    protectedSalesChannelIds(process.env, store?.default_sales_channel_id ?? null),
-  )
+  if (!protectedPlan.ok) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: protectedPlan.blocked_by,
+    })
+  }
+  const keepIds = new Set<string>(protectedPlan.ids)
 
   // List all channels
-  const all: any[] = await salesChannelService.listSalesChannels(
-    {}, { select: ['id', 'name', 'is_disabled'], take: 500 },
-  ).catch(() => [] as any[])
+  let all: any[]
+  try {
+    all = await salesChannelService.listSalesChannels(
+      {}, { select: ['id', 'name', 'is_disabled'], take: 501 },
+    )
+  } catch (e) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: [`Could not list Sales Channels: ${e instanceof Error ? e.message : String(e)}`],
+    })
+  }
+  if (all.length > 500) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      blocked_by: ['Sales Channel scan exceeded 500 rows; refusing a truncated destructive plan.'],
+    })
+  }
 
   const toDelete = all.filter(sc => !keepIds.has(sc.id))
   const toKeep   = all.filter(sc =>  keepIds.has(sc.id))

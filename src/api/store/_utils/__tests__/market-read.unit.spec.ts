@@ -61,7 +61,8 @@ describe('resolveMarketReadGate — four outcomes, all named', () => {
       unavailable: true,
       market_code: 'us',
       marketplace_status: 'invitation',
-      reason: expect.stringMatching(/invitation/),
+      reason: 'marketplace_not_open',
+      message: expect.stringMatching(/invitation/),
     })
     // The whole point: no catalog key at all, so no caller can read it as "0 results".
     expect(gate.body).not.toHaveProperty('listings')
@@ -73,7 +74,8 @@ describe('resolveMarketReadGate — four outcomes, all named', () => {
     if (gate.ok) throw new Error('unreachable')
     expect(gate.kind).toBe('unknown')
     expect(gate.status).toBe(400)
-    expect(gate.body.reason).toMatch(/LOCALE/)
+    expect(gate.body.reason).toBe('unknown_market')
+    expect(gate.body.message).toMatch(/LOCALE/)
   })
 
   it('an OPEN market with no addressable channel FAILS CLOSED (503), it does not serve unfiltered', () => {
@@ -82,7 +84,8 @@ describe('resolveMarketReadGate — four outcomes, all named', () => {
     if (gate.ok) throw new Error('unreachable')
     expect(gate.kind).toBe('unavailable')
     expect(gate.status).toBe(503)
-    expect(gate.body.reason).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
+    expect(gate.body.reason).toBe('market_filter_unavailable')
+    expect(gate.body.message).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
     // Distinct from the `us` case — a misconfigured deploy must not read as
     // "this market has no marketplace".
     const usGate = resolveMarketReadGate('us', {})

@@ -1,8 +1,5 @@
 import { UnknownMarketError } from '../../../../lib/markets'
-import {
-  planProductPublication,
-  resolveRequiredPublicationChannel,
-} from '../product-publication'
+import { planProductPublication } from '../product-publication'
 
 /**
  * Publication intent at the seller-product create call site (build contract item 4,
@@ -79,67 +76,25 @@ describe('planProductPublication — "owned shop only" is not a shippable capabi
   })
 
   it('no outcome ever produces a product with no channel', () => {
-    // Every non-refused status must name a channel or send the caller to the store
-    // default. "Create it with nothing" is not in the type any more.
     for (const env of [PROD_ENV, {}]) {
       const plan = planProductPublication({ sellerMarket: 'mx' }, env)
-      expect(['channel', 'store_default']).toContain(plan.status)
+      if (plan.status === 'channel') expect(plan.channel_id).toBeTruthy()
+      else expect(plan.http_status).toBeGreaterThanOrEqual(400)
     }
   })
 })
 
-describe('planProductPublication — the legacy store-default fallback survives', () => {
-  it('mx with no env var falls back to the store default, as before', () => {
+describe('planProductPublication — active-market configuration fails closed', () => {
+  it('mx with no marketplace channel refuses instead of adopting the Store default', () => {
     const plan = planProductPublication({ sellerMarket: 'mx' }, {})
-    expect(plan.status).toBe('store_default')
-    if (plan.status !== 'store_default') throw new Error('unreachable')
-    expect(plan.reason).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
+    expect(plan.status).toBe('refused')
+    if (plan.status !== 'refused') throw new Error('unreachable')
+    expect(plan.http_status).toBe(503)
+    expect(plan.message).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
+    expect(JSON.stringify(plan)).not.toContain('store_default')
   })
 
   it('a refused market does NOT reach the store-default fallback', () => {
     expect(planProductPublication({ sellerMarket: 'us' }, {}).status).toBe('refused')
-  })
-})
-
-describe('resolveRequiredPublicationChannel — the I/O shell cannot create channel-less products', () => {
-  it('uses an already-resolved market channel without consulting the store fallback', async () => {
-    const readDefault = jest.fn(async () => 'sc_default')
-    await expect(resolveRequiredPublicationChannel(
-      { status: 'channel', market: 'mx', channel_id: MX_CHANNEL },
-      readDefault,
-    )).resolves.toEqual({ ok: true, channel_id: MX_CHANNEL })
-    expect(readDefault).not.toHaveBeenCalled()
-  })
-
-  it.each([undefined, null, '', '   ', 42])(
-    'refuses a missing or invalid store default (%p) before product creation',
-    async (value) => {
-      const result = await resolveRequiredPublicationChannel(
-        { status: 'store_default', market: 'mx', reason: 'env unset' },
-        async () => value,
-      )
-      expect(result.ok).toBe(false)
-      if (result.ok) throw new Error('unreachable')
-      expect(result.message).toMatch(/no tiene un canal de venta predeterminado/)
-      expect(result.message).toMatch(/no fue creado/)
-    },
-  )
-
-  it('refuses a throwing store lookup before product creation', async () => {
-    const result = await resolveRequiredPublicationChannel(
-      { status: 'store_default', market: 'mx', reason: 'env unset' },
-      async () => { throw new Error('store database unavailable') },
-    )
-    expect(result.ok).toBe(false)
-    if (result.ok) throw new Error('unreachable')
-    expect(result.message).toMatch(/No se pudo resolver/)
-    expect(result.message).toMatch(/no fue creado/)
-  })
-
-  it('trims and returns a valid store default id', async () => {
-    await expect(resolveRequiredPublicationChannel(
-      { status: 'store_default', market: 'mx', reason: 'env unset' },
-      async () => '  sc_default  ',
-    )).resolves.toEqual({ ok: true, channel_id: 'sc_default' })
   })
 })

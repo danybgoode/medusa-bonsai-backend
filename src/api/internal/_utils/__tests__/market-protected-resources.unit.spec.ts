@@ -1,6 +1,10 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { describeRegionKeep, planRegionDeletions } from '../market-protected-resources'
+import {
+  describeRegionKeep,
+  planProtectedSalesChannels,
+  planRegionDeletions,
+} from '../market-protected-resources'
 
 /**
  * The registry allow-list on the two destructive setup paths (build contract item 5,
@@ -114,7 +118,35 @@ describe('prune-sales-channels — the sibling write primitive uses the same lis
   const source = readFileSync(join(process.cwd(), 'src/api/internal/prune-sales-channels/route.ts'), 'utf8')
 
   it('keeps every registry-declared channel, not just the env one', () => {
-    expect(source).toMatch(/protectedSalesChannelIds\(/)
+    expect(source).toMatch(/planProtectedSalesChannels\(/)
     expect(source).not.toMatch(/process\.env\.MEDUSA_SALES_CHANNEL_ID \?\? ''/)
+  })
+
+  it('does not collapse a failed Sales Channel list into an empty success', () => {
+    expect(source).not.toMatch(/listSalesChannels[\s\S]{0,200}\.catch\(\(\) => \[\]/)
+    expect(source).toMatch(/Could not list Sales Channels/)
+  })
+})
+
+describe('planProtectedSalesChannels — destructive plans require known protection', () => {
+  it('keeps the store default and every active marketplace channel', () => {
+    expect(planProtectedSalesChannels(PROD_ENV, 'sc_default')).toEqual({
+      ok: true,
+      ids: ['sc_default', PROD_ENV.MEDUSA_SALES_CHANNEL_ID],
+    })
+  })
+
+  it('blocks when the active MX channel is unconfigured', () => {
+    const plan = planProtectedSalesChannels({}, 'sc_default')
+    expect(plan.ok).toBe(false)
+    if (plan.ok) throw new Error('unreachable')
+    expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
+  })
+
+  it('blocks when the store default is unavailable', () => {
+    const plan = planProtectedSalesChannels(PROD_ENV, null)
+    expect(plan.ok).toBe(false)
+    if (plan.ok) throw new Error('unreachable')
+    expect(plan.blocked_by.join(' ')).toMatch(/store default/)
   })
 })

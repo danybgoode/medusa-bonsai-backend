@@ -38,7 +38,8 @@ export interface MarketUnavailableBody {
   readonly unavailable: true
   readonly market_code: string | null
   readonly marketplace_status: MarketplaceStatus | null
-  readonly reason: string
+  readonly reason: 'unknown_market' | 'marketplace_not_open' | 'market_filter_unavailable'
+  readonly message: string
 }
 
 /**
@@ -97,7 +98,8 @@ export function resolveMarketReadGate(raw: unknown, env: MarketMedusaEnv): Marke
         unavailable: true,
         market_code: typeof raw === 'string' ? raw : null,
         marketplace_status: null,
-        reason: requested.error.message,
+        reason: 'unknown_market',
+        message: requested.error.message,
       },
     }
   }
@@ -112,7 +114,8 @@ export function resolveMarketReadGate(raw: unknown, env: MarketMedusaEnv): Marke
         unavailable: true,
         market_code: record.code,
         marketplace_status: record.marketplace_status,
-        reason: `The ${record.code.toUpperCase()} marketplace is "${record.marketplace_status}" — it has no public catalog.`,
+        reason: 'marketplace_not_open',
+        message: `The ${record.code.toUpperCase()} marketplace is "${record.marketplace_status}" — it has no public catalog.`,
       },
     }
   }
@@ -127,7 +130,8 @@ export function resolveMarketReadGate(raw: unknown, env: MarketMedusaEnv): Marke
         unavailable: true,
         market_code: record.code,
         marketplace_status: record.marketplace_status,
-        reason: channel.reason,
+        reason: 'market_filter_unavailable',
+        message: channel.reason,
       },
     }
   }

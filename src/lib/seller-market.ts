@@ -207,11 +207,12 @@ export function resolveSellerMarketContext(
  * Story 1.2 asks that these surfaces expose the market code WITHOUT exposing
  * seller metadata: `seller.metadata` also carries Stripe Connect account ids,
  * payout config and private shop settings, so a route must never spread the whole
- * bag to satisfy "show the market". This returns exactly the three public facts.
+ * bag to satisfy "show the market". This returns only registry-backed public facts.
  */
 export function publicSellerMarket(source: unknown): {
   market_code: MarketCode | null
   country_code: string | null
+  currency_code: string | null
   marketplace_status: MarketRecord['marketplace_status'] | null
 } {
   const read = readSellerOperatingMarket(source)
@@ -219,12 +220,13 @@ export function publicSellerMarket(source: unknown): {
     // Unknown stored value: report absence honestly rather than defaulting to mx on
     // a PUBLIC surface, where a wrong country is a wrong claim to every agent
     // reading it.
-    return { market_code: null, country_code: null, marketplace_status: null }
+    return { market_code: null, country_code: null, currency_code: null, marketplace_status: null }
   }
   const record = MARKETS[read.market]
   return {
     market_code: record.code,
     country_code: record.country_code,
+    currency_code: record.currency_code,
     marketplace_status: record.marketplace_status,
   }
 }

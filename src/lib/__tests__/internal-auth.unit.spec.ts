@@ -88,6 +88,9 @@ describe('no /internal or /store route re-implements a fail-open secret check', 
     /return\s+!!\w+\s*&&\s*\w+\s*!==\s*\w+/,
     // `if (internalSecret && headerSecret !== internalSecret)`
     /if\s*\(\s*\w*[sS]ecret\w*\s*&&\s*\w+\s*!==\s*\w+\s*\)/,
+    // `if (secret) { if (provided !== secret) ... }` — same fail-open rule split
+    // across two blocks (the Envía tracking callback was the missed fourth shape).
+    /if\s*\(\s*(\w*[sS]ecret\w*)\s*\)\s*\{[\s\S]{0,300}?if\s*\([^)]*!==\s*\1\s*\)/,
   ]
 
   it.each(files.map((file) => [relative(process.cwd(), file), file]))(

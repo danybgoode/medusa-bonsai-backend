@@ -17,7 +17,11 @@
  */
 
 import { MARKET_CODES, MARKETS } from '../../../lib/markets'
-import { type MarketMedusaEnv, registryRegionIds } from '../../../lib/market-medusa'
+import {
+  type MarketMedusaEnv,
+  registryRegionIds,
+  resolveMarketplaceChannelForMarket,
+} from '../../../lib/market-medusa'
 
 export interface RegionLike {
   readonly id: string
@@ -114,4 +118,34 @@ export function describeRegionKeep(entry: RegionDeletionPlan['keep'][number]): s
     case 'price_in_use':
       return `⚠ Region "${entry.name}" (${entry.id}, ${entry.currency_code}) — at least one real product price uses this currency — NOT deleted, needs manual review`
   }
+}
+
+export type ProtectedChannelPlan =
+  | { readonly ok: true; readonly ids: readonly string[] }
+  | { readonly ok: false; readonly blocked_by: readonly string[] }
+
+/**
+ * A destructive channel sweep may start only when every active marketplace channel
+ * and the store default are positively known. "Unconfigured" is unavailable, not an
+ * empty allow-list.
+ */
+export function planProtectedSalesChannels(
+  env: MarketMedusaEnv,
+  storeDefaultChannelId: unknown,
+): ProtectedChannelPlan {
+  const ids = new Set<string>()
+  const blocked: string[] = []
+  const storeDefault = typeof storeDefaultChannelId === 'string' ? storeDefaultChannelId.trim() : ''
+  if (!storeDefault) blocked.push('The store default Sales Channel could not be resolved.')
+  else ids.add(storeDefault)
+
+  for (const code of MARKET_CODES) {
+    if (MARKETS[code].marketplace_status !== 'active') continue
+    const channel = resolveMarketplaceChannelForMarket(code, env)
+    if (channel.status === 'resolved') ids.add(channel.id)
+    else blocked.push(channel.reason)
+  }
+  return blocked.length > 0
+    ? { ok: false, blocked_by: blocked }
+    : { ok: true, ids: [...ids] }
 }

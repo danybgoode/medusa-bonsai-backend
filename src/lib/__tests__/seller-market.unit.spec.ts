@@ -124,17 +124,27 @@ describe('resolveSellerMarketContext — an unsupported market cannot inherit Me
 })
 
 describe('publicSellerMarket — market code without leaking seller metadata', () => {
-  it('returns only the three public facts', () => {
+  it('returns only the public registry facts', () => {
     const projection = publicSellerMarket({
       metadata: { operating_market: 'mx', stripe_account_id: 'acct_secret', payout_bank: '1234' },
     })
-    expect(projection).toEqual({ market_code: 'mx', country_code: 'mx', marketplace_status: 'active' })
+    expect(projection).toEqual({
+      market_code: 'mx',
+      country_code: 'mx',
+      currency_code: 'mxn',
+      marketplace_status: 'active',
+    })
     expect(JSON.stringify(projection)).not.toMatch(/acct_secret|1234/)
   })
 
   it('reports absence honestly for an unrecognised value rather than claiming mx', () => {
     expect(publicSellerMarket({ metadata: { operating_market: 'ca' } }))
-      .toEqual({ market_code: null, country_code: null, marketplace_status: null })
+      .toEqual({
+        market_code: null,
+        country_code: null,
+        currency_code: null,
+        marketplace_status: null,
+      })
   })
 })
 
