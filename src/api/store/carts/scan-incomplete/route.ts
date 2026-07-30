@@ -26,6 +26,7 @@ import { ICartModuleService, IPaymentModuleService } from '@medusajs/framework/t
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { resolveSellerMpToken } from '../../_utils/mp'
+import { internalSecretOk } from '../../../../lib/internal-auth'
 
 const STRIPE_PROVIDER_ID = 'pp_stripe-connect_stripe-connect'
 const MP_PROVIDER_ID = 'pp_mercadopago_mercadopago'
@@ -71,9 +72,8 @@ function shippingQuoteFromCartMeta(meta: Record<string, any>) {
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // ── Internal-secret auth ──────────────────────────────────────────────────
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 

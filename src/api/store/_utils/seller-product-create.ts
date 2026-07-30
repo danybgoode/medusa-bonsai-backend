@@ -22,8 +22,13 @@ import {
 } from './inventory'
 import { resolveDefaultShippingProfileId } from './fulfillment'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
-import { planPublicationChannel, resolvePublicationIntent } from './product-publication'
+import {
+  planProductPublication,
+  resolveRequiredPublicationChannel,
+} from './product-publication'
 import type { MarketCode } from '../../../lib/markets'
+import { requireSellerOperatingMarket } from '../../../lib/seller-market'
+import SellerModuleService from '../../../modules/seller/service'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 export function generateSku(): string {
@@ -87,16 +92,15 @@ export interface CreateProductBody {
    * MARKETPLACE PUBLICATION INTENT, stated by the call site (epic
    * market-architecture-foundation, story 1.3).
    *
-   *   omitted  — publish into `DEFAULT_MARKET` (`mx`). Byte-identical to the
-   *              behaviour every existing caller has today.
-   *   'mx'     — the same thing, said out loud.
-   *   null     — OWNED-SHOP ONLY: create the product with no marketplace Sales
-   *              Channel. It stays fully visible on the seller's own shop,
-   *              subdomain, custom domain and embed, and never appears in a
-   *              country marketplace.
+   *   omitted  — publish into the SELLER's own operating market. For every seller
+   *              that exists today (all `mx`) this is byte-identical to the previous
+   *              behaviour.
+   *   'mx'     — the same thing, said out loud. Must match the seller's market.
    *
-   * A market whose marketplace is not open (`us` is `invitation`) is REFUSED, not
-   * silently downgraded to Mexico's channel.
+   * A market whose marketplace is not open (`us` is `invitation`) is REFUSED with an
+   * actionable message, never silently downgraded to Mexico's channel. There is no
+   * "owned shop only" value — see the header of `product-publication.ts` for why a
+   * channel-less product is unbuyable and what would have to be built first.
    */
   publish_to_market?: MarketCode | null
 }
@@ -254,35 +258,61 @@ export async function createSellerProduct(
     ...(body.metadata ?? {}),
   }
 
-  // ── Resolve the sales channel from the STATED publication intent ──────────
+  // ── Resolve the sales channel from the SELLER's market ────────────────────
   // The product MUST be in the store's sales channel, otherwise the standard
   // (channel-scoped) /store/products endpoint 404s and checkout fails with
   // "Product not found" even though the custom /store/listings endpoint shows it.
   //
-  // What changed (story 1.3): the channel is no longer "whatever env var is set" —
-  // it is derived from `body.publish_to_market`, so a caller can create an
-  // owned-shop-only product (no channel at all) and a caller naming a market whose
-  // marketplace is not open is refused instead of being handed Mexico's channel.
-  // The default intent resolves to exactly the previous chain (env var, then the
-  // store default), so existing callers are unchanged.
-  const publicationPlan = planPublicationChannel(
-    resolvePublicationIntent(body.publish_to_market),
+  // What changed (story 1.3): the channel is no longer "whatever env var is set". It
+  // is derived from the OWNING SELLER's `operating_market` — not from a platform-wide
+  // default, because that would publish a non-Mexico shop into the Mexico marketplace
+  // and hand it Mexico's Stripe/shipping rails, which story 1.2's acceptance forbids.
+  // For every seller that exists today (all `mx`) the resolved chain is exactly the
+  // previous one: env var, then the store default.
+  //
+  // The seller row is read HERE rather than trusted from the caller: both callers
+  // resolve a seller before calling, but neither passes its metadata, and a market
+  // that a caller could assert is not a market this function can enforce.
+  let sellerMarket: MarketCode
+  try {
+    const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
+    const [sellerRow] = await sellerService.listSellers({ id: sellerId }, { take: 1 })
+    if (!sellerRow) {
+      // Fail closed. Trusting `sellerId` for the LINK is fine — a bad id simply
+      // fails there — but silently guessing a market for an unresolvable seller is
+      // how a product lands in the wrong country's marketplace.
+      return { ok: false, status: 404, message: 'No se encontró la tienda para este producto.' }
+    }
+    sellerMarket = requireSellerOperatingMarket(sellerRow)
+  } catch (e) {
+    // `requireSellerOperatingMarket` throws on a stored value we cannot classify.
+    // Repair the row rather than defaulting it — see GET /internal/market-backfill.
+    return { ok: false, status: 422, message: (e as Error).message }
+  }
+
+  const publicationPlan = planProductPublication(
+    { requested: body.publish_to_market, sellerMarket },
     process.env,
   )
   if (publicationPlan.status === 'refused') {
     return { ok: false, status: 422, message: publicationPlan.message }
   }
-  let salesChannelId: string | undefined =
-    publicationPlan.status === 'channel' ? publicationPlan.channel_id : undefined
-  if (publicationPlan.status === 'store_default') {
-    try {
+
+  // D12b's "channel-less products are unreachable" guarantee has to hold at the I/O
+  // boundary too. A missing or failed store-default lookup is a configuration outage,
+  // not permission to create an unbuyable product with no Sales Channel.
+  const requiredChannel = await resolveRequiredPublicationChannel(
+    publicationPlan,
+    async () => {
       const storeService: any = scope.resolve(Modules.STORE)
       const [store] = await storeService.listStores({}, { select: ['default_sales_channel_id'], take: 1 })
-      salesChannelId = store?.default_sales_channel_id ?? undefined
-    } catch (e) {
-      console.error('[createSellerProduct] sales channel resolve failed:', e)
-    }
+      return store?.default_sales_channel_id
+    },
+  )
+  if (!requiredChannel.ok) {
+    return { ok: false, status: 503, message: requiredChannel.message }
   }
+  const salesChannelId = requiredChannel.channel_id
 
   // ── Inventory: physical `product` listings are unique-stock items ─────────
   // Managed variants let Medusa's completeCartWorkflow reserve stock on order

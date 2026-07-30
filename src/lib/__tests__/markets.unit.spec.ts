@@ -75,11 +75,41 @@ describe('markets registry — golden record', () => {
 })
 
 describe('markets registry — narrowing', () => {
-  it('accepts a supported code, case-insensitively and trimmed', () => {
+  /**
+   * `isMarketCode` is STRICT and `normalizeMarketCode` is LENIENT, on purpose.
+   *
+   * An earlier version of this spec asserted `isMarketCode('MX') === true` — it
+   * faithfully encoded the contract, and the contract had a soundness bug: a lenient
+   * type predicate makes the compiler believe `'MX'` is a `MarketCode`, so
+   * `MARKETS['MX']` type-checks and returns `undefined`. A golden spec pins whatever
+   * the contract says, including its mistakes; that is precisely why a cross-family
+   * review pass exists as a separate axis from the spec suite.
+   */
+  it('isMarketCode accepts ONLY the canonical form (soundness of the type predicate)', () => {
     expect(isMarketCode('mx')).toBe(true)
-    expect(isMarketCode('MX')).toBe(true)
-    expect(isMarketCode(' us ')).toBe(true)
+    expect(isMarketCode('us')).toBe(true)
+    expect(isMarketCode('MX')).toBe(false)
+    expect(isMarketCode(' us ')).toBe(false)
+    expect(isMarketCode('Us')).toBe(false)
+  })
+
+  it('normalizeMarketCode is where the leniency lives, and it returns the CANONICAL value', () => {
+    expect(normalizeMarketCode('MX')).toBe('mx')
+    expect(normalizeMarketCode(' us ')).toBe('us')
     expect(normalizeMarketCode(' US ')).toBe('us')
+    expect(normalizeMarketCode('mx')).toBe('mx')
+    // The narrowed value is always usable as a key — the property the bug broke.
+    for (const untidy of ['MX', ' us ', 'Us', ' MX ']) {
+      const code = normalizeMarketCode(untidy)
+      expect(code).not.toBeNull()
+      expect(MARKETS[code!]).toBeDefined()
+      expect(isMarketCode(code)).toBe(true)
+    }
+  })
+
+  it('the lenient path still reaches a record; the strict predicate never blesses untidy input', () => {
+    expect(getMarket('MX')).toBe(MARKETS.mx)
+    expect(getMarket(' us ')).toBe(MARKETS.us)
   })
 
   it('rejects everything else — including a locale, a currency and a padded variant', () => {

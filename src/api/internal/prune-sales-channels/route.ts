@@ -19,11 +19,12 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules } from '@medusajs/framework/utils'
 import { deleteSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
 import { protectedSalesChannelIds } from '../../../lib/market-medusa'
+import { internalSecretOk } from '../../../lib/internal-auth'
 
 function authed(req: MedusaRequest): boolean {
-  const secret = process.env.MEDUSA_INTERNAL_SECRET
-  const provided = req.headers['x-internal-secret'] as string | undefined
-  return !secret || provided === secret
+  // Fail CLOSED: a missing MEDUSA_INTERNAL_SECRET denies everyone. One
+  // definition, in src/lib/internal-auth.ts — see the incident note there.
+  return internalSecretOk(req)
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {

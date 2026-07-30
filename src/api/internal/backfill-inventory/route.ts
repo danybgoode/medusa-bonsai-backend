@@ -19,6 +19,7 @@
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
+import { internalSecretOk } from '../../../lib/internal-auth'
 import {
   isStockableListingType,
   resolveStockLocationId,
@@ -28,9 +29,8 @@ import {
 } from '../../store/_utils/inventory'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 

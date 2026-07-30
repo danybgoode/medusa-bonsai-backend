@@ -21,7 +21,6 @@ import {
   type MarketCode,
   type MarketRecord,
   MARKETS,
-  isMarketCode,
   normalizeMarketCode,
   requireMarket,
   isMarketplaceOpen,
@@ -92,10 +91,22 @@ export function readSellerOperatingMarket(source: unknown): SellerOperatingMarke
   if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
     return { market: DEFAULT_MARKET, source: 'legacy_default', raw: null }
   }
-  if (!isMarketCode(raw)) {
+  // LENIENT ON READ, STRICT ON WRITE — deliberately, and this is the one place the
+  // asymmetry matters. `isMarketCode` is a strict type predicate (canonical form
+  // only, for soundness); using it here would classify a stored `'MX'` as `invalid`,
+  // and `invalid` is not a soft failure — `planSellerMarketBackfill` ABORTS THE WHOLE
+  // RUN on a single unclassifiable row. One stray capital letter, typed by hand in
+  // Admin or written by some future tool, would then block the backfill for every
+  // seller. `normalizeMarketCode` canonicalises instead, and `raw` below carries the
+  // CANONICAL value, so nothing downstream ever holds a non-canonical string typed as
+  // a MarketCode. Writes stay strict: `setSellerOperatingMarket` only ever persists
+  // `requireMarket(...).code`, so the untidy input can only arrive from outside this
+  // module in the first place.
+  const normalized = normalizeMarketCode(raw)
+  if (!normalized) {
     return { market: null, source: 'invalid', raw }
   }
-  return { market: normalizeMarketCode(raw)!, source: 'metadata', raw: (raw as string).trim().toLowerCase() }
+  return { market: normalized, source: 'metadata', raw: normalized }
 }
 
 /**
@@ -268,4 +279,57 @@ export function planSellerMarketBackfill(
   }
 
   return { target: market, updates, unchanged, unknown, abort: unknown.length > 0 }
+}
+
+/**
+ * Plan which products may be linked into a market's marketplace channel — PURE.
+ *
+ * The rule a cross-review had to add: **a product is only ever linked into the market
+ * its OWNING SELLER operates in.** The first draft linked every published product with
+ * no MX link, which would have silently published a non-Mexico shop's catalog into the
+ * Mexico marketplace — and, once "owned shop only" existed, would have destroyed an
+ * explicit opt-out on the very next backfill run.
+ *
+ * A product whose owner cannot be resolved is NOT linked. That is the fail-closed
+ * reading: we cannot prove it belongs in this market, and an orphaned product is a
+ * data-repair job (there is a whole sweep for it), not something a backfill should
+ * quietly adopt into a country marketplace. It is reported, not skipped in silence.
+ */
+export interface MarketLinkCandidate {
+  readonly id: string
+  /** The owning seller's market, or `null` when no owner could be resolved. */
+  readonly owner_market: MarketCode | null
+  readonly owner_seller_id?: string | null
+}
+
+export interface MarketplaceLinkPlan {
+  readonly target: MarketCode
+  /** Product ids safe to link into `target`'s marketplace channel. */
+  readonly link: string[]
+  /** Owned by a seller operating in a DIFFERENT market — never linked. */
+  readonly skipped_other_market: Array<{ id: string; owner_market: MarketCode }>
+  /** No resolvable owner — never linked, always reported. */
+  readonly skipped_unowned: string[]
+}
+
+export function planMarketplaceLinkBackfill(
+  candidates: readonly MarketLinkCandidate[],
+  target: MarketCode = DEFAULT_MARKET,
+): MarketplaceLinkPlan {
+  const market = requireMarket(target).code
+  const link: string[] = []
+  const skipped_other_market: MarketplaceLinkPlan['skipped_other_market'] = []
+  const skipped_unowned: string[] = []
+
+  for (const candidate of candidates) {
+    if (candidate.owner_market === null) {
+      skipped_unowned.push(candidate.id)
+    } else if (candidate.owner_market !== market) {
+      skipped_other_market.push({ id: candidate.id, owner_market: candidate.owner_market })
+    } else {
+      link.push(candidate.id)
+    }
+  }
+
+  return { target: market, link, skipped_other_market, skipped_unowned }
 }

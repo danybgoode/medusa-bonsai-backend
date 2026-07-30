@@ -15,11 +15,12 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { linkProductsToSalesChannelWorkflow } from '@medusajs/medusa/core-flows'
+import { internalSecretOk } from '../../../lib/internal-auth'
 
 function authed(req: MedusaRequest): boolean {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  return !internalSecret || headerSecret === internalSecret
+  // Fail CLOSED: a missing MEDUSA_INTERNAL_SECRET denies everyone. One
+  // definition, in src/lib/internal-auth.ts — see the incident note there.
+  return internalSecretOk(req)
 }
 
 /**
@@ -114,9 +115,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 }
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 

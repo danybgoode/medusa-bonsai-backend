@@ -29,13 +29,12 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SUBSCRIPTIONS_MODULE } from '../../../modules/subscriptions'
 import SubscriptionsModuleService from '../../../modules/subscriptions/service'
+import { internalSecretOk } from '../../../lib/internal-auth'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // ── Internal-secret auth ──────────────────────────────────────────────────
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 

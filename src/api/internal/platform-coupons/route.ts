@@ -26,11 +26,12 @@ import {
   type CouponInput,
 } from '../../store/_utils/coupons'
 import { resolvePlatformSellerSlug } from '../_utils/platform-seller'
+import { internalSecretMissing } from '../../../lib/internal-auth'
 
 function unauthorized(req: MedusaRequest): boolean {
-  const expected = process.env.MEDUSA_INTERNAL_SECRET
-  const got = req.headers['x-internal-secret'] as string | undefined
-  return !!expected && got !== expected
+  // Fail CLOSED: this used to return false when the env var was unset,
+  // authorizing everyone on a misconfigured deploy. See src/lib/internal-auth.ts.
+  return internalSecretMissing(req)
 }
 
 function couponIdsOf(seller: { metadata?: unknown }): string[] {

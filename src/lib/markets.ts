@@ -135,23 +135,35 @@ export function looksLikeLocale(value: unknown): boolean {
 }
 
 /**
- * Narrow an unknown value to a `MarketCode`.
+ * Narrow an unknown value to a `MarketCode`. **STRICT: canonical form only.**
  *
- * Accepts a case-insensitive exact match on a supported code and NOTHING else.
- * In particular it does not accept a locale (`es-MX`), a country name, a currency,
- * or a padded/suffixed variant — those are the shapes that would let a market
- * boundary be crossed by accident.
+ * Accepts `'mx'` and `'us'` exactly — not `'MX'`, not `' us '`, and certainly not a
+ * locale (`es-MX`), a country name or a currency.
+ *
+ * The strictness is not fussiness, it is soundness. A type predicate makes the
+ * compiler believe the value it narrowed *is* a `MarketCode`, so a lenient version
+ * lets `if (isMarketCode(v)) MARKETS[v]` type-check while returning `undefined` at
+ * runtime for `'MX'` — a market lookup that silently yields nothing is exactly the
+ * kind of hole this registry exists to close. Leniency belongs in
+ * `normalizeMarketCode`, which returns the canonical value rather than blessing the
+ * original string. (Caught by a cross-family review of the epic's first PR, in the
+ * architect's own file.)
  */
 export function isMarketCode(value: unknown): value is MarketCode {
-  if (typeof value !== 'string') return false
-  const normalized = value.trim().toLowerCase()
-  return (MARKET_CODES as readonly string[]).includes(normalized)
+  return typeof value === 'string' && (MARKET_CODES as readonly string[]).includes(value)
 }
 
-/** Normalize a supported code to its canonical lowercase form, or `null`. */
+/**
+ * Normalize a possibly-untidy supported code to its canonical lowercase form, or
+ * `null`. This is the LENIENT entry point — trims and lowercases — and it is what
+ * every caller handling outside input (a query parameter, stored metadata, a tool
+ * argument) should use. It returns the canonical value, so nothing downstream ever
+ * carries a non-canonical string typed as a `MarketCode`.
+ */
 export function normalizeMarketCode(value: unknown): MarketCode | null {
-  if (!isMarketCode(value)) return null
-  return (value as string).trim().toLowerCase() as MarketCode
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  return isMarketCode(normalized) ? normalized : null
 }
 
 /** The record for a supported market, or `null`. Use when absence is a legitimate

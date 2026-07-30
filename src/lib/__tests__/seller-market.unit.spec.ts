@@ -1,6 +1,7 @@
 import { UnknownMarketError } from '../markets'
 import {
   SELLER_OPERATING_MARKET_KEY,
+  planMarketplaceLinkBackfill,
   planSellerMarketBackfill,
   publicSellerMarket,
   readSellerOperatingMarket,
@@ -173,5 +174,36 @@ describe('planSellerMarketBackfill', () => {
 
   it('refuses an unsupported target market', () => {
     expect(() => planSellerMarketBackfill(sellers, 'ca' as never)).toThrow(UnknownMarketError)
+  })
+})
+
+describe('planMarketplaceLinkBackfill — only the owning seller market may publish', () => {
+  it('links mx-owned products, and reports other-market and unowned products separately', () => {
+    const plan = planMarketplaceLinkBackfill([
+      { id: 'prod_mx', owner_market: 'mx', owner_seller_id: 'sel_mx' },
+      { id: 'prod_us', owner_market: 'us', owner_seller_id: 'sel_us' },
+      { id: 'prod_orphan', owner_market: null, owner_seller_id: null },
+    ])
+
+    expect(plan).toEqual({
+      target: 'mx',
+      link: ['prod_mx'],
+      skipped_other_market: [{ id: 'prod_us', owner_market: 'us' }],
+      skipped_unowned: ['prod_orphan'],
+    })
+  })
+
+  it('never treats the target as a platform default', () => {
+    const plan = planMarketplaceLinkBackfill([
+      { id: 'prod_mx', owner_market: 'mx' },
+      { id: 'prod_us', owner_market: 'us' },
+    ], 'us')
+
+    expect(plan.link).toEqual(['prod_us'])
+    expect(plan.skipped_other_market).toEqual([{ id: 'prod_mx', owner_market: 'mx' }])
+  })
+
+  it('refuses an unsupported target', () => {
+    expect(() => planMarketplaceLinkBackfill([], 'ca' as never)).toThrow(UnknownMarketError)
   })
 })

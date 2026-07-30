@@ -21,13 +21,13 @@ import { SELLER_MODULE } from '../../../../modules/seller'
 import { logger } from '../../../../lib/logger'
 import SellerModuleService from '../../../../modules/seller/service'
 import { resolveSellerMpToken, getMpPaymentWithToken } from '../../_utils/mp'
+import { internalSecretOk } from '../../../../lib/internal-auth'
 
 const MP_PROVIDER_ID = 'pp_mercadopago_mercadopago'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const internalSecret = process.env.MEDUSA_INTERNAL_SECRET
-  const headerSecret = req.headers['x-internal-secret'] as string | undefined
-  if (internalSecret && headerSecret !== internalSecret) {
+  // Fail CLOSED on a missing secret — see src/lib/internal-auth.ts.
+  if (!internalSecretOk(req)) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 
