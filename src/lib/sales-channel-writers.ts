@@ -208,11 +208,11 @@ export function validateSalesChannelWriterInventory(
   const errors: string[] = []
   const seen = new Set<string>()
   const expected = new Set(
-    SALES_CHANNEL_WRITER_REGISTRY.map((entry) => `${entry.file} ${entry.primitive}`),
+    SALES_CHANNEL_WRITER_REGISTRY.map((entry) => `${entry.file}\u0000${entry.primitive}`),
   )
 
   for (const site of sites) {
-    const identity = `${site.file} ${site.primitive}`
+    const identity = `${site.file}\u0000${site.primitive}`
     if (seen.has(identity)) {
       errors.push(`duplicate site: ${site.primitive} @ ${site.file}`)
       continue
@@ -228,7 +228,7 @@ export function validateSalesChannelWriterInventory(
 
   for (const identity of expected) {
     if (!seen.has(identity)) {
-      const [file, primitive] = identity.split(' ')
+      const [file, primitive] = identity.split('\u0000')
       errors.push(`stale registry row: ${primitive} @ ${file} no longer exists in src/`)
     }
   }
