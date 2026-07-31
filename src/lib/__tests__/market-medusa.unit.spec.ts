@@ -4,6 +4,7 @@ import {
   registryMarketplaceChannelIds,
   registryOperatingChannelIds,
   registryRegionIds,
+  resolveChannelIdsForMarket,
   resolveMarketplaceChannelForMarket,
   resolveMarketplaceChannelId,
   resolveOperatingChannelForMarket,
@@ -203,5 +204,31 @@ describe('the protected-resource allow-lists are DERIVED from the registry', () 
     expect(protectedIds).toContain(PROD_ENV_WITH_OPERATING.MEDUSA_MX_OPERATING_CHANNEL_ID)
     expect(protectedIds).toContain(PROD_ENV_WITH_OPERATING.MEDUSA_SALES_CHANNEL_ID)
     expect(protectedIds).toContain('sc_01KRVSGTDJ50SW7TF83M192ZNQ')
+  })
+})
+
+/** owned-shop-operating-channel epic, S3.3 — the read-surface convenience shape. */
+describe('resolveChannelIdsForMarket', () => {
+  it('resolves both ids when both are configured', () => {
+    expect(resolveChannelIdsForMarket('mx', PROD_ENV_WITH_OPERATING)).toEqual({
+      operating_channel_id: PROD_ENV_WITH_OPERATING.MEDUSA_MX_OPERATING_CHANNEL_ID,
+      marketplace_channel_id: PROD_ENV_WITH_OPERATING.MEDUSA_SALES_CHANNEL_ID,
+    })
+  })
+
+  it('collapses BOTH no_resource and unconfigured to null — this shape never distinguishes them', () => {
+    // `us` has no operating channel in ANY environment (no_resource); `mx` here is
+    // missing its env var (unconfigured). A caller that needs to tell those apart
+    // uses resolveOperatingChannelForMarket/resolveMarketplaceChannelForMarket
+    // directly — this convenience shape is only safe where a read surface treats
+    // both the same way (S3.3: "can't confirm membership" ⇒ false).
+    expect(resolveChannelIdsForMarket('us', PROD_ENV_WITH_OPERATING)).toEqual({
+      operating_channel_id: null,
+      marketplace_channel_id: null,
+    })
+    expect(resolveChannelIdsForMarket('mx', {})).toEqual({
+      operating_channel_id: null,
+      marketplace_channel_id: null,
+    })
   })
 })

@@ -238,6 +238,41 @@ export function reportMarketplaceMembership<T extends ChannelScopedProduct>(
 }
 
 /**
+ * The two channel-membership facts a seller/admin/agent read surface shows for one
+ * product (owned-shop-operating-channel epic, S3.3 build contract: "read the two
+ * memberships as separate facts; do not derive one from the other").
+ *
+ * `in_operating_channel` — buyable on the owned shop (D2/D3).
+ * `in_marketplace_channel` — published to the country marketplace.
+ *
+ * Both are independent booleans against the SAME `sales_channels` relation, computed
+ * with the SAME `productInMarketplaceChannel` predicate the checkout-admission seam
+ * and the marketplace-read boundary use — one definition of "is this product a member
+ * of channel X", reused, not restated a third time.
+ */
+export interface ChannelMembership {
+  readonly in_operating_channel: boolean
+  readonly in_marketplace_channel: boolean
+}
+
+/**
+ * Derive both membership facts for one product. A `null` channel id (the market's
+ * channel could not be addressed) reads as `false` for that fact — see
+ * `resolveChannelIdsForMarket`'s doc comment for why a read surface degrades here
+ * instead of refusing the whole list the way a money-path boundary must.
+ */
+export function deriveChannelMembership(
+  product: ChannelScopedProduct,
+  operatingChannelId: string | null,
+  marketplaceChannelId: string | null,
+): ChannelMembership {
+  return {
+    in_operating_channel: !!operatingChannelId && productInMarketplaceChannel(product, operatingChannelId),
+    in_marketplace_channel: !!marketplaceChannelId && productInMarketplaceChannel(product, marketplaceChannelId),
+  }
+}
+
+/**
  * The extra graph fields a marketplace read must request to be able to filter.
  *
  * Exported as a constant so the two routes cannot drift into asking for different

@@ -144,6 +144,12 @@ export const SALES_CHANNEL_WRITER_REGISTRY: readonly SalesChannelWriter[] = [
     kind: 'product_create',
     note: 'The seller-product create path. Attaches planProductPublication\'s full channel set (operating + marketplace).',
   },
+  {
+    file: 'src/api/store/_utils/seller-product-update.ts',
+    primitive: 'linkProductsToSalesChannelWorkflow',
+    kind: 'product_membership',
+    note: 'S3.2 publish/unpublish (D11) — add/remove the MARKETPLACE channel only, via planPublicationChange. Never touches the operating channel.',
+  },
   // ── The seed's four rows. ────────────────────────────────────────────────────
   // Registered because the AST scan found them, NOT because anyone remembered them:
   // the first draft of this registry held only the two product-create paths and the

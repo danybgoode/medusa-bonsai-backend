@@ -26,6 +26,7 @@ import { planProductPublication } from './product-publication'
 import SellerModuleService from '../../../modules/seller/service'
 import { resolveSellerProductMoneyContext } from './product-market-currency'
 import type { MarketCode } from '../../../lib/markets'
+import { isEnabled } from '../../../lib/flags'
 
 /** Auto-generate a unique SKU for P2P marketplace items. */
 export function generateSku(): string {
@@ -87,17 +88,22 @@ export interface CreateProductBody {
   delivery_mode?: 'carrier' | 'arranged' | null
   /**
    * MARKETPLACE PUBLICATION INTENT, stated by the call site (epic
-   * market-architecture-foundation, story 1.3).
+   * market-architecture-foundation, story 1.3; owned-shop-operating-channel epic,
+   * S3.1 for the `null` value below).
    *
    *   omitted  — publish into the SELLER's own operating market. For every seller
    *              that exists today (all `mx`) this is byte-identical to the previous
    *              behaviour.
    *   'mx'     — the same thing, said out loud. Must match the seller's market.
+   *   null     — "owned shop only": operating channel alone, no marketplace channel.
+   *              Buyable on the shop, absent from every country marketplace. Gated
+   *              behind `catalog.owned_shop_only_enabled` (D8) — refused with the
+   *              pre-Sprint-3 error while the flag is OFF.
    *
    * A market whose marketplace is not open (`us` is `invitation`) is REFUSED with an
-   * actionable message, never silently downgraded to Mexico's channel. There is no
-   * "owned shop only" value — see the header of `product-publication.ts` for why a
-   * channel-less product is unbuyable and what would have to be built first.
+   * actionable message, never silently downgraded to Mexico's channel. See the header
+   * of `product-publication.ts` for the full rule; the operating channel is always
+   * attached (D2), so no value of this field ever produces a channel-less product.
    */
   publish_to_market?: MarketCode | null
 }
@@ -275,8 +281,13 @@ export async function createSellerProduct(
     return { ok: false, status: 422, message: (e as Error).message }
   }
 
+  // Resolved unconditionally (not only when `body.publish_to_market === null`) so a
+  // flag-store outage never depends on WHICH value a caller happened to send —
+  // `isEnabled` fails open to `false` (the flag's fail-safe side per AGENTS rule 5),
+  // and `planProductPublication` only reads this boolean on the `null` branch anyway.
+  const ownedShopOnlyEnabled = await isEnabled('catalog.owned_shop_only_enabled')
   const publicationPlan = planProductPublication(
-    { requested: body.publish_to_market, sellerMarket },
+    { requested: body.publish_to_market, sellerMarket, ownedShopOnlyEnabled },
     process.env,
   )
   if (publicationPlan.status === 'refused') {

@@ -3,6 +3,7 @@ import { join } from 'path'
 import { UnknownMarketError } from '../../../../lib/markets'
 import {
   MARKETPLACE_CHANNEL_FIELDS,
+  deriveChannelMembership,
   filterToMarketplaceChannel,
   productInMarketplaceChannel,
   reportMarketplaceMembership,
@@ -206,5 +207,57 @@ describe('MARKETPLACE_CHANNEL_FIELDS', () => {
     // A route that requests a different shape would see every product as
     // channel-less and return an empty catalog.
     expect(MARKETPLACE_CHANNEL_FIELDS).toEqual(['sales_channels.id'])
+  })
+})
+
+/**
+ * owned-shop-operating-channel epic, S3.3 — "read the two memberships as separate
+ * facts; do not derive one from the other." These specs assert the four possible
+ * combinations independently: neither membership implies or forbids the other.
+ */
+describe('deriveChannelMembership — two independent facts, never derived from each other', () => {
+  const OPERATING = 'sc_operating'
+  const MARKETPLACE = 'sc_marketplace'
+
+  it('in neither channel', () => {
+    const product = { sales_channels: [] }
+    expect(deriveChannelMembership(product, OPERATING, MARKETPLACE))
+      .toEqual({ in_operating_channel: false, in_marketplace_channel: false })
+  })
+
+  it('buyable but NOT published — the exact state this sprint exists to show without an error label', () => {
+    const product = { sales_channels: [{ id: OPERATING }] }
+    expect(deriveChannelMembership(product, OPERATING, MARKETPLACE))
+      .toEqual({ in_operating_channel: true, in_marketplace_channel: false })
+  })
+
+  it('in both — today\'s ordinary published product', () => {
+    const product = { sales_channels: [{ id: OPERATING }, { id: MARKETPLACE }] }
+    expect(deriveChannelMembership(product, OPERATING, MARKETPLACE))
+      .toEqual({ in_operating_channel: true, in_marketplace_channel: true })
+  })
+
+  it('published but NOT in the operating channel — a real (if perverse) data state; still reported honestly', () => {
+    // D2 says a normal create path never produces this, but a hand-edited link row
+    // could — deriveChannelMembership reports what the DATA says, not what the
+    // create-time invariant promises, which is exactly why it is a separate function
+    // from the invariant that guards create.
+    const product = { sales_channels: [{ id: MARKETPLACE }] }
+    expect(deriveChannelMembership(product, OPERATING, MARKETPLACE))
+      .toEqual({ in_operating_channel: false, in_marketplace_channel: true })
+  })
+
+  it('a null channel id (unaddressable market) degrades that fact to false, never throws', () => {
+    const product = { sales_channels: [{ id: OPERATING }, { id: MARKETPLACE }] }
+    expect(deriveChannelMembership(product, null, MARKETPLACE))
+      .toEqual({ in_operating_channel: false, in_marketplace_channel: true })
+    expect(deriveChannelMembership(product, OPERATING, null))
+      .toEqual({ in_operating_channel: true, in_marketplace_channel: false })
+  })
+
+  it('a dangling (null-id) link row is "not this channel", same fail-closed reading as productInMarketplaceChannel', () => {
+    const product = { sales_channels: [null, { id: OPERATING }] }
+    expect(deriveChannelMembership(product, OPERATING, MARKETPLACE))
+      .toEqual({ in_operating_channel: true, in_marketplace_channel: false })
   })
 })

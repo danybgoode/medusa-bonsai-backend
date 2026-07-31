@@ -102,7 +102,11 @@ describe('Medusa flag inventory', () => {
 
   it('matches every real isEnabled callsite to its classified owning seam', () => {
     const callsites = deriveFlagCallsites()
-    expect(callsites).toHaveLength(33)
+    // owned-shop-operating-channel epic, S3: +2 new callsites on
+    // catalog.owned_shop_only_enabled — seller-product-create.ts (S3.1's null
+    // acceptance) and seller-product-update.ts (S3.2's publish/unpublish, both
+    // directions) — both registered in flag-catalog.ts's owners array above.
+    expect(callsites).toHaveLength(35)
     const validation = validateBackendFlagCallsiteInventory(callsites)
     expect(validation).toEqual({ ok: true })
   })

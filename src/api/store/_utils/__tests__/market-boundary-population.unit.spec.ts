@@ -178,13 +178,17 @@ describe('market boundary — population guard', () => {
       'src/api/internal/operating-channel-backfill/route.ts',
       'src/api/internal/print/placement-product/route.ts',
       'src/api/store/_utils/seller-product-create.ts',
+      // S3.2 (D11): publish/unpublish an EXISTING product — add/remove the
+      // MARKETPLACE channel only, via planPublicationChange (product-publication.ts's
+      // update-time sibling to planProductPublication). Also picked up automatically.
+      'src/api/store/_utils/seller-product-update.ts',
     ].map((p) => p.split('/').join(sep)))
 
     for (const file of publicationWriters) {
       const source = read(file)
       expect({ file: rel(file), storeDefault: /default_sales_channel_id/.test(source) })
         .toEqual({ file: rel(file), storeDefault: false })
-      expect(source).toMatch(/planProductPublication|planMarketplaceLinkBackfill/)
+      expect(source).toMatch(/planProductPublication|planMarketplaceLinkBackfill|planPublicationChange/)
     }
   })
 
