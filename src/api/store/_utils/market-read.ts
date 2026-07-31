@@ -33,12 +33,29 @@ import {
   resolveMarketplaceChannelForMarket,
 } from '../../../lib/market-medusa'
 
-/** The structured body every closed gate returns. Never an empty success. */
+/**
+ * The structured body every closed gate returns. Never an empty success.
+ *
+ * `reason` is the stable MACHINE contract shared with the storefront's
+ * `readMarketUnavailableResponse`, which recognises specific (status, reason) pairs
+ * and treats anything else as an unrecognised server fault — i.e. it throws. Adding a
+ * member here is therefore fail-closed for older clients, which is why the checkout
+ * admission seam's two reasons live in this same union instead of forking a
+ * second-but-almost-identical body shape.
+ */
 export interface MarketUnavailableBody {
   readonly unavailable: true
   readonly market_code: string | null
   readonly marketplace_status: MarketplaceStatus | null
-  readonly reason: 'unknown_market' | 'marketplace_not_open' | 'market_filter_unavailable'
+  readonly reason:
+    | 'unknown_market'
+    | 'marketplace_not_open'
+    | 'market_filter_unavailable'
+    // ── owned-shop-operating-channel epic, D7 · S2.3 ──────────────────────────
+    /** The market has no OPERATING channel in any environment (structural, like `us`). */
+    | 'market_has_no_operating_channel'
+    /** The market SHOULD have one but the env var naming it is unset. Operator fault. */
+    | 'operating_channel_unavailable'
   readonly message: string
 }
 

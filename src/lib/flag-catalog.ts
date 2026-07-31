@@ -128,6 +128,17 @@ const FLAG_CATALOG_DEFINITIONS = {
       'src/api/store/listings/route.ts',
     ],
   },
+  'catalog.owned_shop_only_enabled': {
+    compileDefault: false,
+    polarity: 'enablement',
+    criticality: 'high',
+    description:
+      'Owned-shop-only buyability: checkout admission proves OPERATING-channel membership instead of ' +
+      'marketplace publication. OFF ⇒ admission additionally requires marketplace publication, i.e. ' +
+      'exactly today\'s behaviour. Registered in apps/miyagisanchez/lib/flag-catalog.ts too — a key in ' +
+      'one repo only is a half-flag (owned-shop-operating-channel epic, D8).',
+    owners: ['src/api/store/checkout-admission/[id]/route.ts'],
+  },
   'catalog.bulk_enabled': {
     compileDefault: false,
     polarity: 'killswitch',

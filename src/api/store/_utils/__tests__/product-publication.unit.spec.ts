@@ -11,17 +11,34 @@ import { planProductPublication } from '../product-publication'
  */
 
 const MX_CHANNEL = 'sc_01KSK1J0V81P4EPY9G0JAPX353'
-const PROD_ENV = { MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL }
+/** The live MX operating channel (owned-shop-operating-channel epic, S1.3). */
+const MX_OPERATING = 'sc_01KYWNQ0C0PFFM0K0V2EMC24AP'
+const PROD_ENV = {
+  MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL,
+  MEDUSA_MX_OPERATING_CHANNEL_ID: MX_OPERATING,
+}
 
 describe('planProductPublication — the market comes from the SELLER', () => {
   it('an mx seller with no stated market publishes to the MX marketplace channel', () => {
     expect(planProductPublication({ sellerMarket: 'mx' }, PROD_ENV))
-      .toEqual({ status: 'channel', market: 'mx', channel_id: MX_CHANNEL })
+      .toEqual({
+        status: 'channels',
+        market: 'mx',
+        operating_channel_id: MX_OPERATING,
+        marketplace_channel_id: MX_CHANNEL,
+        channel_ids: [MX_OPERATING, MX_CHANNEL],
+      })
   })
 
   it('stating your own market explicitly is the same thing', () => {
     expect(planProductPublication({ requested: 'mx', sellerMarket: 'mx' }, PROD_ENV))
-      .toEqual({ status: 'channel', market: 'mx', channel_id: MX_CHANNEL })
+      .toEqual({
+        status: 'channels',
+        market: 'mx',
+        operating_channel_id: MX_OPERATING,
+        marketplace_channel_id: MX_CHANNEL,
+        channel_ids: [MX_OPERATING, MX_CHANNEL],
+      })
   })
 
   it('a US seller is REFUSED and gets NO Mexico channel — not even by default', () => {
@@ -76,9 +93,9 @@ describe('planProductPublication — "owned shop only" is not a shippable capabi
   })
 
   it('no outcome ever produces a product with no channel', () => {
-    for (const env of [PROD_ENV, {}]) {
+    for (const env of [PROD_ENV, {}, { MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL }]) {
       const plan = planProductPublication({ sellerMarket: 'mx' }, env)
-      if (plan.status === 'channel') expect(plan.channel_id).toBeTruthy()
+      if (plan.status === 'channels') expect(plan.channel_ids.length).toBeGreaterThan(0)
       else expect(plan.http_status).toBeGreaterThanOrEqual(400)
     }
   })
@@ -96,5 +113,62 @@ describe('planProductPublication — active-market configuration fails closed', 
 
   it('a refused market does NOT reach the store-default fallback', () => {
     expect(planProductPublication({ sellerMarket: 'us' }, {}).status).toBe('refused')
+  })
+})
+
+
+/**
+ * D2 — the operating channel is a strict SUPERSET of the marketplace channel, and
+ * that superset property is the entire reason the storefront's publishable key can
+ * hold a single channel (D3). These are the specs for the half of that rule this file
+ * owns: what a NEW product joins.
+ */
+describe('planProductPublication — D2: every product joins the OPERATING channel', () => {
+  it('attaches BOTH channels, operating first', () => {
+    const plan = planProductPublication({ sellerMarket: 'mx' }, PROD_ENV)
+    if (plan.status !== 'channels') throw new Error('unreachable')
+    expect(plan.operating_channel_id).toBe(MX_OPERATING)
+    expect(plan.marketplace_channel_id).toBe(MX_CHANNEL)
+    expect([...plan.channel_ids]).toEqual([MX_OPERATING, MX_CHANNEL])
+  })
+
+  it('REFUSES when the operating channel is unconfigured — never marketplace-only', () => {
+    // This is the failure the epic exists to prevent: a product created into the
+    // marketplace channel alone looks perfectly healthy today and becomes unbuyable
+    // the instant the publishable key moves (D3).
+    const plan = planProductPublication(
+      { sellerMarket: 'mx' },
+      { MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL },
+    )
+    expect(plan.status).toBe('refused')
+    if (plan.status !== 'refused') throw new Error('unreachable')
+    expect(plan.http_status).toBe(503)
+    expect(plan.message).toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID/)
+    // The actionable half: a builder reading this must know what to set.
+    expect(plan.message).toMatch(/canal operativo/)
+  })
+
+  it('a misconfiguration pointing BOTH env vars at one channel yields ONE link, not two', () => {
+    // Duplicate and dangling link rows are the entire history of this repo's channel
+    // incidents. Never make more of them.
+    const plan = planProductPublication(
+      { sellerMarket: 'mx' },
+      { MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL, MEDUSA_MX_OPERATING_CHANNEL_ID: MX_CHANNEL },
+    )
+    if (plan.status !== 'channels') throw new Error('unreachable')
+    expect([...plan.channel_ids]).toEqual([MX_CHANNEL])
+  })
+
+  it('a US seller gets NO operating channel either — us is structurally fail-closed', () => {
+    const plan = planProductPublication({ sellerMarket: 'us' }, PROD_ENV)
+    expect(plan.status).toBe('refused')
+    expect(JSON.stringify(plan)).not.toContain(MX_OPERATING)
+  })
+
+  it('an unknown seller market throws rather than defaulting to MX', () => {
+    // The parent epic's write-default rule: a shop whose market we cannot classify is
+    // never adopted into Mexico's commerce rails.
+    expect(() => planProductPublication({ sellerMarket: 'zz' as never }, PROD_ENV))
+      .toThrow(UnknownMarketError)
   })
 })
