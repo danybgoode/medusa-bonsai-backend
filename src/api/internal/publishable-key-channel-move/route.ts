@@ -125,15 +125,31 @@ async function readStockLocations(
       marketplace_location_ids: [], operating_location_ids: [], missing_on_operating: [],
     }
   }
-  const marketplaceIds = await locationIdsForChannel(query as any, marketplace.id)
-  const operatingIds = await locationIdsForChannel(query as any, operating.id)
-  const plan = planStockLocationLinks(marketplaceIds, operatingIds)
-  return {
-    available: true,
-    reason: null,
-    marketplace_location_ids: plan.marketplace_location_ids,
-    operating_location_ids: plan.operating_location_ids,
-    missing_on_operating: plan.missing_on_operating,
+  // These reads must DEGRADE, never throw. `blockingReasons` deliberately exempts the
+  // D9 ROLLBACK from the D5 stock-location requirement — pointing the key back at the
+  // marketplace channel restores a known-good graph and must not be blockable by the
+  // very condition it is undoing. But that exemption is downstream of here: an
+  // exception raised in this function escapes `survey()` and 500s the route BEFORE
+  // `blockingReasons` is ever consulted, so a failing operating-channel read would
+  // block the rollback anyway. A rollback path has to work precisely when something
+  // else is broken. (Codex cross-family review, PR 130 round 2.)
+  try {
+    const marketplaceIds = await locationIdsForChannel(query as any, marketplace.id)
+    const operatingIds = await locationIdsForChannel(query as any, operating.id)
+    const plan = planStockLocationLinks(marketplaceIds, operatingIds)
+    return {
+      available: true,
+      reason: null,
+      marketplace_location_ids: plan.marketplace_location_ids,
+      operating_location_ids: plan.operating_location_ids,
+      missing_on_operating: plan.missing_on_operating,
+    }
+  } catch (e) {
+    return {
+      available: false,
+      reason: `Stock-location read failed: ${e instanceof Error ? e.message : String(e)}`,
+      marketplace_location_ids: [], operating_location_ids: [], missing_on_operating: [],
+    }
   }
 }
 
@@ -144,6 +160,8 @@ interface Survey {
   readonly operating: MedusaIdResolution
   readonly targetChannelId: string | null
   readonly channelExistsInDatabase: boolean
+  /** Non-null ⇒ the existence read FAILED; absence is unknown, not proven. */
+  readonly channelReadError: string | null
   readonly plan: KeyChannelMovePlan | null
   readonly keyQueryError: string | null
   readonly stockLocations: StockLocationReport
@@ -160,14 +178,32 @@ async function survey(req: MedusaRequest, market: MarketCode, desired: DesiredCh
   // A configured id with no row is a GHOST — indistinguishable from a healthy one
   // until the link workflow half-fails. `validateSalesChannelsExistStep` inside the
   // workflow would also catch it, but only AFTER the dry run promised a move.
+  //
+  // This read DEGRADES rather than throwing, for the same reason the stock-location
+  // reads do: every read in `survey()` sits UPSTREAM of `blockingReasons`, so an
+  // exception here 500s the route before a single structured refusal is produced.
+  // A 500 tells an operator nothing about which precondition failed, on the one
+  // route that repoints the storefront's credential. An unreadable channel is
+  // reported as "does not exist", which `blockingReasons` already turns into a
+  // clear, actionable refusal — fail closed, and SAY WHY.
+  //
+  // Found by this PR's own new rollback spec, not by the review: the review named
+  // one unguarded read, and fixing only that one left this sibling — guard the
+  // population, not the door you were shown.
   let channelExists = false
+  let channelReadError: string | null = null
   if (targetChannelId) {
-    const { data } = await query.graph({
-      entity: 'sales_channel',
-      fields: ['id', 'name'],
-      filters: { id: targetChannelId } as any,
-    })
-    channelExists = ((data ?? []).length > 0)
+    try {
+      const { data } = await query.graph({
+        entity: 'sales_channel',
+        fields: ['id', 'name'],
+        filters: { id: targetChannelId } as any,
+      })
+      channelExists = ((data ?? []).length > 0)
+    } catch (e) {
+      channelReadError = e instanceof Error ? e.message : String(e)
+      channelExists = false
+    }
   }
 
   // `sales_channels.*` (the wildcard, not named subfields) — the named-field form is
@@ -194,6 +230,7 @@ async function survey(req: MedusaRequest, market: MarketCode, desired: DesiredCh
   return {
     market, desired, marketplace, operating, targetChannelId,
     channelExistsInDatabase: channelExists,
+    channelReadError,
     plan, keyQueryError,
     stockLocations: await readStockLocations(query, marketplace, operating),
   }
@@ -212,6 +249,14 @@ function blockingReasons(s: Survey): string[] {
   const target = s.desired === 'operating' ? s.operating : s.marketplace
   if (target.status !== 'resolved') {
     blocked.push(`Target (${s.desired}) channel unavailable for market "${s.market}": ${target.reason}`)
+  } else if (s.channelReadError) {
+    // Three states, never two: "the channel is absent" and "I could not check" are
+    // different facts, and only the first is a data problem the operator can fix by
+    // editing an env var.
+    blocked.push(
+      `Could not verify that channel "${target.id}" exists: ${s.channelReadError}. ` +
+      'Refusing while the target channel is unverifiable — an unreadable channel is not a proven-absent one.',
+    )
   } else if (!s.channelExistsInDatabase) {
     blocked.push(
       `Channel "${target.id}" is configured for the ${s.desired} channel but no such Sales Channel exists in this database. ` +

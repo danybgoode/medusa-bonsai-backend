@@ -56,6 +56,17 @@ export interface MarketUnavailableBody {
     | 'market_has_no_operating_channel'
     /** The market SHOULD have one but the env var naming it is unset. Operator fault. */
     | 'operating_channel_unavailable'
+    /**
+     * A READ failed while deciding admission (product or seller-ownership). An
+     * OUTAGE, not a refusal — the caller should retry, never tell a buyer the
+     * product does not exist.
+     *
+     * Declared HERE rather than only in the route that emits it: the route was
+     * building this body inline, so the emitted value and this union had already
+     * forked and tsc could not see it. A contract restated at the call site drifts
+     * from the one it restates. (Codex cross-family review, PR 130 round 2.)
+     */
+    | 'admission_read_failed'
   readonly message: string
 }
 

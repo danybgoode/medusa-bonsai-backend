@@ -69,6 +69,10 @@ import {
   resolveCheckoutAdmissionGate,
   type AdmissionProductRow,
 } from '../../_utils/checkout-admission'
+// The SHARED refusal body. Imported rather than restated: this route was building
+// the shape inline, which is how `admission_read_failed` came to be emitted while
+// the union that documents it did not list it.
+import type { MarketUnavailableBody } from '../../_utils/market-read'
 
 /**
  * The owning seller's operating market, or `null` when it cannot be resolved.
@@ -144,12 +148,14 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   } catch {
     // A read failure on a money path is an outage, not a refusal — 503 so the caller
     // retries rather than telling a buyer their product does not exist.
-    return res.status(503).json({
+    const body: MarketUnavailableBody = {
       unavailable: true,
       market_code: gate.market,
+      marketplace_status: null,
       reason: 'admission_read_failed',
       message: 'No se pudo verificar el producto. Intenta de nuevo.',
-    })
+    }
+    return res.status(503).json(body)
   }
 
   const ownedShopOnly = await isEnabled('catalog.owned_shop_only_enabled')
@@ -160,12 +166,14 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   if (ownerRead.status === 'unavailable') {
     // Same class of failure as the product read above, so the same answer: 503, not
     // a 404 that tells a buyer their product does not exist.
-    return res.status(503).json({
+    const body: MarketUnavailableBody = {
       unavailable: true,
       market_code: gate.market,
+      marketplace_status: null,
       reason: 'admission_read_failed',
       message: 'No se pudo verificar el producto. Intenta de nuevo.',
-    })
+    }
+    return res.status(503).json(body)
   }
 
   const ownerMarket = ownerRead.status === 'resolved' ? ownerRead.market : null
