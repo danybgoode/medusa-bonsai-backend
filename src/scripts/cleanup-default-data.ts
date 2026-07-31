@@ -18,6 +18,7 @@
 import { ExecArgs } from '@medusajs/framework/types'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { protectedSalesChannelIds } from '../lib/market-medusa'
+import { unconfiguredOperatingChannelReasons } from '../api/internal/_utils/market-protected-resources'
 
 // The MX marketplace channel. Its DISPLAY NAME became "Miyagi Markets MX" in the
 // market-architecture-foundation epic; the id is stable and must never change — the
@@ -45,6 +46,25 @@ export default async function cleanupDefaultData({ container }: ExecArgs) {
   }
   const keepKeyId = keepKey.id as string
   const keepStoreId = keepStore.id as string
+
+  // ── FAIL CLOSED on an unconfigured OPERATING channel ────────────────────────
+  // (owned-shop-operating-channel epic, D10. See
+  // `unconfiguredOperatingChannelReasons` for the full reasoning.)
+  //
+  // The marketplace channel survives an unset `MEDUSA_SALES_CHANNEL_ID` because of
+  // the hardcoded `KEEP_CHANNEL_ID` above and the ABORT right before this. The
+  // operating channel has no such backstop and deliberately gets none — so if it
+  // exists in the database while `MEDUSA_MX_OPERATING_CHANNEL_ID` is unset HERE, the
+  // allow-list below omits it silently and step 3 deletes it along with every
+  // product↔channel link row pointing at it. Refuse instead: a missing env var is
+  // "I could not check", never "there is nothing to protect".
+  const operatingBlockers = unconfiguredOperatingChannelReasons(process.env)
+  if (operatingBlockers.length > 0) {
+    logger.error(
+      `[cleanup] operating channel unresolvable — ABORT (nothing deleted): ${operatingBlockers.join(' | ')}`,
+    )
+    return
+  }
 
   // ── Protected sales channels (epic market-architecture-foundation, D6) ──────
   // This script used to be `delete from sales_channel where id <> KEEP` — one

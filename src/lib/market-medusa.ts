@@ -22,6 +22,17 @@
  * "this market has no marketplace" and quietly serve nothing while looking healthy.
  * The `*Resolution` functions keep them apart; the `*Id` helpers below are the
  * convenience shape the build contract asks for and are defined in terms of them.
+ *
+ * OPERATING CHANNEL (owned-shop-operating-channel epic, D2/S1.2): a SECOND Sales
+ * Channel per market, added alongside `marketplace_channel` through the exact same
+ * seam and the exact same three states. Marketplace membership means "published to
+ * the country marketplace"; operating-channel membership means "buyable at all"
+ * (cart/checkout/publishable-key resolve against it, starting Sprint 2). The two
+ * channels are DIFFERENT Medusa resources with different ids — `unconfigured` on one
+ * NEVER falls back to the other's id. Doing so would silently sell an owned-shop-only
+ * product through the marketplace channel (or vice versa), which erases the whole
+ * distinction this epic exists to create; a missing operating channel must read as an
+ * outage, not as "use whatever channel we do have".
  */
 
 import {
@@ -37,6 +48,7 @@ import {
 export interface MarketMedusaEnv {
   readonly MEDUSA_MXN_REGION_ID?: string
   readonly MEDUSA_SALES_CHANNEL_ID?: string
+  readonly MEDUSA_MX_OPERATING_CHANNEL_ID?: string
 }
 
 /**
@@ -50,19 +62,26 @@ export interface MarketMedusaEnv {
 const MARKET_MEDUSA_ENV_KEYS: Readonly<Record<MarketCode, {
   readonly region?: keyof MarketMedusaEnv
   readonly marketplace_channel?: keyof MarketMedusaEnv
+  readonly operating_channel?: keyof MarketMedusaEnv
 }>> = Object.freeze({
   mx: Object.freeze({
     region: 'MEDUSA_MXN_REGION_ID',
     marketplace_channel: 'MEDUSA_SALES_CHANNEL_ID',
+    operating_channel: 'MEDUSA_MX_OPERATING_CHANNEL_ID',
   }),
   // D0, re-derived against production 2026-07-28: exactly one Region (Mexico/MXN)
   // and two Sales Channels (the default one and the Mexico marketplace one). There
   // is nothing for `us` to point at, so it resolves to `no_resource` — never to the
-  // Mexico ids.
+  // Mexico ids. `us` gets NO operating_channel entry either (owned-shop-operating-
+  // channel epic, D2/S1.2): this epic's scope is Mexico only (README explicit
+  // non-goal — no US commerce capability of any kind), so `us` stays structurally
+  // `no_resource` for the operating channel exactly as it already is for the other
+  // two kinds. Standing up a US operating channel later is one row here plus one
+  // env var, same as a US region or marketplace channel would be.
   us: Object.freeze({}),
 })
 
-export type MedusaResourceKind = 'region' | 'marketplace_channel'
+export type MedusaResourceKind = 'region' | 'marketplace_channel' | 'operating_channel'
 
 /**
  * The outcome of turning a market code into a Medusa id.
@@ -124,6 +143,24 @@ export function resolveMarketplaceChannelForMarket(value: unknown, env: MarketMe
 }
 
 /**
+ * Full resolution (three states) for a market's OPERATING Sales Channel — the
+ * channel that carries buyability (owned-shop-operating-channel epic, D2/S1.2). A
+ * DIFFERENT Medusa resource from the marketplace channel above, resolved through the
+ * same `resolve()` so the three states are identical in shape and in strictness.
+ *
+ * `unconfigured` here must NEVER be treated as "fall back to the marketplace
+ * channel" — a caller that did so would silently sell an owned-shop-only product
+ * through the marketplace channel (leaking marketplace visibility onto something the
+ * seller deliberately kept out of it) or, once the publishable key moves (D3), it
+ * would mean the storefront's key resolves to nothing and every cart 400s. A missing
+ * operating channel is an outage to be reported and fixed, not a degraded mode to be
+ * quietly routed around.
+ */
+export function resolveOperatingChannelForMarket(value: unknown, env: MarketMedusaEnv): MedusaIdResolution {
+  return resolve(value, 'operating_channel', env)
+}
+
+/**
  * The Medusa Region id for a market, or `null`.
  *
  * `mx` → `MEDUSA_MXN_REGION_ID`; `us` → `null` (no US Region — D0); unknown ⇒ throws
@@ -156,6 +193,21 @@ export function resolveMarketplaceChannelId(value: unknown, env: MarketMedusaEnv
 }
 
 /**
+ * The operating Sales Channel id for a market, or `null` — collapsing `no_resource`
+ * and `unconfigured` exactly like `resolveMarketplaceChannelId` does, and for the
+ * same reason: this convenience shape is only safe where BOTH mean "cannot proceed".
+ * A read boundary that must tell an outage apart from a structural absence uses
+ * `resolveOperatingChannelForMarket` instead — never this one.
+ *
+ * `mx` → `MEDUSA_MX_OPERATING_CHANNEL_ID`; `us` → `null`; unknown ⇒ throws
+ * `UnknownMarketError`.
+ */
+export function resolveOperatingChannelId(value: unknown, env: MarketMedusaEnv): string | null {
+  const resolution = resolveOperatingChannelForMarket(value, env)
+  return resolution.status === 'resolved' ? resolution.id : null
+}
+
+/**
  * Every Medusa Region id that ANY registry market resolves to in this environment.
  *
  * Used by the destructive-setup guard (D6): `setup-mexico` step 6 must never delete
@@ -178,19 +230,40 @@ export function registryMarketplaceChannelIds(env: MarketMedusaEnv): string[] {
 }
 
 /**
+ * Every operating Sales Channel id that ANY registry market resolves to — the
+ * operating-channel sibling of `registryMarketplaceChannelIds` (owned-shop-operating-
+ * channel epic, S1.2). Mirrors it exactly: derived from `MARKET_CODES`, never
+ * hand-maintained, and an unconfigured/no-resource market contributes nothing rather
+ * than inventing an id.
+ *
+ * Used by `protectedSalesChannelIds` below, per D10: the allow-list must protect the
+ * operating channel BEFORE it exists in production, because a channel that exists
+ * but is not yet on this list is one `cleanup-default-data.ts` run from deletion.
+ */
+export function registryOperatingChannelIds(env: MarketMedusaEnv): string[] {
+  return dedupe(MARKET_CODES.map((code) => resolveOperatingChannelId(code, env)))
+}
+
+/**
  * The full set of Sales Channel ids a destructive cleanup must never delete:
- * every registry-declared marketplace channel PLUS the store's own default channel.
+ * every registry-declared marketplace channel, every registry-declared OPERATING
+ * channel (owned-shop-operating-channel epic, D10), PLUS the store's own default
+ * channel.
  *
  * `store.default_sales_channel_id` is included because Medusa refuses to delete a
  * channel that is still a store default (it would orphan the store), and because in
  * production it is a DIFFERENT channel from the marketplace one — a known, harmless,
- * out-of-scope divergence recorded in D0. Both must survive.
+ * out-of-scope divergence recorded in D0. All three must survive.
  */
 export function protectedSalesChannelIds(
   env: MarketMedusaEnv,
   storeDefaultChannelId?: string | null,
 ): string[] {
-  return dedupe([...registryMarketplaceChannelIds(env), storeDefaultChannelId ?? null])
+  return dedupe([
+    ...registryMarketplaceChannelIds(env),
+    ...registryOperatingChannelIds(env),
+    storeDefaultChannelId ?? null,
+  ])
 }
 
 function dedupe(values: Array<string | null | undefined>): string[] {

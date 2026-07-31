@@ -171,6 +171,11 @@ describe('market boundary — population guard', () => {
   it('enumerates every market-publication writer and bans Store-default publication', () => {
     expect(publicationWriters.map(rel).sort()).toEqual([
       'src/api/internal/market-backfill/route.ts',
+      // owned-shop-operating-channel epic, S1.4: a SIBLING writer, same channel-link
+      // workflow, a different (operating) channel and a different population (every
+      // status, D6) — picked up here automatically, which is the whole point of a
+      // mechanically-derived population instead of a hand-maintained one.
+      'src/api/internal/operating-channel-backfill/route.ts',
       'src/api/internal/print/placement-product/route.ts',
       'src/api/store/_utils/seller-product-create.ts',
     ].map((p) => p.split('/').join(sep)))
