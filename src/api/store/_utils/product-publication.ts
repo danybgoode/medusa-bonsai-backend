@@ -9,23 +9,32 @@
  * moment a second one does.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * THERE IS NO "OWNED SHOP ONLY" OPTION, AND THAT IS DELIBERATE.
+ * TWO CHANNELS PER MARKET (owned-shop-operating-channel epic, D2 · S2.2).
  *
- * An earlier draft of this file let a caller pass `publish_to_market: null` to create
- * a product with NO sales channel — visible on the shop, absent from the marketplace.
- * It renders. It cannot be bought: a channel-less product 404s on the channel-scoped
- * `/store/products` endpoint and its checkout fails with "Product not found".
+ * Every product an MX seller creates joins the market's **operating channel** — the
+ * channel that carries BUYABILITY. A product being published into the country
+ * marketplace ADDITIONALLY joins the **marketplace channel**, which stays publication
+ * truth and nothing else. Marketplace membership is therefore a strict SUBSET of
+ * operating membership, permanently (D2), and that superset property is exactly what
+ * lets the storefront's publishable key hold a single channel (D3).
  *
- * Making it buyable needs a model this epic does not build: TWO channels per market —
- * an **operating channel** that every product in that market joins (which is what
- * makes it purchasable) and the **marketplace channel** that is publication truth.
- * That means a new production Sales Channel, a publishable-key change and a full
- * product backfill. It is a real follow-up, not a line in this PR, and none of the
- * epic's ten stories asks for it.
+ * WHY BOTH, AND WHY NEITHER IS OPTIONAL:
+ *   · operating missing ⇒ the product cannot be bought at all once the publishable
+ *     key resolves through the operating channel (D3). Creating it anyway would
+ *     produce a listing that renders and 404s at checkout — the exact half-built
+ *     capability the previous version of this header refused to ship. So a missing
+ *     operating channel REFUSES the create with an actionable message; it never
+ *     falls back to "marketplace channel alone" and never to "no channel".
+ *   · marketplace missing ⇒ unchanged from before: refuse. A product silently
+ *     absent from `/mx` while the seller asked to publish there is a wrong claim.
  *
- * So the capability is absent rather than half-built: a listing you can create but
- * never sell is worse than one you cannot create. If you are here to re-add it, build
- * the operating channel first.
+ * "OWNED SHOP ONLY" IS STILL REFUSED HERE — for now. `publish_to_market: null` is the
+ * capability this epic exists to build, but it is Sprint 3's story (S3.1) and it is
+ * gated on `catalog.owned_shop_only_enabled` (D8). Until then the refusal below
+ * stands, so a client written against the earlier draft still gets an error rather
+ * than silently receiving the marketplace publication it asked not to have. When S3.1
+ * lands, `marketplace_channel_id: null` is the shape it fills in — the operating
+ * channel is already unconditional, which is what makes that a one-branch change.
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * The other rule this file enforces: the market comes from the SELLER, not from a
@@ -44,6 +53,7 @@ import {
 import {
   type MarketMedusaEnv,
   resolveMarketplaceChannelForMarket,
+  resolveOperatingChannelForMarket,
 } from '../../../lib/market-medusa'
 
 export interface PublicationRequest {
@@ -62,13 +72,29 @@ export interface PublicationRequest {
 }
 
 /**
- * How the create path should resolve a Sales Channel.
+ * How the create path should resolve its Sales Channels.
  *
- *   channel       — link this exact market channel id.
- *   refused       — the create must not proceed. Carries an actionable message.
+ *   channels — link EVERY id in `channel_ids`. Always contains the operating
+ *              channel; contains the marketplace channel too whenever the product is
+ *              being published into the country marketplace (D2).
+ *   refused  — the create must not proceed. Carries an actionable message.
+ *
+ * `channel_ids` is the ONE field a create path should read. The two named ids are
+ * exposed beside it for reporting and for the specs that assert the superset rule —
+ * a caller that builds its own array from them would be a second definition of "which
+ * channels does a new product join", which is how the two drift.
  */
 export type PublicationChannelPlan =
-  | { readonly status: 'channel'; readonly market: MarketCode; readonly channel_id: string }
+  | {
+      readonly status: 'channels'
+      readonly market: MarketCode
+      /** Buyability. Never null on a non-refused plan — that is the whole point. */
+      readonly operating_channel_id: string
+      /** Publication truth. `null` once S3.1's owned-shop-only publication lands. */
+      readonly marketplace_channel_id: string | null
+      /** Deduped. The exact set to attach; never empty. */
+      readonly channel_ids: readonly string[]
+    }
   | {
       readonly status: 'refused'
       readonly market: MarketCode
@@ -128,15 +154,47 @@ export function planProductPublication(
   }
 
   const channel = resolveMarketplaceChannelForMarket(target, env)
-  if (channel.status === 'resolved') {
-    return { status: 'channel', market: record.code, channel_id: channel.id }
+  if (channel.status !== 'resolved') {
+    return {
+      status: 'refused',
+      market: record.code,
+      http_status: 503,
+      message: channel.status === 'unconfigured'
+        ? channel.reason
+        : `Market "${record.code}" has no marketplace channel configured.`,
+    }
   }
+
+  // ── The operating channel (D2). Resolved SECOND but required just as hard. ──
+  // Order matters only for which message a doubly-misconfigured environment shows,
+  // and marketplace-first preserves the pre-existing one. Neither outcome proceeds.
+  //
+  // There is deliberately no fallback from `unconfigured` to the marketplace id:
+  // `market-medusa.ts`'s own header spells out why. A product created into the
+  // marketplace channel alone looks completely healthy today and becomes unbuyable
+  // the instant the publishable key moves (D3) — a failure that would surface as
+  // "checkout says Product not found" days later, with nothing pointing back here.
+  const operating = resolveOperatingChannelForMarket(target, env)
+  if (operating.status !== 'resolved') {
+    return {
+      status: 'refused',
+      market: record.code,
+      http_status: 503,
+      message: operating.status === 'unconfigured'
+        ? `${operating.reason} Sin el canal operativo el producto se crearía sin poder venderse; ` +
+          'configura MEDUSA_MX_OPERATING_CHANNEL_ID en el backend antes de publicar.'
+        : `Market "${record.code}" has no operating channel in any environment: ${operating.reason}`,
+    }
+  }
+
   return {
-    status: 'refused',
+    status: 'channels',
     market: record.code,
-    http_status: 503,
-    message: channel.status === 'unconfigured'
-      ? channel.reason
-      : `Market "${record.code}" has no marketplace channel configured.`,
+    operating_channel_id: operating.id,
+    marketplace_channel_id: channel.id,
+    // Deduped: a misconfiguration that points both env vars at ONE channel must
+    // produce one link, not a duplicate link row. The backfill/prune history in this
+    // repo is entirely about duplicate and dangling link rows — do not make more.
+    channel_ids: [...new Set([operating.id, channel.id])],
   }
 }

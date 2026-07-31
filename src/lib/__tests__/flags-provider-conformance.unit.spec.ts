@@ -175,7 +175,7 @@ describe('isEnabled provider conformance', () => {
       consistentSnapshot: true,
       parityMismatches: ['checkout.stripe_enabled'],
     })
-    expect(report.flags).toHaveLength(12)
+    expect(report.flags).toHaveLength(13)
     expect(
       report.flags.find((flag) => flag.key === 'checkout.stripe_enabled'),
     ).toMatchObject({

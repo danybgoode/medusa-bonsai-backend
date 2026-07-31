@@ -80,14 +80,14 @@ function deriveFlagCallsites(): FlagCallsite[] {
 
 describe('Medusa flag inventory', () => {
   it('pins the complete typed catalog and its compile-time defaults', () => {
-    expect(BACKEND_FLAG_CATALOG).toHaveLength(12)
-    expect(new Set(BACKEND_FLAG_KEYS).size).toBe(12)
+    expect(BACKEND_FLAG_CATALOG).toHaveLength(13)
+    expect(new Set(BACKEND_FLAG_KEYS).size).toBe(13)
     expect(Object.keys(BACKEND_FLAG_DEFAULTS).sort()).toEqual(
       [...BACKEND_FLAG_KEYS].sort(),
     )
     expect(
       BACKEND_FLAG_CATALOG.filter((entry) => entry.criticality === 'high'),
-    ).toHaveLength(10)
+    ).toHaveLength(11)
     expect(
       BACKEND_FLAG_CATALOG.filter((entry) => entry.criticality === 'medium').map(
         (entry) => entry.key,
@@ -102,7 +102,7 @@ describe('Medusa flag inventory', () => {
 
   it('matches every real isEnabled callsite to its classified owning seam', () => {
     const callsites = deriveFlagCallsites()
-    expect(callsites).toHaveLength(32)
+    expect(callsites).toHaveLength(33)
     const validation = validateBackendFlagCallsiteInventory(callsites)
     expect(validation).toEqual({ ok: true })
   })

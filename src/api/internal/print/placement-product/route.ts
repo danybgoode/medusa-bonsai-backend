@@ -86,7 +86,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   if (publication.status === 'refused') {
     return res.status(publication.http_status).json({ message: publication.message })
   }
-  const salesChannelId = publication.channel_id
+  // Both channels (owned-shop-operating-channel epic, D2 · S2.2) — a print placement
+  // is a real, buyable product owned by the platform seller, so it joins the
+  // operating channel exactly like every other MX product. Omitting it here would
+  // leave the placement unbuyable the moment the publishable key moves (D3).
+  const salesChannelIds = publication.channel_ids
 
   // ── Product type 'digital' (non-stockable → no inventory ceremony) ────────
   const [ptype] = await productService.listProductTypes({ value: 'digital' })
@@ -110,7 +114,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         description: body.description?.trim() || null,
         status: 'published' as const,
         ...(shippingProfileId ? { shipping_profile_id: shippingProfileId } : {}),
-        sales_channels: [{ id: salesChannelId }],
+        sales_channels: salesChannelIds.map((id) => ({ id })),
         ...(ptype ? { type_id: ptype.id } : {}),
         options: [{ title: 'Default', values: ['Default'] }],
         metadata,

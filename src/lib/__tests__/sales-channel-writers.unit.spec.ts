@@ -1,0 +1,162 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import ts from 'typescript'
+import {
+  PRODUCT_CREATE_WRITERS,
+  SALES_CHANNEL_PROPERTY,
+  SALES_CHANNEL_WORKFLOW_PRIMITIVES,
+  SALES_CHANNEL_WRITER_REGISTRY,
+  validateSalesChannelWriterInventory,
+  type SalesChannelWriterSite,
+} from '../sales-channel-writers'
+
+/**
+ * S2.2 — the population of Sales Channel writers, enumerated MECHANICALLY.
+ *
+ * The story's acceptance is explicit: "the population of create/update call sites is
+ * enumerated mechanically, not by the ones the story author remembered. A new writer
+ * added later lands in no bucket and reddens a spec." This is that spec.
+ *
+ * The derivation walks ALL of `src/` — never a hand-picked list of directories.
+ * `LEARNINGS.md`, sharpened 2026-07-31: guard the GUARD's own population, because a
+ * scan that chooses its own roots covers less every month while still passing green.
+ */
+
+const SOURCE_ROOT = path.resolve(__dirname, '..', '..')
+const WORKFLOW_NAMES = new Set<string>(SALES_CHANNEL_WORKFLOW_PRIMITIVES)
+
+function sourceFiles(root: string): string[] {
+  return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const absolute = path.join(root, entry.name)
+    if (entry.isDirectory()) {
+      // Specs describe writers; they are not writers.
+      return entry.name === '__tests__' ? [] : sourceFiles(absolute)
+    }
+    return entry.isFile() && /\.tsx?$/.test(entry.name) ? [absolute] : []
+  })
+}
+
+function slashRelative(file: string): string {
+  return path.relative(process.cwd(), file).split(path.sep).join('/')
+}
+
+/**
+ * Every site in `src/` that names a Sales Channel write primitive.
+ *
+ * Two detectors, both deliberately DUMB:
+ *   · a PropertyAssignment literally named `sales_channels` — the shape a product
+ *     create/update input uses. Type members (`sales_channels?: …` in an interface)
+ *     and `fields: ['sales_channels.id']` string literals are different syntax and do
+ *     not match, which is exactly why the AST is used instead of a grep.
+ *   · a CallExpression on one of the known core-flow workflow identifiers.
+ *
+ * A dumb detector over-reports (a diagnostic that SHAPES a response containing
+ * `sales_channels` is caught too). Those are registered and classified rather than
+ * excluded by cleverness: a guard that rejects correct output is worse than one that
+ * misses a rare fault, and the registry stays readable as a map of the whole graph.
+ */
+function deriveSites(): SalesChannelWriterSite[] {
+  const unique = new Map<string, SalesChannelWriterSite>()
+
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    const source = ts.createSourceFile(
+      file,
+      fs.readFileSync(file, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+      file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    )
+    const owner = slashRelative(file)
+
+    const record = (primitive: string) => {
+      unique.set(`${owner}\u0000${primitive}`, { file: owner, primitive })
+    }
+
+    function visit(node: ts.Node): void {
+      if (
+        ts.isPropertyAssignment(node) &&
+        (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name)) &&
+        node.name.text === SALES_CHANNEL_PROPERTY
+      ) {
+        record(SALES_CHANNEL_PROPERTY)
+      }
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        WORKFLOW_NAMES.has(node.expression.text)
+      ) {
+        record(node.expression.text)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+  }
+
+  return [...unique.values()].sort((left, right) =>
+    `${left.file}:${left.primitive}`.localeCompare(`${right.file}:${right.primitive}`),
+  )
+}
+
+describe('Sales Channel writer population', () => {
+  it('matches every derived site to a classified registry row', () => {
+    const validation = validateSalesChannelWriterInventory(deriveSites())
+    if (!validation.ok) throw new Error(validation.errors.join('\n'))
+    expect(validation).toEqual({ ok: true })
+  })
+
+  it('the scan actually sees the writers we know exist — it is not silently empty', () => {
+    // A scan that finds nothing passes every "no unregistered writers" assertion.
+    // Pin the shape of the answer, not just its consistency.
+    const sites = deriveSites()
+    expect(sites.length).toBe(SALES_CHANNEL_WRITER_REGISTRY.length)
+    expect(sites.map((s) => s.file)).toContain('src/api/store/_utils/seller-product-create.ts')
+    expect(sites.map((s) => s.primitive)).toContain('linkSalesChannelsToApiKeyWorkflow')
+  })
+
+  it('fails closed on an unregistered writer, a stale row, and a duplicate', () => {
+    const actual = deriveSites()
+
+    const unregistered = validateSalesChannelWriterInventory([
+      ...actual,
+      { file: 'src/api/store/_utils/some-new-create-path.ts', primitive: SALES_CHANNEL_PROPERTY },
+    ])
+    expect(unregistered.ok).toBe(false)
+    if (!unregistered.ok) {
+      expect(unregistered.errors.join('\n')).toContain('UNREGISTERED sales-channel writer')
+      // The error must tell the next person what to DO, not merely that they failed.
+      expect(unregistered.errors.join('\n')).toContain('MUST attach the operating channel')
+    }
+
+    const stale = validateSalesChannelWriterInventory(actual.slice(1))
+    expect(stale.ok).toBe(false)
+    if (!stale.ok) expect(stale.errors.join('\n')).toContain('stale registry row')
+
+    const duplicate = validateSalesChannelWriterInventory([actual[0], ...actual])
+    expect(duplicate.ok).toBe(false)
+    if (!duplicate.ok) expect(duplicate.errors.join('\n')).toContain('duplicate site')
+  })
+
+  it('every product-CREATE writer routes through planProductPublication (D2)', () => {
+    // The registry says which files create products; this proves each one asks the
+    // single seam that knows a product must join the operating channel. A create path
+    // that hand-rolled its channel id would satisfy the registry and still ship the
+    // bug this epic exists to prevent.
+    expect(PRODUCT_CREATE_WRITERS.length).toBeGreaterThan(1)
+    for (const writer of PRODUCT_CREATE_WRITERS) {
+      const source = fs.readFileSync(path.join(process.cwd(), writer.file), 'utf8')
+      expect(source).toContain('planProductPublication')
+      // It must attach the whole set, not one id it picked out of the plan.
+      expect(source).toContain('channel_ids')
+    }
+  })
+
+  it('no create path attaches a channel id read straight from the environment', () => {
+    // The pre-registry bug: `sales_channels: [{ id: process.env.MEDUSA_SALES_CHANNEL_ID }]`
+    // — one hard-coded country, and after this epic, one channel out of the two a
+    // product needs.
+    for (const writer of PRODUCT_CREATE_WRITERS) {
+      const source = fs.readFileSync(path.join(process.cwd(), writer.file), 'utf8')
+      expect(source).not.toMatch(/sales_channels:\s*\[\{\s*id:\s*process\.env/)
+    }
+  })
+})

@@ -282,7 +282,13 @@ export async function createSellerProduct(
   if (publicationPlan.status === 'refused') {
     return { ok: false, status: publicationPlan.http_status, message: publicationPlan.message }
   }
-  const salesChannelId = publicationPlan.channel_id
+  // BOTH channels (owned-shop-operating-channel epic, D2 · S2.2): the seller market's
+  // OPERATING channel — which is what makes the product buyable once the publishable
+  // key resolves through it (D3) — plus the marketplace channel when the product is
+  // being published into the country marketplace. `planProductPublication` refuses
+  // rather than returning a partial set, so this is never empty and never
+  // marketplace-only.
+  const salesChannelIds = publicationPlan.channel_ids
 
   // ── Build metadata ───────────────────────────────────────────────────────
   // Currency is stamped LAST so caller metadata cannot counterfeit the market's
@@ -339,7 +345,7 @@ export async function createSellerProduct(
         status: 'draft',
         ...(weightGrams !== undefined ? { weight: weightGrams } : {}),
         ...(shippingProfileId ? { shipping_profile_id: shippingProfileId } : {}),
-        ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
+        sales_channels: salesChannelIds.map((id) => ({ id })),
         ...(categoryId ? { category_ids: [categoryId] } : {}),
         ...(ptype ? { type_id: ptype.id } : {}),
         images: (body.images ?? []).map((img) => ({
@@ -417,7 +423,10 @@ export async function createSellerProduct(
       for (const variantId of variantIds) {
         await provisionVariantInventory(scope, {
           variantId,
-          salesChannelId,
+          // EVERY channel the product joined — D5. Reservation happens against the
+          // CART's channel (the operating one after D3), so linking only the
+          // marketplace channel to the stock location would fail completion.
+          salesChannelIds,
           locationId,
           quantity: perVariantQuantity,
         })

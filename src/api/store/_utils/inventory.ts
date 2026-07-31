@@ -226,7 +226,19 @@ export async function provisionVariantInventory(
   scope: Scope,
   opts: {
     variantId: string
-    salesChannelId?: string
+    /**
+     * EVERY channel this variant's product joins — not just one.
+     *
+     * Widened from a single `salesChannelId` by the owned-shop-operating-channel
+     * epic (S2.2). Medusa reserves inventory at order completion against THE CART'S
+     * sales channel, and after D3 that is the OPERATING channel while the product
+     * also sits in the marketplace channel. Linking only one of them leaves the
+     * other unable to reserve — "sales channel not associated with any stock
+     * location" at the moment money moves, which is the worst possible place to
+     * discover it. Passing the whole set is what keeps D5 true for products created
+     * after provisioning, not only for the ones the backfill swept.
+     */
+    salesChannelIds?: readonly string[]
     locationId: string
     quantity: number
   }
@@ -236,8 +248,8 @@ export async function provisionVariantInventory(
     if (!inventoryItemId) {
       return { ok: false, error: 'no inventory item found for variant' }
     }
-    if (opts.salesChannelId) {
-      await ensureSalesChannelLocationLink(scope, opts.salesChannelId, opts.locationId)
+    for (const salesChannelId of new Set(opts.salesChannelIds ?? [])) {
+      await ensureSalesChannelLocationLink(scope, salesChannelId, opts.locationId)
     }
     await ensureInventoryLevel(scope, inventoryItemId, opts.locationId, opts.quantity)
     return { ok: true, inventoryItemId }
