@@ -351,15 +351,48 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const verifiedTarget = after.plan?.target ?? null
   const linksAfter = verifiedTarget ? verifiedTarget.channel_ids.length : null
 
+  // Verify against LINK ROWS, not the deduped channel set — Medusa counts rows, and
+  // a duplicate row is exactly what would 400 every cart (D3). Same reason the
+  // planner refuses duplicates up front.
+  const rowsAfter = verifiedTarget ? verifiedTarget.link_row_count : null
+  const verified =
+    linksAfter === 1 &&
+    rowsAfter === 1 &&
+    verifiedTarget?.channel_ids[0] === s.targetChannelId &&
+    verifiedTarget?.unusable_link_rows === 0
+
+  if (!verified) {
+    // A post-write re-read that does NOT show the requested landing is a FAILED
+    // apply, and it must not be served as a 200 with a quiet `verified: false` in
+    // the body — schedulers and operators read the status, and this route repoints
+    // the credential the whole storefront authenticates with. Same class as the
+    // partial-run-returns-2xx rule in LEARNINGS. (Codex cross-family review, PR 130.)
+    return res.status(500).json({
+      dry_run: false,
+      applied: true,
+      verified: false,
+      message:
+        'The link mutation ran but the re-read does not show exactly one link row on the requested ' +
+        'channel. The key may be in an unintended state — do NOT retry blindly; read the report below ' +
+        'and, if the catalog is affected, roll back per D9 (desired_channel: "marketplace").',
+      links_before: s.plan.links_before,
+      links_after: linksAfter,
+      link_rows_after: rowsAfter,
+      added: s.plan.add,
+      removed: s.plan.remove,
+      ...reportBody(after, blockingReasons(after)),
+    })
+  }
+
   return res.json({
     dry_run: false,
     // The one number the epic's Definition of Done is written in terms of.
     applied: true,
     links_before: s.plan.links_before,
     links_after: linksAfter,
-    // A verified 1 → 1 landing on the requested channel. Anything else is a defect,
-    // and it is stated here rather than left for a reviewer to work out.
-    verified: linksAfter === 1 && verifiedTarget?.channel_ids[0] === s.targetChannelId,
+    link_rows_after: rowsAfter,
+    // A verified 1 → 1 landing on the requested channel.
+    verified: true,
     added: s.plan.add,
     removed: s.plan.remove,
     ...reportBody(after, blockingReasons(after)),

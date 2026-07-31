@@ -70,6 +70,17 @@ export interface KeyLinkSnapshot {
   /** Channel ids we could read off this key's link rows. */
   readonly channel_ids: readonly string[]
   /**
+   * RAW link rows carrying a readable channel id, BEFORE de-duplication.
+   *
+   * Distinct from `channel_ids.length` on purpose. Medusa reasons about LINK ROWS,
+   * not about the set of distinct channels: `maybeAttachPublishableKeyScopes` does
+   * `apiKey.sales_channels.map((sc) => sc.id)` with no de-duplication, so two rows
+   * naming ONE channel still yield a length-2 array — which trips
+   * `ensurePublishableKeyAndSalesChannelMatch`'s `> 1` branch and 400s every cart
+   * (D3). A plan that only ever looks at the deduped set cannot see that.
+   */
+  readonly link_row_count: number
+  /**
    * Link rows that came back with no usable id — a link to a since-deleted channel.
    * Counted separately: "this key has one link" and "this key has one link plus one
    * we cannot read" are different facts, and the second one means we cannot promise
@@ -119,9 +130,15 @@ function snapshot(row: PublishableKeyRow, id: string): KeyLinkSnapshot {
     key_id: id,
     title: trimmed(row.title),
     token_prefix: token ? token.slice(0, 12) : null,
-    // Deduped: two link rows naming ONE channel is still one channel's worth of
-    // scope, and counting it as two would make the D3 cap fire on a healthy key.
+    // Deduped for reasoning about WHICH channels the key scopes to...
     channel_ids: [...new Set(channelIds)],
+    // ...but the raw count is kept, because Medusa counts ROWS. See `link_row_count`.
+    // An earlier comment here claimed de-duplication was safe because "two link rows
+    // naming ONE channel is still one channel's worth of scope". That rationalisation
+    // was WRONG and it hid a real defect: duplicates were reported as
+    // `already_satisfied` while the key would still 400 every cart. Caught by the
+    // codex cross-family review on PR 130.
+    link_row_count: channelIds.length,
     unusable_link_rows: unusable,
   }
 }
@@ -243,6 +260,18 @@ function refusalFor(args: {
   }
   if (after.length !== 1 || after[0] !== desired[0]) {
     return `refusing: add/remove arithmetic predicts ${after.length} link row(s) [${after.join(', ')}] instead of exactly [${desired[0]}]`
+  }
+  if (target.link_row_count !== target.channel_ids.length) {
+    // Duplicate link rows to the SAME channel. `remove` is computed per channel id,
+    // so dismissing "the" link leaves the surplus rows behind and the key keeps a
+    // >1 row count — i.e. the D3 outage, reached from a plan that reported success.
+    // The precedent is not hypothetical: 70 duplicate api_key link rows existed in
+    // this database in July 2026.
+    const duplicates = target.link_row_count - target.channel_ids.length
+    return `refusing: the storefront key carries ${duplicates} DUPLICATE link row(s) ` +
+      `(${target.link_row_count} rows naming ${target.channel_ids.length} distinct channel(s)). ` +
+      'Medusa counts link rows, not distinct channels, so the surplus rows alone would 400 every cart ' +
+      'creation (D3). Prune them first — see /internal/prune-api-keys.'
   }
   if (target.unusable_link_rows > 0) {
     // We cannot dismiss a link whose channel id we cannot read, so the real after-

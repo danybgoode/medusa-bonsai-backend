@@ -81,12 +81,31 @@ describe('planPublishableKeyChannelMove — the move itself (D3)', () => {
     expect(plan.links_after_predicted).toBe(1)
   })
 
-  it('counts two link rows naming ONE channel as one channel', () => {
-    // Otherwise a duplicate row would trip the D3 cap on a perfectly healthy key —
-    // a guard that rejects correct output is worse than one that misses a fault.
+  it('REFUSES duplicate link rows naming ONE channel — a key with 2 rows still 400s', () => {
+    // This spec previously asserted the OPPOSITE ("counts two link rows naming one
+    // channel as one channel ... refuse toBeNull"), on the reasoning that a guard
+    // rejecting correct output is worse than one missing a fault. That reasoning was
+    // sound in general and wrong here, because the premise was wrong: Medusa does
+    // NOT dedupe. `maybeAttachPublishableKeyScopes` does
+    // `apiKey.sales_channels.map((sc) => sc.id)` with no Set, so two rows naming one
+    // channel yield a length-2 array and trip the `> 1` branch — 400 on every cart.
+    //
+    // So a duplicate row is NOT a healthy key, and `remove` (computed per channel id)
+    // cannot clear the surplus. Refusing is the correct output here, not an
+    // over-strict guard. Caught by the codex cross-family review on PR 130; the
+    // precedent is real — 70 duplicate api_key link rows existed in this database in
+    // July 2026.
     const plan = moveToOperating(liveRows({ sales_channels: [{ id: MARKETPLACE }, { id: MARKETPLACE }] }))
-    expect(plan.links_before).toBe(1)
+    expect(plan.refuse).toMatch(/DUPLICATE link row/)
+    expect(plan.refuse).toMatch(/2 rows naming 1 distinct channel/)
+  })
+
+  it('a single link row per channel is NOT treated as a duplicate', () => {
+    // Guard the guard: the refusal above must not fire on the healthy shape, or it
+    // would block every legitimate move.
+    const plan = moveToOperating(liveRows({ sales_channels: [{ id: MARKETPLACE }] }))
     expect(plan.refuse).toBeNull()
+    expect(plan.links_before).toBe(1)
   })
 })
 
