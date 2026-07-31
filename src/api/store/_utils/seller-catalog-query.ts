@@ -248,6 +248,10 @@ export async function querySellerCatalog(
       'categories.*',
       'type.*',
       'tags.*',
+      // Operating-vs-marketplace channel membership (owned-shop-operating-channel
+      // epic, S3.3) — the route maps this onto `deriveChannelMembership` so the
+      // seller's own table can show "buyable" and "published" as separate facts.
+      'sales_channels.id',
     ],
     filters: dbFilters,
     pagination: { take: Math.min(idFilter.length, 2000), skip: 0 },

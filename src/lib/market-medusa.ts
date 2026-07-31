@@ -266,6 +266,27 @@ export function protectedSalesChannelIds(
   ])
 }
 
+/**
+ * Both channel ids for a market in one call, collapsed to `null` on anything but
+ * `resolved` (owned-shop-operating-channel epic, S3.3 · seller/agent read surfaces).
+ *
+ * A read surface that shows a product's operating-vs-marketplace membership as two
+ * separate facts (S3.3's build contract line) needs both ids to test membership
+ * against; it is not itself a money path (unlike `checkout-admission.ts`), so an
+ * unaddressable channel there degrades to "can't be a member of a channel that does
+ * not resolve" (both membership booleans read `false`) rather than blocking the whole
+ * product list the way the checkout and marketplace-read boundaries correctly do.
+ */
+export function resolveChannelIdsForMarket(
+  value: unknown,
+  env: MarketMedusaEnv,
+): { readonly operating_channel_id: string | null; readonly marketplace_channel_id: string | null } {
+  return {
+    operating_channel_id: resolveOperatingChannelId(value, env),
+    marketplace_channel_id: resolveMarketplaceChannelId(value, env),
+  }
+}
+
 function dedupe(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim()))]
 }

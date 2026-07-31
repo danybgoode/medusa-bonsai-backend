@@ -4,6 +4,9 @@ import SellerModuleService from '../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
 import { createSellerProduct, type CreateProductBody } from '../../../_utils/seller-product-create'
 import { querySellerCatalog, type CatalogFilterParams } from '../../../_utils/seller-catalog-query'
+import { deriveChannelMembership } from '../../../_utils/market-read'
+import { resolveChannelIdsForMarket } from '../../../../../lib/market-medusa'
+import { readSellerOperatingMarket } from '../../../../../lib/seller-market'
 
 // GET /store/sellers/me/products — list all products for the authenticated seller
 //
@@ -58,6 +61,19 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const count = pairs.length
   const page = pairs.slice(offset, offset + limit)
 
+  // Operating-vs-marketplace membership (owned-shop-operating-channel epic, S3.3) —
+  // resolved ONCE per request (not per row): both channel ids are a function of the
+  // seller's market alone. `readSellerOperatingMarket` (not `requireSellerOperating
+  // Market`) deliberately does NOT throw: an unclassifiable seller must still get
+  // their product list back — every OTHER field here has always degraded gracefully
+  // for that population (D1: none exist today) — so an unresolved market reads as
+  // "can't confirm either membership" (both `false`) rather than a 422 that breaks
+  // the whole Catálogo page.
+  const sellerMarketRead = readSellerOperatingMarket(seller)
+  const channelIds = sellerMarketRead.market
+    ? resolveChannelIdsForMarket(sellerMarketRead.market, process.env)
+    : { operating_channel_id: null, marketplace_channel_id: null }
+
   res.json({
     seller,
     listings: page.map((p) => ({
@@ -75,6 +91,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         const v = (p.raw.variants as any[] | undefined)?.[0]?.metadata?.ml_price_cents
         return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null
       })(),
+      // TWO SEPARATE FACTS (S3.3) — never derive one from the other. A product can be
+      // in_operating_channel:true, in_marketplace_channel:false (owned-shop-only,
+      // buyable but not on `/mx`) with no error state; the frontend label logic reads
+      // exactly these two booleans, not `status`.
+      ...deriveChannelMembership(p.raw, channelIds.operating_channel_id, channelIds.marketplace_channel_id),
     })),
     products: page.map((p) => p.raw),
     count,

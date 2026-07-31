@@ -17,6 +17,7 @@ import {
   createProductVariantsWorkflow,
   deleteProductVariantsWorkflow,
   deleteProductOptionsWorkflow,
+  linkProductsToSalesChannelWorkflow,
 } from '@medusajs/medusa/core-flows'
 import {
   isStockableListingType,
@@ -36,6 +37,9 @@ import { resolveOwnedCollectionIds } from './seller-collections'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { resolveSellerProductMoneyContext } from './product-market-currency'
+import { planPublicationChange, type PublicationChangePlan } from './product-publication'
+import { requireSellerOperatingMarket } from '../../../lib/seller-market'
+import type { MarketCode } from '../../../lib/markets'
 
 export interface SellerProductUpdateBody {
   title?: string
@@ -202,6 +206,30 @@ export interface SellerProductUpdateBody {
    * shipping.arranged_only_enabled is ON (checkout-options ignores it OFF).
    */
   delivery_mode?: 'carrier' | 'arranged' | null
+  /**
+   * Publish / unpublish an EXISTING product to the country marketplace
+   * (owned-shop-operating-channel epic, S3.2 · D11). Same field name and shape as
+   * `CreateProductBody.publish_to_market` — surface parity across create and update:
+   *
+   *   'mx'   — publish. Adds the marketplace channel; the operating channel (already
+   *            present on every product, D2) is left untouched.
+   *   null   — unpublish. Removes ONLY the marketplace channel. The product stays in
+   *            its operating channel throughout, so it is never buyable-in-zero-
+   *            channels (D11) — there is no intermediate state to worry about.
+   *   omitted — no change (default; every existing caller is unaffected).
+   *
+   * Gated behind `catalog.owned_shop_only_enabled` in BOTH directions (D8) — see
+   * `planPublicationChange`'s header for why publish is gated too, not only
+   * unpublish. Gets one product id per call to `linkProductsToSalesChannelWorkflow`;
+   * see this file's `sales-channel-writers.ts` registry row for the write-site audit.
+   *
+   * CACHE/STALENESS: this repo (Medusa) caches nothing about channel membership — the
+   * change is visible on the NEXT read here. The storefront's ISR/`unstable_cache`
+   * layer is a SEPARATE cache in a different repo/process and is NOT invalidated by
+   * this call; the frontend caller is responsible for revalidating its own tag/path
+   * (or documenting the staleness window) after a successful publish/unpublish.
+   */
+  publish_to_market?: MarketCode | null
 }
 
 export type SellerProductImage = { url: string; alt: string | null }
@@ -340,6 +368,49 @@ export async function updateSellerProduct(
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
   const remoteQuery = scope.resolve('remoteQuery')
+
+  // ── VALIDATE PUBLICATION BEFORE ANY WRITE (S3.2) ─────────────────────────────
+  // This planning used to sit at the BOTTOM of this function, after the title /
+  // images / price / quantity workflows had already run. A request like
+  // `{ title: "Nuevo", publish_to_market: null }` with the flag OFF therefore
+  // PERSISTED the title and then returned 423 — a partial write reported to the
+  // caller as a failure, which is the worst of both outcomes: the client believes
+  // nothing happened and retries.
+  //
+  // The plan is PURE, so it costs nothing to compute first, and that is exactly the
+  // rule `/internal/market-backfill` learned from its own cross-review: validate
+  // every precondition BEFORE the first write. This function is not transactional
+  // and cannot cheaply be made so, which is precisely why the refusal has to happen
+  // before anything is touched. (Codex cross-family review, PR 131.)
+  let publicationPlan: PublicationChangePlan | null = null
+  if (body.publish_to_market !== undefined) {
+    if (!seller?.id) {
+      return { ok: false, status: 422, message: 'Publicar o despublicar requiere contexto de vendedor.' }
+    }
+    let sellerForMarket: unknown = seller
+    if (seller.metadata === undefined) {
+      const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
+      const [sellerRow] = await sellerService.listSellers({ id: seller.id }, { take: 1 })
+      if (!sellerRow) return { ok: false, status: 404, message: 'Seller not found' }
+      sellerForMarket = sellerRow
+    }
+    let sellerMarket: MarketCode
+    try {
+      sellerMarket = requireSellerOperatingMarket(sellerForMarket)
+    } catch (e) {
+      return { ok: false, status: 422, message: (e as Error).message }
+    }
+    const ownedShopOnlyEnabled = await isEnabled('catalog.owned_shop_only_enabled')
+    const plan = planPublicationChange(
+      { requested: body.publish_to_market, sellerMarket, ownedShopOnlyEnabled },
+      process.env,
+    )
+    if (plan.status === 'refused') {
+      // Nothing has been written yet. This is a clean refusal, not a rollback.
+      return { ok: false, status: plan.http_status, message: plan.message }
+    }
+    publicationPlan = plan
+  }
 
   // Every native Price mutation resolves the owning seller's registry currency
   // before the first workflow runs. Partial internal contexts are reloaded rather
@@ -918,6 +989,29 @@ export async function updateSellerProduct(
         console.error('[updateSellerProduct] no stock location for quantity update', { id })
       }
     }
+  }
+
+  // ── APPLY the publication change (S3.2, D11) ─────────────────────────────────
+  // The decision was made at the TOP of this function, before any write. All that
+  // is left here is the effect.
+  //
+  // Never touches the operating channel — see `planPublicationChange`'s header for
+  // why that is what keeps this reversible in both directions without a
+  // zero-channel window. Ownership is already proven by the caller (both
+  // `store/sellers/me/products/[id]` and `internal/seller-products/[id]` resolve +
+  // check ownership BEFORE calling this shared function — see this file's own
+  // header), so a partner/agent caller is bound by the exact same grant this route
+  // already enforces for every other field.
+  if (publicationPlan) {
+    // Symmetric `add`/`remove` on the SAME workflow the backfill already uses (D11)
+    // — never a hand-rolled link/unlink. One product id, one channel id: this call
+    // site is registered in `sales-channel-writers.ts` as `product_membership`.
+    await linkProductsToSalesChannelWorkflow(scope).run({
+      input: {
+        id: publicationPlan.marketplace_channel_id,
+        ...(publicationPlan.status === 'add_marketplace' ? { add: [id] } : { remove: [id] }),
+      },
+    })
   }
 
   return { ok: true, images: finalImages }

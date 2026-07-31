@@ -135,9 +135,16 @@ const FLAG_CATALOG_DEFINITIONS = {
     description:
       'Owned-shop-only buyability: checkout admission proves OPERATING-channel membership instead of ' +
       'marketplace publication. OFF ⇒ admission additionally requires marketplace publication, i.e. ' +
-      'exactly today\'s behaviour. Registered in apps/miyagisanchez/lib/flag-catalog.ts too — a key in ' +
-      'one repo only is a half-flag (owned-shop-operating-channel epic, D8).',
-    owners: ['src/api/store/checkout-admission/[id]/route.ts'],
+      'exactly today\'s behaviour. ALSO gates (S3) the acceptance of publish_to_market: null at create ' +
+      '(seller-product-create.ts) and publish/unpublish of an EXISTING product in both directions ' +
+      '(seller-product-update.ts, D11) — every seller-facing surface this epic adds sits behind the same ' +
+      'one flag (D8). Registered in apps/miyagisanchez/lib/flag-catalog.ts too — a key in one repo only ' +
+      'is a half-flag.',
+    owners: [
+      'src/api/store/checkout-admission/[id]/route.ts',
+      'src/api/store/_utils/seller-product-create.ts',
+      'src/api/store/_utils/seller-product-update.ts',
+    ],
   },
   'catalog.bulk_enabled': {
     compileDefault: false,
