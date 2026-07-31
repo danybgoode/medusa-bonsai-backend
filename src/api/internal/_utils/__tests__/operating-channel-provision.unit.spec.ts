@@ -1,3 +1,12 @@
+jest.mock('@medusajs/medusa/core-flows', () => ({
+  createSalesChannelsWorkflow: jest.fn(() => ({
+    run: jest.fn(async () => ({ result: [{ id: 'sc_created_mx' }] })),
+  })),
+}))
+jest.mock('../../../store/_utils/inventory', () => ({
+  ensureSalesChannelLocationLink: jest.fn(async () => undefined),
+}))
+
 import { provisionOperatingChannel } from '../operating-channel-provision'
 
 const MARKETPLACE = 'sc_01KSK1J0V81P4EPY9G0JAPX353'
@@ -58,7 +67,12 @@ describe('provisionOperatingChannel — refusals happen before any write', () =>
     const report = await provisionOperatingChannel(scope, {
       market: 'us', apply: true, env: ENV_BOTH,
     })
-    expect(report.blocked_by.join(' ')).toMatch(/in any environment/i)
+    // Assert WHICH gate fired, not merely that something did. `/in any environment/`
+    // matches BOTH gates' message templates, so it would have passed even if the
+    // operating-channel branch had been the one to refuse — a spec asserting less
+    // than its own comment claims. (Cross-agent review, claude-opus-4-6.)
+    expect(report.blocked_by).toHaveLength(1)
+    expect(report.blocked_by[0]).toMatch(/^Marketplace channel unavailable/)
     expect(report.channel_created).toBe(false)
     expect(report.would_create).toBe(false)
     expect(report.channel_id).toBeNull()
@@ -108,5 +122,64 @@ describe('provisionOperatingChannel — dry run is read-only and reports the D5 
       market: 'mx', apply: false, env: ENV_BOTH,
     })
     expect(report.action_required).toBeNull()
+  })
+})
+
+describe('provisionOperatingChannel — the APPLY path (creates a production channel)', () => {
+  it('creates the channel, links every missing location, and names the manual step', async () => {
+    // The most consequential branch in the file and it had NO coverage: a regression
+    // in the write path was invisible to this suite. (Cross-agent review.)
+    const { ensureSalesChannelLocationLink } = jest.requireMock('../../../store/_utils/inventory')
+    ensureSalesChannelLocationLink.mockClear()
+
+    let operatingLookups = 0
+    const scope = {
+      resolve: () => ({
+        graph: async (args: any) => {
+          if (args.filters?.id === MARKETPLACE) {
+            return { data: [{ id: MARKETPLACE, stock_locations: [{ id: 'sloc_1' }, { id: 'sloc_2' }] }] }
+          }
+          // First read of the NEW channel is the "before" (empty); the read after
+          // linking is the "after".
+          operatingLookups += 1
+          return {
+            data: [{
+              id: 'sc_created_mx',
+              stock_locations: operatingLookups === 1 ? [] : [{ id: 'sloc_1' }, { id: 'sloc_2' }],
+            }],
+          }
+        },
+      }),
+    }
+
+    const report = await provisionOperatingChannel(scope, {
+      market: 'mx', apply: true, env: { MEDUSA_SALES_CHANNEL_ID: MARKETPLACE },
+    })
+
+    expect(report.blocked_by).toEqual([])
+    expect(report.channel_created).toBe(true)
+    expect(report.channel_id).toBe('sc_created_mx')
+    expect(report.dry_run).toBe(false)
+    expect(report.stock_locations.linked).toEqual(['sloc_1', 'sloc_2'])
+    expect(report.stock_locations.operating_after).toEqual(['sloc_1', 'sloc_2'])
+    expect(ensureSalesChannelLocationLink).toHaveBeenCalledTimes(2)
+    // D10: the channel is unprotected until the env var names it. If this message
+    // ever goes missing, an operator can finish "successfully" and leave the channel
+    // one cleanup run from deletion.
+    expect(report.action_required).toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID=sc_created_mx/)
+  })
+
+  it('a DRY run never calls the link effect, even with locations missing', async () => {
+    const { ensureSalesChannelLocationLink } = jest.requireMock('../../../store/_utils/inventory')
+    ensureSalesChannelLocationLink.mockClear()
+    const { scope } = scopeWith({
+      [`sales_channel:${MARKETPLACE}`]: [{ id: MARKETPLACE, stock_locations: [{ id: 'sloc_1' }] }],
+      [`sales_channel:${OPERATING}`]: [{ id: OPERATING, name: 'x', stock_locations: [] }],
+    })
+    const report = await provisionOperatingChannel(scope, {
+      market: 'mx', apply: false, env: ENV_BOTH,
+    })
+    expect(report.stock_locations.missing).toEqual(['sloc_1'])
+    expect(ensureSalesChannelLocationLink).not.toHaveBeenCalled()
   })
 })
