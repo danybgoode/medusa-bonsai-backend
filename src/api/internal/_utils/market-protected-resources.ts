@@ -21,6 +21,7 @@ import {
   type MarketMedusaEnv,
   registryRegionIds,
   resolveMarketplaceChannelForMarket,
+  resolveOperatingChannelForMarket,
 } from '../../../lib/market-medusa'
 
 export interface RegionLike {
@@ -125,9 +126,21 @@ export type ProtectedChannelPlan =
   | { readonly ok: false; readonly blocked_by: readonly string[] }
 
 /**
- * A destructive channel sweep may start only when every active marketplace channel
- * and the store default are positively known. "Unconfigured" is unavailable, not an
- * empty allow-list.
+ * A destructive channel sweep may start only when every active marketplace channel,
+ * every active OPERATING channel (owned-shop-operating-channel epic, D10), and the
+ * store default are positively known. "Unconfigured" is unavailable, not an empty
+ * allow-list.
+ *
+ * The operating channel is guarded here with the SAME strictness as the marketplace
+ * channel — `unconfigured` blocks the whole sweep rather than silently protecting
+ * fewer channels — which is a deliberately more conservative rule than the sibling
+ * `protectedSalesChannelIds` (`lib/market-medusa.ts`) applies for `cleanup-
+ * default-data.ts`: that script's allow-list quietly omits an unconfigured channel
+ * (there is nothing yet to protect against, since the channel row does not exist
+ * before it is created), whereas THIS route deletes channels outright, so an operator
+ * who has not yet finished provisioning must see "unavailable", never a prune that
+ * ran short-listed. `no_resource` (a market this epic never touches, `us`) is not a
+ * block — only `unconfigured` is.
  */
 export function planProtectedSalesChannels(
   env: MarketMedusaEnv,
@@ -141,9 +154,16 @@ export function planProtectedSalesChannels(
 
   for (const code of MARKET_CODES) {
     if (MARKETS[code].marketplace_status !== 'active') continue
+
     const channel = resolveMarketplaceChannelForMarket(code, env)
     if (channel.status === 'resolved') ids.add(channel.id)
     else blocked.push(channel.reason)
+
+    const operating = resolveOperatingChannelForMarket(code, env)
+    if (operating.status === 'resolved') ids.add(operating.id)
+    else if (operating.status === 'unconfigured') blocked.push(operating.reason)
+    // `no_resource` ⇒ structurally absent for this market — nothing to add, nothing
+    // to block on.
   }
   return blocked.length > 0
     ? { ok: false, blocked_by: blocked }

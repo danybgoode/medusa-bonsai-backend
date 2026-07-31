@@ -128,23 +128,63 @@ describe('prune-sales-channels — the sibling write primitive uses the same lis
   })
 })
 
+// owned-shop-operating-channel epic, S1.3: the operating channel joins the same
+// allow-list, protected with the same strictness as the marketplace channel. This is
+// the env shape AFTER provisioning (both channel env vars configured) — the
+// unconfigured-operating-channel case (the shape production is in immediately after
+// THIS PR deploys, per D10 step 1) gets its own tests below.
+const PROD_ENV_PROVISIONED = {
+  ...PROD_ENV,
+  MEDUSA_MX_OPERATING_CHANNEL_ID: 'sc_operating_mx_placeholder',
+}
+
 describe('planProtectedSalesChannels — destructive plans require known protection', () => {
-  it('keeps the store default and every active marketplace channel', () => {
-    expect(planProtectedSalesChannels(PROD_ENV, 'sc_default')).toEqual({
+  it('keeps the store default and every active marketplace channel — operating ' +
+    'channel unconfigured (D10 step 1: allow-list deploys before the channel exists)', () => {
+    // PROD_ENV carries no MEDUSA_MX_OPERATING_CHANNEL_ID. Before this epic's
+    // provisioning step runs, the destructive prune correctly refuses (see the
+    // dedicated "blocks" test below) rather than running short-listed — this test
+    // documents the ids/ok:true shape once provisioning has happened.
+    expect(planProtectedSalesChannels(PROD_ENV_PROVISIONED, 'sc_default')).toEqual({
       ok: true,
-      ids: ['sc_default', PROD_ENV.MEDUSA_SALES_CHANNEL_ID],
+      ids: [
+        'sc_default',
+        PROD_ENV.MEDUSA_SALES_CHANNEL_ID,
+        PROD_ENV_PROVISIONED.MEDUSA_MX_OPERATING_CHANNEL_ID,
+      ],
     })
   })
 
-  it('blocks when the active MX channel is unconfigured', () => {
+  it('blocks when the active MX marketplace channel is unconfigured', () => {
     const plan = planProtectedSalesChannels({}, 'sc_default')
     expect(plan.ok).toBe(false)
     if (plan.ok) throw new Error('unreachable')
     expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
   })
 
+  it('blocks when the active MX OPERATING channel is unconfigured — the exact ' +
+    'production shape the moment this epic\'s allow-list entry deploys, before the ' +
+    'channel is created (epic README, D10)', () => {
+    const plan = planProtectedSalesChannels(PROD_ENV, 'sc_default')
+    expect(plan.ok).toBe(false)
+    if (plan.ok) throw new Error('unreachable')
+    expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID/)
+  })
+
+  it('never blocks on the US operating channel — structurally no_resource, not ' +
+    'unconfigured', () => {
+    // `us` has no operating_channel entry in MARKET_MEDUSA_ENV_KEYS at all (this
+    // epic's explicit non-goal), and its marketplace_status is "invitation" so the
+    // loop skips it before ever resolving either channel kind — confirmed by the
+    // fact that the ONLY blocking reason present is the MX one.
+    const plan = planProtectedSalesChannels(PROD_ENV, 'sc_default')
+    expect(plan.ok).toBe(false)
+    if (plan.ok) throw new Error('unreachable')
+    expect(plan.blocked_by).toHaveLength(1)
+  })
+
   it('blocks when the store default is unavailable', () => {
-    const plan = planProtectedSalesChannels(PROD_ENV, null)
+    const plan = planProtectedSalesChannels(PROD_ENV_PROVISIONED, null)
     expect(plan.ok).toBe(false)
     if (plan.ok) throw new Error('unreachable')
     expect(plan.blocked_by.join(' ')).toMatch(/store default/)
