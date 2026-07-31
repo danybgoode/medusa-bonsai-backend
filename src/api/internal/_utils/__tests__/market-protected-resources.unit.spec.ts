@@ -2,6 +2,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import {
   describeRegionKeep,
+  unconfiguredOperatingChannelReasons,
   planProtectedSalesChannels,
   planRegionDeletions,
 } from '../market-protected-resources'
@@ -188,5 +189,41 @@ describe('planProtectedSalesChannels — destructive plans require known protect
     expect(plan.ok).toBe(false)
     if (plan.ok) throw new Error('unreachable')
     expect(plan.blocked_by.join(' ')).toMatch(/store default/)
+  })
+})
+
+describe('unconfiguredOperatingChannelReasons — cleanup-default-data must fail CLOSED', () => {
+  // The gap this closes (D10): once the operating channel EXISTS in the database but
+  // MEDUSA_MX_OPERATING_CHANNEL_ID is unset in the environment running
+  // `cleanup-default-data.ts`, `protectedSalesChannelIds` omits it SILENTLY and the
+  // delete takes the channel plus every product_sales_channel row pointing at it.
+  // The marketplace channel is spared by that script's hardcoded KEEP_CHANNEL_ID
+  // backstop; the operating channel has none, and deliberately gets none.
+  it('reports the active market whose operating channel is unconfigured', () => {
+    const reasons = unconfiguredOperatingChannelReasons(PROD_ENV)
+    expect(reasons).toHaveLength(1)
+    expect(reasons.join(' ')).toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID/)
+  })
+
+  it('is empty once the operating channel is configured — nothing to refuse on', () => {
+    expect(unconfiguredOperatingChannelReasons(PROD_ENV_PROVISIONED)).toEqual([])
+  })
+
+  it('never blocks on a market that has no operating channel in ANY environment', () => {
+    // `us` is `no_resource`, not `unconfigured` — genuinely absent, never an outage.
+    // Collapsing the two is exactly the "unknown vs none" error this guard exists for.
+    const reasons = unconfiguredOperatingChannelReasons(PROD_ENV_PROVISIONED)
+    expect(reasons.join(' ')).not.toMatch(/"us"/)
+  })
+})
+
+describe('cleanup-default-data.ts — the operating-channel refusal is wired in', () => {
+  const source = readFileSync(join(process.cwd(), 'src/scripts/cleanup-default-data.ts'), 'utf8')
+
+  it('aborts before deleting anything when the operating channel is unresolvable', () => {
+    expect(source).toMatch(/unconfiguredOperatingChannelReasons\(/)
+    // The refusal must RETURN, not merely log — a warning that proceeds to the
+    // delete is the failure mode, not the fix.
+    expect(source).toMatch(/operatingBlockers[\s\S]{0,400}?return/)
   })
 })

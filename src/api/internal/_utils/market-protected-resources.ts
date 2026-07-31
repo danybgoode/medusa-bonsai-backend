@@ -169,3 +169,40 @@ export function planProtectedSalesChannels(
     ? { ok: false, blocked_by: blocked }
     : { ok: true, ids: [...ids] }
 }
+
+/**
+ * Every active market whose OPERATING channel is `unconfigured`, as human-readable
+ * reasons — empty when there is nothing to refuse on.
+ *
+ * WHY THIS IS SEPARATE FROM `planProtectedSalesChannels`: that function guards
+ * `POST /internal/prune-sales-channels`, which resolves its own store default and
+ * blocks on an unconfigured MARKETPLACE channel too. `cleanup-default-data.ts` has a
+ * different shape — it carries a hardcoded `KEEP_CHANNEL_ID` backstop for the
+ * marketplace channel and ABORTs when that row will not resolve, so the marketplace
+ * half is already covered there and re-blocking on it would be a behaviour change
+ * beyond this epic. What that script has NO backstop for is the operating channel,
+ * and it deliberately gets none: the whole point of a registry-derived allow-list is
+ * that ids are not hand-maintained.
+ *
+ * That leaves exactly one lethal gap, which this closes (owned-shop-operating-channel
+ * epic, D10). Once the operating channel EXISTS in the database but
+ * `MEDUSA_MX_OPERATING_CHANNEL_ID` is unset in the environment running the script,
+ * `protectedSalesChannelIds` omits it *silently* and the delete takes the channel AND
+ * every `product_sales_channel` row pointing at it. Not theoretical: the script runs
+ * via `medusa exec`, where env comes from a local `.env` rather than the Cloud Run
+ * service — so the machine most likely to run it is the least likely to carry the new
+ * var.
+ *
+ * "I could not check" and "there is nothing to protect" are different facts; only the
+ * second one is safe to delete against. `no_resource` (a market with no operating
+ * channel in ANY environment — `us`) is the genuinely-absent case and never blocks.
+ */
+export function unconfiguredOperatingChannelReasons(env: MarketMedusaEnv): string[] {
+  const reasons: string[] = []
+  for (const code of MARKET_CODES) {
+    if (MARKETS[code].marketplace_status !== 'active') continue
+    const operating = resolveOperatingChannelForMarket(code, env)
+    if (operating.status === 'unconfigured') reasons.push(operating.reason)
+  }
+  return reasons
+}

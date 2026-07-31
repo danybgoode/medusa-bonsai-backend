@@ -65,7 +65,7 @@ export default async function provisionMxOperatingChannel({ container }: ExecArg
   // ── 0. The marketplace channel must be addressable — it is what D5 replicates. ──
   const marketplaceChannel = resolveMarketplaceChannelForMarket('mx', process.env)
   if (marketplaceChannel.status !== 'resolved') {
-    logger.error(`[provision-operating-channel] marketplace channel unavailable: ${marketplaceChannel.status === 'unconfigured' ? marketplaceChannel.reason : marketplaceChannel.reason} — ABORT`)
+    logger.error(`[provision-operating-channel] marketplace channel unavailable: ${marketplaceChannel.reason} — ABORT`)
     return
   }
 
