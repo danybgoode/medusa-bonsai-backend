@@ -1,135 +1,64 @@
 /**
- * owned-shop-operating-channel epic, Sprint 1 Story 1.3 — provision the MX operating
- * channel and link it to every stock location the marketplace channel is linked to
- * (epic README, D5 + D10).
+ * owned-shop-operating-channel epic, S1.3 — provision the MX operating channel.
  *
- *   DRY RUN (default — prints, creates/writes nothing):
- *     npx medusa exec ./src/scripts/provision-mx-operating-channel.ts
- *   APPLY:
- *     PROVISION_OPERATING_CHANNEL_APPLY=1 npx medusa exec ./src/scripts/provision-mx-operating-channel.ts
+ * ⚠️ THIS SCRIPT CANNOT RUN FROM OUTSIDE THE VPC, AND THAT IS NOT A BUG IN IT.
+ * Production's Cloud SQL instance `medusa-pg` has `ipv4Enabled: false` and
+ * DATABASE_URL resolves to the private ip 10.7.0.3, so `npx medusa exec` from a
+ * laptop times out acquiring a connection regardless of credentials (measured
+ * 2026-07-31). The same is true of every `medusa exec` script here — which is why
+ * `cleanup-default-data.ts`'s own header admits it has never been run against
+ * production.
  *
- * SEQUENCING (D10, non-negotiable): this script must be run only AFTER the allow-list
- * entry (S1.2/1.3 code — `registryOperatingChannelIds` in `protectedSalesChannelIds`)
- * has DEPLOYED. Do not run this against a deploy that predates that PR — the channel
- * this script creates would exist for a window with no code protecting it from
- * `cleanup-default-data.ts` / `POST /internal/prune-sales-channels`.
+ * ✅ USE THE ROUTE INSTEAD: `/internal/operating-channel-provision` runs inside the
+ * VPC on the live service, with the real Redis, locking provider and module config.
  *
- * WHAT THIS DOES, idempotently:
- *   1. Resolve today's operating channel: `MEDUSA_MX_OPERATING_CHANNEL_ID` if set AND
- *      the row still exists in the database, else "not yet provisioned".
- *   2. If not yet provisioned: CREATE it (APPLY only). The created id is printed —
- *      the operator must set `MEDUSA_MX_OPERATING_CHANNEL_ID` to it and redeploy
- *      before the channel is protected or addressable by anything else in this repo.
- *   3. D5: link the operating channel to every stock location the MARKETPLACE
- *      channel (`MEDUSA_SALES_CHANNEL_ID`) is linked to, via the existing
- *      `ensureSalesChannelLocationLink` — never a second implementation of it.
- *      Reports the location↔channel graph BEFORE and AFTER.
+ *     # dry run (read-only)
+ *     curl -s -H "x-internal-secret: $MEDUSA_INTERNAL_SECRET" \
+ *       'https://api.miyagisanchez.com/internal/operating-channel-provision?market=mx'
  *
- * This is a PRODUCTION MUTATION. Per AGENTS.md and the epic README ("Deploy order"),
- * the builder never runs the APPLY form — Daniel does, after reviewing the DRY RUN
- * output, and only once he has confirmed the allow-list PR from S1.2/1.3 is live.
+ *     # apply
+ *     curl -s -X POST -H "x-internal-secret: $MEDUSA_INTERNAL_SECRET" \
+ *       -H 'content-type: application/json' -d '{"market":"mx","dry_run":false}' \
+ *       'https://api.miyagisanchez.com/internal/operating-channel-provision'
+ *
+ * This script is kept as the equivalent entry point for an operator who DOES have
+ * VPC access (Cloud Shell, a bastion, a VPC-connected Cloud Run job). It shares the
+ * route's implementation exactly — `_utils/operating-channel-provision.ts` — so the
+ * two can never drift, which was the actual risk in keeping both.
+ *
+ *   DRY RUN (default):  npx medusa exec ./src/scripts/provision-mx-operating-channel.ts
+ *   APPLY:              PROVISION_OPERATING_CHANNEL_APPLY=1 npx medusa exec ./src/scripts/provision-mx-operating-channel.ts
+ *
+ * SEQUENCING (D10): run only AFTER the allow-list entry has deployed, or the channel
+ * exists for a window with nothing protecting it from the destructive cleanups.
  */
 
 import { ExecArgs } from '@medusajs/framework/types'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
-import { createSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
-import { resolveMarketplaceChannelForMarket, resolveOperatingChannelForMarket } from '../lib/market-medusa'
-import { ensureSalesChannelLocationLink } from '../api/store/_utils/inventory'
-import { locationIdsForChannel, planStockLocationLinks } from '../api/internal/_utils/stock-location-graph'
-
-/**
- * Cosmetic only — the id is what matters and is stable once created. Paired with
- * "Miyagi Markets MX" (the marketplace channel's display name) so Admin reads the
- * two channels as a matched set rather than a stray duplicate.
- */
-const OPERATING_CHANNEL_NAME = 'Miyagi Operating MX'
-const OPERATING_CHANNEL_DESCRIPTION =
-  'Buyability channel for MX-operated shops (owned-shop-operating-channel epic). ' +
-  'Every MX seller\'s product is a member regardless of marketplace publication — ' +
-  'see Roadmap/07-agentic-and-federated-commerce/owned-shop-operating-channel.'
+import { provisionOperatingChannel } from '../api/internal/_utils/operating-channel-provision'
 
 export default async function provisionMxOperatingChannel({ container }: ExecArgs) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
-  const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const apply = process.env.PROVISION_OPERATING_CHANNEL_APPLY === '1'
 
-  // ── 0. The marketplace channel must be addressable — it is what D5 replicates. ──
-  const marketplaceChannel = resolveMarketplaceChannelForMarket('mx', process.env)
-  if (marketplaceChannel.status !== 'resolved') {
-    logger.error(`[provision-operating-channel] marketplace channel unavailable: ${marketplaceChannel.reason} — ABORT`)
-    return
-  }
+  const report = await provisionOperatingChannel(container, {
+    market: 'mx',
+    apply,
+    env: process.env,
+  })
 
-  // ── 1. Resolve today's operating channel, if any. ────────────────────────────
-  const configured = resolveOperatingChannelForMarket('mx', process.env)
-  let operatingChannelId: string | null = null
-  let operatingChannelName: string | null = null
-
-  if (configured.status === 'resolved') {
-    const { data } = await query.graph({
-      entity: 'sales_channel',
-      fields: ['id', 'name'],
-      filters: { id: configured.id },
-    })
-    const row = (data ?? [])[0] as { id: string; name?: string } | undefined
-    if (row) {
-      operatingChannelId = row.id
-      operatingChannelName = row.name ?? null
-      logger.info(`[provision-operating-channel] MEDUSA_MX_OPERATING_CHANNEL_ID already resolves to an existing channel: ${row.id} ("${row.name}") — skipping creation`)
-    } else {
-      logger.error(`[provision-operating-channel] MEDUSA_MX_OPERATING_CHANNEL_ID="${configured.id}" is set but no such Sales Channel exists in this database. ` +
-        'Refusing to create a SECOND channel under a different id while this env var points at a ghost — fix the env var or unset it first. ABORT.')
-      return
+  if (report.blocked_by.length > 0) {
+    for (const reason of report.blocked_by) {
+      logger.error(`[provision-operating-channel] ${reason}`)
     }
-  } else {
-    logger.info(`[provision-operating-channel] MEDUSA_MX_OPERATING_CHANNEL_ID not configured (${configured.status}) — would create "${OPERATING_CHANNEL_NAME}"`)
-    if (apply) {
-      const { result } = await createSalesChannelsWorkflow(container).run({
-        input: {
-          salesChannelsData: [{
-            name: OPERATING_CHANNEL_NAME,
-            description: OPERATING_CHANNEL_DESCRIPTION,
-          }],
-        },
-      })
-      operatingChannelId = result[0].id
-      operatingChannelName = OPERATING_CHANNEL_NAME
-      logger.info(`[provision-operating-channel] ✓ Created "${OPERATING_CHANNEL_NAME}" (${operatingChannelId}).`)
-      logger.info(`[provision-operating-channel] ACTION REQUIRED: set MEDUSA_MX_OPERATING_CHANNEL_ID=${operatingChannelId} on the backend service and redeploy — until then this channel exists but is UNPROTECTED and unaddressable by every other route in this repo (D10).`)
-    } else {
-      logger.info('[provision-operating-channel] DRY RUN — nothing created. Re-run with PROVISION_OPERATING_CHANNEL_APPLY=1 once the allow-list PR (S1.2/1.3) is confirmed live.')
-      // Nothing to link yet without a real id — the stock-location section below is
-      // reported against the marketplace channel alone in this branch.
-    }
-  }
-
-  // ── 2. D5 — the stock-location ↔ channel graph, before and after. ────────────
-  const marketplaceLocationIds = await locationIdsForChannel(query, marketplaceChannel.id)
-  logger.info(`[provision-operating-channel] marketplace channel (${marketplaceChannel.id}) stock locations: [${marketplaceLocationIds.join(', ')}]`)
-
-  if (!operatingChannelId) {
-    logger.info('[provision-operating-channel] no operating channel id available yet (dry run, not created) — stock-location diff skipped. Re-run after APPLY.')
+    logger.error('[provision-operating-channel] ABORT — nothing was created or linked.')
     return
   }
 
-  const before = await locationIdsForChannel(query, operatingChannelId)
-  const plan = planStockLocationLinks(marketplaceLocationIds, before)
-  logger.info(`[provision-operating-channel] operating channel (${operatingChannelId}, "${operatingChannelName}") stock locations BEFORE: [${before.join(', ')}]`)
-  logger.info(`[provision-operating-channel] missing on operating channel: [${plan.missing_on_operating.join(', ')}]`)
-
-  if (plan.missing_on_operating.length === 0) {
-    logger.info('[provision-operating-channel] ○ Stock-location graph already matches — nothing to link.')
-    return
+  logger.info(`[provision-operating-channel] ${report.dry_run ? 'DRY RUN' : 'APPLY'} · market=${report.market_code}`)
+  logger.info(`[provision-operating-channel] channel: id=${report.channel_id ?? '(none yet)'} name="${report.channel_name ?? ''}" created=${report.channel_created} would_create=${report.would_create}`)
+  logger.info(`[provision-operating-channel] stock locations — marketplace=[${report.stock_locations.marketplace.join(', ')}] operating_before=[${report.stock_locations.operating_before.join(', ')}] missing=[${report.stock_locations.missing.join(', ')}] linked=[${report.stock_locations.linked.join(', ')}] operating_after=[${report.stock_locations.operating_after.join(', ')}]`)
+  if (report.action_required) {
+    logger.info(`[provision-operating-channel] ACTION REQUIRED: ${report.action_required}`)
   }
-
-  if (!apply) {
-    logger.info(`[provision-operating-channel] DRY RUN — would link ${plan.missing_on_operating.length} stock location(s) to the operating channel. Nothing written.`)
-    return
-  }
-
-  for (const locationId of plan.missing_on_operating) {
-    await ensureSalesChannelLocationLink(container, operatingChannelId, locationId)
-  }
-  const after = await locationIdsForChannel(query, operatingChannelId)
-  logger.info(`[provision-operating-channel] ✓ operating channel stock locations AFTER: [${after.join(', ')}]`)
 }
