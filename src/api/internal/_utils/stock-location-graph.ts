@@ -41,3 +41,31 @@ export function planStockLocationLinks(
     missing_on_operating: marketplaceLocationIds.filter((id) => !operatingSet.has(id)),
   }
 }
+
+/**
+ * Read every stock location id a Sales Channel is linked to.
+ *
+ * Lives HERE, beside the diff it feeds, because it was originally written twice —
+ * once in `/internal/operating-channel-backfill` and once in
+ * `src/scripts/provision-mx-operating-channel.ts` — and the two copies had ALREADY
+ * drifted before either shipped (different `fields` lists, one casting `filters` and
+ * one not). Two readers of the same graph that disagree about what they ask for is
+ * how one of them gets a fix the other never does; the dry-run report and the
+ * provisioning script must see the identical link set or D5's before/after numbers
+ * mean nothing.
+ *
+ * `query` is Medusa's container-resolved QUERY. Typed loosely because
+ * `ContainerRegistrationKeys.QUERY` resolves differently in a route (`req.scope`) and
+ * in a `medusa exec` script (`container`), and both call this.
+ */
+export async function locationIdsForChannel(
+  query: { graph: (args: unknown) => Promise<{ data?: Array<{ stock_locations?: Array<{ id: string }> | null }> }> },
+  channelId: string,
+): Promise<string[]> {
+  const { data } = await query.graph({
+    entity: 'sales_channel',
+    fields: ['id', 'stock_locations.id'],
+    filters: { id: channelId },
+  })
+  return (data?.[0]?.stock_locations ?? []).map((l) => l.id)
+}

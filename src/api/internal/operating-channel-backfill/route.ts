@@ -65,7 +65,7 @@ import {
   type UnclassifiableSeller,
 } from '../_utils/operating-channel-backfill'
 import type { OwnershipScanFailure } from '../_utils/market-backfill'
-import { planStockLocationLinks, type StockLocationLinkPlan } from '../_utils/stock-location-graph'
+import { locationIdsForChannel, planStockLocationLinks, type StockLocationLinkPlan } from '../_utils/stock-location-graph'
 import { internalSecretOk } from '../../../lib/internal-auth'
 
 /**
@@ -92,15 +92,6 @@ interface ProductRow {
 }
 
 /** Every stock-location id a Sales Channel is linked to. Read-only. */
-async function locationIdsForChannel(query: any, channelId: string): Promise<string[]> {
-  const { data } = await query.graph({
-    entity: 'sales_channel',
-    fields: ['id', 'stock_locations.id'],
-    filters: { id: channelId } as any,
-  })
-  return ((data?.[0]?.stock_locations ?? []) as Array<{ id: string }>).map((l) => l.id)
-}
-
 interface StockLocationGraphReport {
   readonly available: boolean
   readonly reason: string | null

@@ -221,9 +221,19 @@ describe('cleanup-default-data.ts — the operating-channel refusal is wired in'
   const source = readFileSync(join(process.cwd(), 'src/scripts/cleanup-default-data.ts'), 'utf8')
 
   it('aborts before deleting anything when the operating channel is unresolvable', () => {
-    expect(source).toMatch(/unconfiguredOperatingChannelReasons\(/)
-    // The refusal must RETURN, not merely log — a warning that proceeds to the
-    // delete is the failure mode, not the fix.
-    expect(source).toMatch(/operatingBlockers[\s\S]{0,400}?return/)
+    // Assert the ORDERING property, not a proximity window. An earlier version of
+    // this spec matched /operatingBlockers[\s\S]{0,400}?return/, which encoded two
+    // accidents of layout — the local variable's NAME and how many characters
+    // separate it from the return — so renaming the variable or adding a comment
+    // would have silently passed it. The real contract is: the guard's early return
+    // happens BEFORE any delete can run. (Cross-agent review, claude-opus-4-6.)
+    const guardAt = source.indexOf('unconfiguredOperatingChannelReasons(')
+    expect(guardAt).toBeGreaterThan(-1)
+
+    const returnAfterGuard = source.indexOf('return', guardAt)
+    const firstDelete = source.indexOf('delete from')
+    expect(returnAfterGuard).toBeGreaterThan(-1)
+    expect(firstDelete).toBeGreaterThan(-1)
+    expect(returnAfterGuard).toBeLessThan(firstDelete)
   })
 })

@@ -35,7 +35,7 @@ import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { createSalesChannelsWorkflow } from '@medusajs/medusa/core-flows'
 import { resolveMarketplaceChannelForMarket, resolveOperatingChannelForMarket } from '../lib/market-medusa'
 import { ensureSalesChannelLocationLink } from '../api/store/_utils/inventory'
-import { planStockLocationLinks } from '../api/internal/_utils/stock-location-graph'
+import { locationIdsForChannel, planStockLocationLinks } from '../api/internal/_utils/stock-location-graph'
 
 /**
  * Cosmetic only — the id is what matters and is stable once created. Paired with
@@ -47,15 +47,6 @@ const OPERATING_CHANNEL_DESCRIPTION =
   'Buyability channel for MX-operated shops (owned-shop-operating-channel epic). ' +
   'Every MX seller\'s product is a member regardless of marketplace publication — ' +
   'see Roadmap/07-agentic-and-federated-commerce/owned-shop-operating-channel.'
-
-async function locationIdsForChannel(query: any, channelId: string): Promise<string[]> {
-  const { data } = await query.graph({
-    entity: 'sales_channel',
-    fields: ['id', 'name', 'stock_locations.id'],
-    filters: { id: channelId },
-  })
-  return ((data?.[0]?.stock_locations ?? []) as Array<{ id: string }>).map((l: { id: string }) => l.id)
-}
 
 export default async function provisionMxOperatingChannel({ container }: ExecArgs) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
@@ -137,7 +128,7 @@ export default async function provisionMxOperatingChannel({ container }: ExecArg
   }
 
   for (const locationId of plan.missing_on_operating) {
-    await ensureSalesChannelLocationLink(container as any, operatingChannelId, locationId)
+    await ensureSalesChannelLocationLink(container, operatingChannelId, locationId)
   }
   const after = await locationIdsForChannel(query, operatingChannelId)
   logger.info(`[provision-operating-channel] ✓ operating channel stock locations AFTER: [${after.join(', ')}]`)
