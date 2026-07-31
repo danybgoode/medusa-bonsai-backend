@@ -37,7 +37,7 @@ import { resolveOwnedCollectionIds } from './seller-collections'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { resolveSellerProductMoneyContext } from './product-market-currency'
-import { planPublicationChange } from './product-publication'
+import { planPublicationChange, type PublicationChangePlan } from './product-publication'
 import { requireSellerOperatingMarket } from '../../../lib/seller-market'
 import type { MarketCode } from '../../../lib/markets'
 
@@ -368,6 +368,49 @@ export async function updateSellerProduct(
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
   const remoteQuery = scope.resolve('remoteQuery')
+
+  // ── VALIDATE PUBLICATION BEFORE ANY WRITE (S3.2) ─────────────────────────────
+  // This planning used to sit at the BOTTOM of this function, after the title /
+  // images / price / quantity workflows had already run. A request like
+  // `{ title: "Nuevo", publish_to_market: null }` with the flag OFF therefore
+  // PERSISTED the title and then returned 423 — a partial write reported to the
+  // caller as a failure, which is the worst of both outcomes: the client believes
+  // nothing happened and retries.
+  //
+  // The plan is PURE, so it costs nothing to compute first, and that is exactly the
+  // rule `/internal/market-backfill` learned from its own cross-review: validate
+  // every precondition BEFORE the first write. This function is not transactional
+  // and cannot cheaply be made so, which is precisely why the refusal has to happen
+  // before anything is touched. (Codex cross-family review, PR 131.)
+  let publicationPlan: PublicationChangePlan | null = null
+  if (body.publish_to_market !== undefined) {
+    if (!seller?.id) {
+      return { ok: false, status: 422, message: 'Publicar o despublicar requiere contexto de vendedor.' }
+    }
+    let sellerForMarket: unknown = seller
+    if (seller.metadata === undefined) {
+      const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
+      const [sellerRow] = await sellerService.listSellers({ id: seller.id }, { take: 1 })
+      if (!sellerRow) return { ok: false, status: 404, message: 'Seller not found' }
+      sellerForMarket = sellerRow
+    }
+    let sellerMarket: MarketCode
+    try {
+      sellerMarket = requireSellerOperatingMarket(sellerForMarket)
+    } catch (e) {
+      return { ok: false, status: 422, message: (e as Error).message }
+    }
+    const ownedShopOnlyEnabled = await isEnabled('catalog.owned_shop_only_enabled')
+    const plan = planPublicationChange(
+      { requested: body.publish_to_market, sellerMarket, ownedShopOnlyEnabled },
+      process.env,
+    )
+    if (plan.status === 'refused') {
+      // Nothing has been written yet. This is a clean refusal, not a rollback.
+      return { ok: false, status: plan.http_status, message: plan.message }
+    }
+    publicationPlan = plan
+  }
 
   // Every native Price mutation resolves the owning seller's registry currency
   // before the first workflow runs. Partial internal contexts are reloaded rather
@@ -948,7 +991,10 @@ export async function updateSellerProduct(
     }
   }
 
-  // ── Publish / unpublish to the marketplace channel (S3.2, D11) ───────────────
+  // ── APPLY the publication change (S3.2, D11) ─────────────────────────────────
+  // The decision was made at the TOP of this function, before any write. All that
+  // is left here is the effect.
+  //
   // Never touches the operating channel — see `planPublicationChange`'s header for
   // why that is what keeps this reversible in both directions without a
   // zero-channel window. Ownership is already proven by the caller (both
@@ -956,40 +1002,14 @@ export async function updateSellerProduct(
   // check ownership BEFORE calling this shared function — see this file's own
   // header), so a partner/agent caller is bound by the exact same grant this route
   // already enforces for every other field.
-  if (body.publish_to_market !== undefined) {
-    if (!seller?.id) {
-      return { ok: false, status: 422, message: 'Publicar o despublicar requiere contexto de vendedor.' }
-    }
-    let sellerForMarket: unknown = seller
-    if (seller.metadata === undefined) {
-      const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
-      const [sellerRow] = await sellerService.listSellers({ id: seller.id }, { take: 1 })
-      if (!sellerRow) return { ok: false, status: 404, message: 'Seller not found' }
-      sellerForMarket = sellerRow
-    }
-    let sellerMarket: MarketCode
-    try {
-      sellerMarket = requireSellerOperatingMarket(sellerForMarket)
-    } catch (e) {
-      return { ok: false, status: 422, message: (e as Error).message }
-    }
-
-    const ownedShopOnlyEnabled = await isEnabled('catalog.owned_shop_only_enabled')
-    const plan = planPublicationChange(
-      { requested: body.publish_to_market, sellerMarket, ownedShopOnlyEnabled },
-      process.env,
-    )
-    if (plan.status === 'refused') {
-      return { ok: false, status: plan.http_status, message: plan.message }
-    }
-
+  if (publicationPlan) {
     // Symmetric `add`/`remove` on the SAME workflow the backfill already uses (D11)
     // — never a hand-rolled link/unlink. One product id, one channel id: this call
     // site is registered in `sales-channel-writers.ts` as `product_membership`.
     await linkProductsToSalesChannelWorkflow(scope).run({
       input: {
-        id: plan.marketplace_channel_id,
-        ...(plan.status === 'add_marketplace' ? { add: [id] } : { remove: [id] }),
+        id: publicationPlan.marketplace_channel_id,
+        ...(publicationPlan.status === 'add_marketplace' ? { add: [id] } : { remove: [id] }),
       },
     })
   }
