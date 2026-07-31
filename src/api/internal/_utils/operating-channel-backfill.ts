@@ -40,6 +40,13 @@ export interface OperatingChannelBackfillPreconditions {
   readonly ownership_scan_failures: readonly OwnershipScanFailure[]
   readonly unclassifiable_sellers: readonly UnclassifiableSeller[]
   readonly link_plan: Pick<MarketplaceLinkPlan, 'skipped_unowned'> | null
+  /**
+   * D5 — the MARKETPLACE channel's resolution. The apply replicates that channel's
+   * stock-location links onto the operating channel, so an unresolvable marketplace
+   * channel means the D5 half cannot run. It is a PRECONDITION, not a partial
+   * outcome: see the blocking reason below.
+   */
+  readonly marketplace_channel: MedusaIdResolution
 }
 
 /**
@@ -85,7 +92,33 @@ export function operatingChannelBackfillBlockingReasons(
     )
   }
 
-  if (state.link_plan && state.link_plan.skipped_unowned.length > 0) {
+  // D5 is not an optional extra of this run — it is the half that makes the channel
+  // usable at checkout. An apply that links every product but silently skips the
+  // stock-location replication produces a channel that looks complete and fails at
+  // order completion (Medusa reserves against the CART'S channel). Refuse UP FRONT
+  // rather than returning 200 with a buried `stock_locations.applied: false`: a
+  // partial run that reports success is how a broken step survives unnoticed
+  // (LEARNINGS — "a partial run that returns 2xx is how a broken cron survives for
+  // months"). Found by the round-3 cross-agent pass.
+  if (state.marketplace_channel.status !== 'resolved') {
+    reasons.push(
+      `The marketplace channel is unavailable (${state.marketplace_channel.reason}), so the ` +
+      'stock-location links this backfill must replicate onto the operating channel cannot be read. ' +
+      'Refusing the whole run rather than applying the product half alone.',
+    )
+  }
+
+  // A NULL link plan means the survey could not compute one at all — the population
+  // is unknown, not empty. Blocking it here keeps this validator the single source of
+  // truth: the routes also guard it, but a future caller that trusts this function
+  // alone must not be handed a green light on an uncomputed plan. Three states, never
+  // two. (Round-3 cross-agent pass.)
+  if (state.link_plan === null) {
+    reasons.push(
+      'The link plan could not be computed (the channel membership survey was unavailable). ' +
+      'Refusing to apply against an unknown population.',
+    )
+  } else if (state.link_plan.skipped_unowned.length > 0) {
     reasons.push(
       `${state.link_plan.skipped_unowned.length} product(s) have no resolvable owner. Repair those ` +
       'product↔seller links before applying the backfill.',

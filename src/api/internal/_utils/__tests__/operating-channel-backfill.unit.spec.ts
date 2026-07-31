@@ -24,6 +24,12 @@ function state(
     ownership_scan_failures: [],
     unclassifiable_sellers: [],
     link_plan: { skipped_unowned: [] },
+    marketplace_channel: {
+      status: 'resolved',
+      market: 'mx',
+      kind: 'marketplace_channel',
+      id: 'sc_marketplace_mx',
+    },
     ...overrides,
   }
 }
@@ -132,5 +138,34 @@ describe('splitByPublished — D6: every status is scanned, and the report shows
     ]
     const split = splitByPublished(products)
     expect(split.published.length + split.draft.length).toBe(products.length)
+  })
+})
+
+describe('D5 + unknown-population preconditions (round-3 cross-agent findings)', () => {
+  it('blocks when the MARKETPLACE channel is unresolvable — D5 cannot be replicated', () => {
+    // The apply copies the marketplace channel's stock-location links onto the
+    // operating channel. Without them, order completion cannot reserve inventory.
+    // The earlier shape applied the product half and reported success with
+    // `stock_locations.applied: false` buried in a 200 — a partial run that reads
+    // as a clean one.
+    const reasons = operatingChannelBackfillBlockingReasons(state({
+      marketplace_channel: {
+        status: 'unconfigured',
+        market: 'mx',
+        kind: 'marketplace_channel',
+        env_var: 'MEDUSA_SALES_CHANNEL_ID',
+        reason: 'MEDUSA_SALES_CHANNEL_ID is unset.',
+      } as MedusaIdResolution,
+    }))
+    expect(reasons.join(' ')).toMatch(/stock-location links/)
+  })
+
+  it('blocks a NULL link plan — an uncomputed population is unknown, not empty', () => {
+    const reasons = operatingChannelBackfillBlockingReasons(state({ link_plan: null }))
+    expect(reasons.join(' ')).toMatch(/could not be computed/)
+  })
+
+  it('does not block when both are healthy', () => {
+    expect(operatingChannelBackfillBlockingReasons(state())).toEqual([])
   })
 })

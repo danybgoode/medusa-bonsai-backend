@@ -226,6 +226,10 @@ async function survey(req: MedusaRequest, market: MarketCode) {
     channel, channelRow, sellers, sellerScan,
     allProducts, membership, linkPlan, productScan,
     ownershipScanFailures, unclassifiableSellers, ownerSellerByProduct,
+    // D5's source of truth: the channel whose stock-location links the apply
+    // replicates. Surfaced here so `blockingReasons` can refuse UP FRONT rather than
+    // letting the apply return 200 with a half-done D5 buried in the payload.
+    marketplaceChannel: resolveMarketplaceChannelForMarket(market, process.env),
   }
 }
 
@@ -242,6 +246,7 @@ function blockingReasons(s: Awaited<ReturnType<typeof survey>>): string[] {
     ownership_scan_failures: s.ownershipScanFailures,
     unclassifiable_sellers: s.unclassifiableSellers,
     link_plan: s.linkPlan,
+    marketplace_channel: s.marketplaceChannel,
   })
 }
 
@@ -357,27 +362,30 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // this happens; re-asserting it here on every apply is the safety net the epic
   // README calls for, using the SAME `ensureSalesChannelLocationLink` — never a
   // second implementation. ───────────────────────────────────────────────────
-  const marketplaceChannel = resolveMarketplaceChannelForMarket(market, process.env)
-  let stockLocations: {
-    applied: boolean
-    reason: string | null
-    before: string[]
-    after: string[]
-    linked: string[]
-  } = { applied: false, reason: 'Marketplace channel unavailable.', before: [], after: [], linked: [] }
-
-  if (marketplaceChannel.status === 'resolved') {
-    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-    const marketplaceIds = await locationIdsForChannel(query, marketplaceChannel.id)
-    const before = await locationIdsForChannel(query, s.channel.id)
-    const plan = planStockLocationLinks(marketplaceIds, before)
-    for (const locationId of plan.missing_on_operating) {
-      await ensureSalesChannelLocationLink(req.scope, s.channel.id, locationId)
-    }
-    const after = plan.missing_on_operating.length > 0
-      ? await locationIdsForChannel(query, s.channel.id)
-      : before
-    stockLocations = { applied: true, reason: null, before, after, linked: [...plan.missing_on_operating] }
+  // `blockingReasons` has already refused an unresolved marketplace channel, so this
+  // branch is reachable only with a resolved one — no partial-success shape to
+  // report. The narrowing below is the type system agreeing with that precondition,
+  // not a runtime fallback.
+  if (s.marketplaceChannel.status !== 'resolved') {
+    return res.status(422).json({
+      applied: false,
+      market_code: market,
+      blocked_by: ['Marketplace channel became unavailable between validation and apply.'],
+    })
+  }
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+  const marketplaceIds = await locationIdsForChannel(query, s.marketplaceChannel.id)
+  const before = await locationIdsForChannel(query, s.channel.id)
+  const plan = planStockLocationLinks(marketplaceIds, before)
+  for (const locationId of plan.missing_on_operating) {
+    await ensureSalesChannelLocationLink(req.scope, s.channel.id, locationId)
+  }
+  const after = plan.missing_on_operating.length > 0
+    ? await locationIdsForChannel(query, s.channel.id)
+    : before
+  const stockLocations = {
+    applied: true, reason: null as string | null, before, after,
+    linked: [...plan.missing_on_operating],
   }
 
   return res.json({
