@@ -83,10 +83,20 @@ import {
  * read failed" and "this product has no owner" must both fail closed here, and the
  * caller cannot tell them apart anyway.
  */
+/**
+ * The three genuinely different outcomes of resolving a product's owning market.
+ * `absent` (no seller link row) is a refusal; `unavailable` (the read threw) is an
+ * outage and must NOT be served as a refusal.
+ */
+type OwnerMarketRead =
+  | { readonly status: 'resolved'; readonly market: MarketCode | null }
+  | { readonly status: 'absent' }
+  | { readonly status: 'unavailable'; readonly reason: string }
+
 async function ownerMarketFor(
   query: { graph: (args: any) => Promise<any> },
   productId: string,
-): Promise<MarketCode | null> {
+): Promise<OwnerMarketRead> {
   try {
     const { data } = await query.graph({
       entity: 'product',
@@ -96,10 +106,17 @@ async function ownerMarketFor(
       filters: { id: productId },
     })
     const seller = (data?.[0] as { seller?: unknown } | undefined)?.seller
-    if (!seller) return null
-    return readSellerOperatingMarket(seller).market
-  } catch {
-    return null
+    if (!seller) return { status: 'absent' }
+    return { status: 'resolved', market: readSellerOperatingMarket(seller).market }
+  } catch (e) {
+    // THREE STATES, NEVER TWO. This used to `return null`, which the decision below
+    // reads as "no resolvable owner" ⇒ a uniform 404. That collapses an OUTAGE into
+    // a REFUSAL: if the product table is reachable but the seller link table is not,
+    // every owned-shop-only product reports "not found" — permanently-absent-looking,
+    // with nothing in the response saying otherwise — while the sibling product read
+    // ten lines up correctly answers 503 for the same class of failure. The
+    // asymmetry was the bug. (Cross-agent review, claude-opus-4-6.)
+    return { status: 'unavailable', reason: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -136,7 +153,22 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const ownedShopOnly = await isEnabled('catalog.owned_shop_only_enabled')
-  const ownerMarket = product ? await ownerMarketFor(query, id) : null
+  const ownerRead: OwnerMarketRead = product
+    ? await ownerMarketFor(query, id)
+    : { status: 'absent' }
+
+  if (ownerRead.status === 'unavailable') {
+    // Same class of failure as the product read above, so the same answer: 503, not
+    // a 404 that tells a buyer their product does not exist.
+    return res.status(503).json({
+      unavailable: true,
+      market_code: gate.market,
+      reason: 'admission_read_failed',
+      message: 'No se pudo verificar el producto. Intenta de nuevo.',
+    })
+  }
+
+  const ownerMarket = ownerRead.status === 'resolved' ? ownerRead.market : null
 
   const decision = decideCheckoutAdmission({
     requested_product_id: id,

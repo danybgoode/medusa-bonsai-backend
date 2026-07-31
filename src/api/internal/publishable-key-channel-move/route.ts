@@ -83,7 +83,12 @@ function authed(req: MedusaRequest): boolean {
 type DesiredChannel = 'operating' | 'marketplace'
 
 function readDesiredChannel(raw: unknown): DesiredChannel | null {
-  if (raw === undefined || raw === null || raw === '') return 'operating'
+  // Absent ⇒ the forward move (`operating`), which is what this route is for.
+  // An EMPTY STRING is not absent — it is a caller that meant to say something and
+  // said nothing, on a route that rewrites the storefront's channel scope. Refuse it
+  // the same way an unrecognised value is refused, rather than silently performing
+  // the forward move. (Cross-agent review, claude-opus-4-6.)
+  if (raw === undefined || raw === null) return 'operating'
   return raw === 'operating' || raw === 'marketplace' ? raw : null
 }
 

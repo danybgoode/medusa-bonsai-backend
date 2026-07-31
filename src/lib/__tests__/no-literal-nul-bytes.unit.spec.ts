@@ -47,8 +47,14 @@ describe('no literal NUL bytes in source', () => {
     const offenders: string[] = []
     for (const file of walk(SRC)) {
       const buf = fs.readFileSync(file)
-      const count = buf.filter((b) => b === 0).length
-      if (count > 0) offenders.push(`${path.relative(process.cwd(), file)} (${count})`)
+      // `buf.includes(0)` first: it short-circuits and, for the overwhelmingly
+      // common clean file, avoids allocating anything. Only a real offender pays
+      // for the count. (The earlier `buf.filter(...).length` allocated a filtered
+      // copy of every one of 200+ files on every CI run.)
+      if (!buf.includes(0)) continue
+      let count = 0
+      for (const b of buf) if (b === 0) count += 1
+      offenders.push(`${path.relative(process.cwd(), file)} (${count})`)
     }
     expect(offenders).toEqual([])
   })

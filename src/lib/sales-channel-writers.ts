@@ -208,6 +208,12 @@ export function validateSalesChannelWriterInventory(
   const errors: string[] = []
   const seen = new Set<string>()
   const expected = new Set(
+    // `\u0000` is the ESCAPE SEQUENCE, deliberately — six printable characters that
+    // produce one NUL at runtime. A NUL cannot occur in a file path or an identifier,
+    // so it is the one delimiter that can never collide. Do NOT "fix" this into a
+    // literal NUL byte: that makes the file binary to git and CRASHES the
+    // cross-agent review layer (see `no-literal-nul-bytes.unit.spec.ts`, which exists
+    // because exactly that happened on PR 130).
     SALES_CHANNEL_WRITER_REGISTRY.map((entry) => `${entry.file}\u0000${entry.primitive}`),
   )
 
