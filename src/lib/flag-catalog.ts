@@ -15,6 +15,10 @@ type FlagCatalogMetadata = {
   polarity: FlagPolarity
   criticality: FlagCriticality
   enforcement: FlagEnforcement
+  /** Immutable value in Golden's `miyagi` definition, distinct from runtime fallback. */
+  goldenDefault: boolean
+  /** Immutable Golden metadata, preserved even if local call-site ownership later differs. */
+  goldenEnforcement: FlagEnforcement
   description: string
   owners: readonly string[]
 }
@@ -25,7 +29,12 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'killswitch',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Stripe card payments; OFF removes the Stripe rail from checkout.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    // Current immutable Golden text: this app owns the catalog fragment and must
+    // reproduce the legacy Miyagi import byte-for-byte on explicit sync.
+    description:
+      'Pagos con tarjeta vía Stripe. Actívala para permitir pagos con tarjeta; apágala para quitar Stripe de todo el checkout (los demás métodos de pago siguen funcionando).',
     owners: [
       'src/api/store/carts/[id]/start-checkout/route.ts',
       'src/api/store/sellers/[slug]/checkout-options/route.ts',
@@ -36,7 +45,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Server-priced rental checkout; OFF preserves seller coordination.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Cobro automático de rentas (noches × tarifa + depósito). Actívala para que el checkout calcule el cobro completo de una renta; apagada, las rentas se coordinan directamente con el vendedor.',
     owners: ['src/api/store/carts/[id]/start-checkout/route.ts'],
   },
   'shipping.envia_enabled': {
@@ -44,7 +56,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Envía carrier quotes and fulfillment; OFF preserves arranged/manual delivery.',
+    goldenDefault: false,
+    goldenEnforcement: 'both',
+    description:
+      'Cotización y envío automático con Envía.com. Actívala cuando la cuenta de Envía esté lista para usarse; apagada, los compradores solo ven entrega acordada o recolección en tienda.',
     owners: [
       'src/api/store/envia/rates/route.ts',
       'src/api/store/sellers/me/orders/[id]/ship/route.ts',
@@ -55,7 +70,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Correos de México economy rate; OFF keeps the rate out of checkout.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Tarifa económica de Correos de México en el checkout. Actívala para ofrecer esta opción de envío económico; apagada, esta tarifa nunca aparece (independiente de Envía).',
     owners: [
       'src/api/store/envia/rates/route.ts',
       'src/api/store/sellers/[slug]/checkout-options/route.ts',
@@ -66,7 +84,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Per-listing arranged-only delivery; OFF preserves carrier-required behavior.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Entrega acordada por vendedor, anuncio por anuncio. Actívala para que un vendedor pueda marcar un anuncio como "solo entrega acordada" (oculta la paquetería automática y el comprador coordina directo); apagada, todos los anuncios se comportan como hoy (paquetería normal).',
     owners: [
       'src/api/store/carts/[id]/start-checkout/route.ts',
       'src/api/store/sellers/[slug]/checkout-options/route.ts',
@@ -77,7 +98,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'killswitch',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Two-way Mercado Libre stock sync; it deliberately fails closed to OFF.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Sincronización de inventario con Mercado Libre en ambos sentidos. Actívala para mantener el stock igual en los dos lados automáticamente; apágala para detener la sincronización al instante si algo sale mal. Por seguridad, empieza apagada.',
     owners: [
       'src/api/store/_utils/seller-product-update.ts',
       'src/api/webhooks/mercadolibre/route.ts',
@@ -91,7 +115,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'backend',
-    description: 'Materializes paid Mercado Libre sales as Medusa orders.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Crear un pedido real cuando se vende en Mercado Libre. Actívala para que una venta en ML también cree un pedido en Miyagi; apagada, solo se actualiza el stock, sin crear pedido.',
     owners: [
       'src/api/webhooks/mercadolibre/route.ts',
       'src/jobs/reconcile-ml-inventory.ts',
@@ -103,7 +130,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'low',
     enforcement: 'both',
-    description: 'Requires the paid entitlement before Mercado Libre sync/orders can run.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Cobro por activar la sincronización de inventario con ML. Actívala para que activar la sincronización requiera un plan de pago; apagada, cualquier vendedor conectado puede sincronizar gratis.',
     owners: ['src/lib/ml-orders-entitlement.ts'],
   },
   'ops.profit_enabled': {
@@ -111,7 +141,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'medium',
     enforcement: 'both',
-    description: 'Profit ledger writes and seller profit reads; OFF preserves an inert ledger.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Panel de ganancias y márgenes para vendedores. Actívala para mostrar el panel y empezar a registrar cada venta; apagada, no hay panel ni registro.',
     owners: [
       'src/api/internal/profit/apply-price/route.ts',
       'src/api/internal/profit/backfill/route.ts',
@@ -127,7 +160,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Publishes price/catalog changes to Mercado Libre.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Publicar productos en Mercado Libre, paso 3. Actívala para permitir publicar y editar productos en ML desde aquí; apagada, esa opción no aparece.',
     owners: ['src/api/store/_utils/profit-apply-price.ts'],
   },
   'catalog.inventory_channels_enabled': {
@@ -135,7 +171,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'enablement',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Inventory modes and per-channel publication controls.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Modos de inventario (sin límite / sobre pedido), publicar o no cada producto en Mercado Libre, y precio distinto para ML. Actívala para desbloquear estas opciones por producto; apagada, todo producto usa inventario normal con existencias contadas.',
     owners: [
       'src/api/store/_utils/seller-product-update.ts',
       'src/api/store/listings/route.ts',
@@ -152,13 +191,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'killswitch',
     criticality: 'high',
     enforcement: 'both',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
     description:
-      'Owned-shop-only buyability: checkout admission proves OPERATING-channel membership instead of ' +
-      'marketplace publication. DEFAULT ON — the capability is live. ALSO gates (S3) the acceptance of publish_to_market: null at create ' +
-      '(seller-product-create.ts) and publish/unpublish of an EXISTING product in both directions ' +
-      '(seller-product-update.ts, D11) — every seller-facing surface this epic adds sits behind the same ' +
-      'one flag (D8). Registered in apps/miyagisanchez/lib/flag-catalog.ts too — a key in one repo only ' +
-      'is a half-flag.',
+      'Owned-shop-only buyability and publication controls. The capability is live by default; turning this flag OFF is the deliberate kill switch.',
     owners: [
       'src/api/store/checkout-admission/[id]/route.ts',
       'src/api/store/_utils/seller-product-create.ts',
@@ -170,7 +206,10 @@ const FLAG_CATALOG_DEFINITIONS = {
     polarity: 'killswitch',
     criticality: 'high',
     enforcement: 'both',
-    description: 'Staged bulk catalog mutation; it deliberately fails closed to OFF.',
+    goldenDefault: true,
+    goldenEnforcement: 'both',
+    description:
+      'Editar muchos productos a la vez (selección masiva). Actívala para permitir cambios masivos de precio, categoría, etc.; por seguridad empieza apagada, ya que un error afectaría muchos productos de golpe.',
     owners: [
       'src/api/internal/seller-products/bulk-apply/route.ts',
       'src/api/internal/seller-products/bulk-stage/route.ts',

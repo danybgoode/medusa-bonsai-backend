@@ -1,10 +1,6 @@
 import type { FlagDefinition, FlagDefinitionSyncEntry } from '@golden-beans/sdk'
 import { BACKEND_FLAG_CATALOG, type BackendFlagCatalogEntry } from './flag-catalog'
 
-const OWNED_SHOP_ONLY_KEY = 'catalog.owned_shop_only_enabled'
-const OWNED_SHOP_ONLY_DESCRIPTION =
-  'Owned-shop-only buyability and publication controls. The capability is live by default; turning this flag OFF is the deliberate kill switch.'
-
 /**
  * Builds Golden's immutable boolean-definition shape from the backend's typed
  * source-of-truth catalog. Publishing is intentionally separate from runtime
@@ -15,11 +11,8 @@ export function buildBackendFlagDefinition(
 ): FlagDefinition {
   return {
     valueType: 'boolean',
-    description:
-      entry.key === OWNED_SHOP_ONLY_KEY
-        ? OWNED_SHOP_ONLY_DESCRIPTION
-        : `Miyagi flag: ${entry.key}.`,
-    defaultVariantKey: entry.compileDefault ? 'on' : 'off',
+    description: entry.description,
+    defaultVariantKey: entry.goldenDefault ? 'on' : 'off',
     variants: [
       { key: 'off', value: false },
       { key: 'on', value: true },
@@ -29,7 +22,7 @@ export function buildBackendFlagDefinition(
       source: 'miyagi',
       polarity: entry.polarity,
       criticality: entry.criticality,
-      enforcement: entry.enforcement,
+      enforcement: entry.goldenEnforcement,
     },
   }
 }
@@ -37,7 +30,7 @@ export function buildBackendFlagDefinition(
 /** The eleven pre-existing flags governed by both deployed Miyagi services. */
 export const BACKEND_FLAG_DEFINITION_SHARED_KEYS = Object.freeze(
   BACKEND_FLAG_CATALOG.filter(
-    (entry) => entry.enforcement === 'both' && entry.key !== OWNED_SHOP_ONLY_KEY,
+    (entry) => entry.enforcement === 'both' && entry.key !== 'catalog.owned_shop_only_enabled',
   ).map((entry) => entry.key),
 )
 
