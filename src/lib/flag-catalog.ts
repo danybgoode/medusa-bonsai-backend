@@ -129,13 +129,26 @@ const FLAG_CATALOG_DEFINITIONS = {
     ],
   },
   'catalog.owned_shop_only_enabled': {
-    compileDefault: false,
-    polarity: 'enablement',
+    // DEFAULT ON since 2026-07-31 (Daniel's call). The gate has served its only real
+    // purpose — letting S2/S3 merge and deploy INERT while a production
+    // publishable-key move happened — and there is exactly one user, so staged
+    // rollout and no-deploy rollback are worth nothing here while a deploy is 12
+    // minutes. It also could not be turned on: Golden Beans is the flag authority in
+    // production (`*=golden`) and its Miyagi-flag importer is unwired, so no new
+    // Miyagi flag can reach the control plane at all. With no Golden definition and
+    // no platform_flags row, this compile default IS the resolved value.
+    compileDefault: true,
+    // KILLSWITCH, not enablement — the polarity changed with the role. An enablement
+    // flag means "not on yet, turning it on is deliberate"; this feature IS on, and
+    // turning it OFF is now the deliberate act (the `checkout.stripe_enabled`
+    // pattern). Keeps the fail-open invariant "every enablement defaults false"
+    // intact rather than carving an exception into it — the frontend's own invariant
+    // spec caught this the moment the default flipped.
+    polarity: 'killswitch',
     criticality: 'high',
     description:
       'Owned-shop-only buyability: checkout admission proves OPERATING-channel membership instead of ' +
-      'marketplace publication. OFF ⇒ admission additionally requires marketplace publication, i.e. ' +
-      'exactly today\'s behaviour. ALSO gates (S3) the acceptance of publish_to_market: null at create ' +
+      'marketplace publication. DEFAULT ON — the capability is live. ALSO gates (S3) the acceptance of publish_to_market: null at create ' +
       '(seller-product-create.ts) and publish/unpublish of an EXISTING product in both directions ' +
       '(seller-product-update.ts, D11) — every seller-facing surface this epic adds sits behind the same ' +
       'one flag (D8). Registered in apps/miyagisanchez/lib/flag-catalog.ts too — a key in one repo only ' +
