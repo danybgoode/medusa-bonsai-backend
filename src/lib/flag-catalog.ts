@@ -138,7 +138,13 @@ const FLAG_CATALOG_DEFINITIONS = {
     // Miyagi flag can reach the control plane at all. With no Golden definition and
     // no platform_flags row, this compile default IS the resolved value.
     compileDefault: true,
-    polarity: 'enablement',
+    // KILLSWITCH, not enablement — the polarity changed with the role. An enablement
+    // flag means "not on yet, turning it on is deliberate"; this feature IS on, and
+    // turning it OFF is now the deliberate act (the `checkout.stripe_enabled`
+    // pattern). Keeps the fail-open invariant "every enablement defaults false"
+    // intact rather than carving an exception into it — the frontend's own invariant
+    // spec caught this the moment the default flipped.
+    polarity: 'killswitch',
     criticality: 'high',
     description:
       'Owned-shop-only buyability: checkout admission proves OPERATING-channel membership instead of ' +
