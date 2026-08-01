@@ -8,11 +8,13 @@
  */
 export type FlagPolarity = 'enablement' | 'killswitch'
 export type FlagCriticality = 'low' | 'medium' | 'high'
+export type FlagEnforcement = 'backend' | 'both'
 
 type FlagCatalogMetadata = {
   compileDefault: boolean
   polarity: FlagPolarity
   criticality: FlagCriticality
+  enforcement: FlagEnforcement
   description: string
   owners: readonly string[]
 }
@@ -22,6 +24,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: true,
     polarity: 'killswitch',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Stripe card payments; OFF removes the Stripe rail from checkout.',
     owners: [
       'src/api/store/carts/[id]/start-checkout/route.ts',
@@ -32,6 +35,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Server-priced rental checkout; OFF preserves seller coordination.',
     owners: ['src/api/store/carts/[id]/start-checkout/route.ts'],
   },
@@ -39,6 +43,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Envía carrier quotes and fulfillment; OFF preserves arranged/manual delivery.',
     owners: [
       'src/api/store/envia/rates/route.ts',
@@ -49,6 +54,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Correos de México economy rate; OFF keeps the rate out of checkout.',
     owners: [
       'src/api/store/envia/rates/route.ts',
@@ -59,6 +65,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Per-listing arranged-only delivery; OFF preserves carrier-required behavior.',
     owners: [
       'src/api/store/carts/[id]/start-checkout/route.ts',
@@ -69,6 +76,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'killswitch',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Two-way Mercado Libre stock sync; it deliberately fails closed to OFF.',
     owners: [
       'src/api/store/_utils/seller-product-update.ts',
@@ -82,6 +90,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'backend',
     description: 'Materializes paid Mercado Libre sales as Medusa orders.',
     owners: [
       'src/api/webhooks/mercadolibre/route.ts',
@@ -93,6 +102,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'low',
+    enforcement: 'both',
     description: 'Requires the paid entitlement before Mercado Libre sync/orders can run.',
     owners: ['src/lib/ml-orders-entitlement.ts'],
   },
@@ -100,6 +110,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'medium',
+    enforcement: 'both',
     description: 'Profit ledger writes and seller profit reads; OFF preserves an inert ledger.',
     owners: [
       'src/api/internal/profit/apply-price/route.ts',
@@ -115,6 +126,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Publishes price/catalog changes to Mercado Libre.',
     owners: ['src/api/store/_utils/profit-apply-price.ts'],
   },
@@ -122,6 +134,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'enablement',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Inventory modes and per-channel publication controls.',
     owners: [
       'src/api/store/_utils/seller-product-update.ts',
@@ -129,23 +142,16 @@ const FLAG_CATALOG_DEFINITIONS = {
     ],
   },
   'catalog.owned_shop_only_enabled': {
-    // DEFAULT ON since 2026-07-31 (Daniel's call). The gate has served its only real
-    // purpose — letting S2/S3 merge and deploy INERT while a production
-    // publishable-key move happened — and there is exactly one user, so staged
-    // rollout and no-deploy rollback are worth nothing here while a deploy is 12
-    // minutes. It also could not be turned on: Golden Beans is the flag authority in
-    // production (`*=golden`) and its Miyagi-flag importer is unwired, so no new
-    // Miyagi flag can reach the control plane at all. With no Golden definition and
-    // no platform_flags row, this compile default IS the resolved value.
+    // The capability is live by default. Golden Beans owns the canonical
+    // definition and production activation; this local default remains the
+    // fail-open fallback if a Golden snapshot is unavailable. Turning the Golden
+    // flag OFF is the deliberate rollback, matching checkout.stripe_enabled.
     compileDefault: true,
-    // KILLSWITCH, not enablement — the polarity changed with the role. An enablement
-    // flag means "not on yet, turning it on is deliberate"; this feature IS on, and
-    // turning it OFF is now the deliberate act (the `checkout.stripe_enabled`
-    // pattern). Keeps the fail-open invariant "every enablement defaults false"
-    // intact rather than carving an exception into it — the frontend's own invariant
-    // spec caught this the moment the default flipped.
+    // KILLSWITCH, not enablement: it is already live and OFF is deliberate. This
+    // preserves the invariant that every enablement flag defaults false.
     polarity: 'killswitch',
     criticality: 'high',
+    enforcement: 'both',
     description:
       'Owned-shop-only buyability: checkout admission proves OPERATING-channel membership instead of ' +
       'marketplace publication. DEFAULT ON — the capability is live. ALSO gates (S3) the acceptance of publish_to_market: null at create ' +
@@ -163,6 +169,7 @@ const FLAG_CATALOG_DEFINITIONS = {
     compileDefault: false,
     polarity: 'killswitch',
     criticality: 'high',
+    enforcement: 'both',
     description: 'Staged bulk catalog mutation; it deliberately fails closed to OFF.',
     owners: [
       'src/api/internal/seller-products/bulk-apply/route.ts',
