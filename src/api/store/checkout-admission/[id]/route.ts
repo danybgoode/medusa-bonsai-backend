@@ -53,8 +53,10 @@
  * ── THE FLAG IS NOT THE AUTHORIZATION (AGENTS rule 5) ──────────────────────────
  * `catalog.owned_shop_only_enabled` decides WHICH RULE runs (operating-only, or
  * operating AND marketplace as today). Both rules are per-object authorization
- * checks. Flags fail OPEN to `DEFAULT_FLAGS`, and this one is an ENABLEMENT
- * defaulting to `false`, so a flag-store outage lands on the STRICTER rule.
+ * checks. This is a Golden-managed KILLSWITCH with an ON default: the live
+ * feature is available by default, and an explicit OFF value is the deliberate
+ * protective rollback. A missing/unavailable Golden definition still uses the
+ * declared local default and therefore preserves the live ON behavior.
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
