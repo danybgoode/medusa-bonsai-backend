@@ -142,21 +142,13 @@ const FLAG_CATALOG_DEFINITIONS = {
     ],
   },
   'catalog.owned_shop_only_enabled': {
-    // DEFAULT ON since 2026-07-31 (Daniel's call). The gate has served its only real
-    // purpose — letting S2/S3 merge and deploy INERT while a production
-    // publishable-key move happened — and there is exactly one user, so staged
-    // rollout and no-deploy rollback are worth nothing here while a deploy is 12
-    // minutes. It also could not be turned on: Golden Beans is the flag authority in
-    // production (`*=golden`) and its Miyagi-flag importer is unwired, so no new
-    // Miyagi flag can reach the control plane at all. With no Golden definition and
-    // no platform_flags row, this compile default IS the resolved value.
+    // The capability is live by default. Golden Beans owns the canonical
+    // definition and production activation; this local default remains the
+    // fail-open fallback if a Golden snapshot is unavailable. Turning the Golden
+    // flag OFF is the deliberate rollback, matching checkout.stripe_enabled.
     compileDefault: true,
-    // KILLSWITCH, not enablement — the polarity changed with the role. An enablement
-    // flag means "not on yet, turning it on is deliberate"; this feature IS on, and
-    // turning it OFF is now the deliberate act (the `checkout.stripe_enabled`
-    // pattern). Keeps the fail-open invariant "every enablement defaults false"
-    // intact rather than carving an exception into it — the frontend's own invariant
-    // spec caught this the moment the default flipped.
+    // KILLSWITCH, not enablement: it is already live and OFF is deliberate. This
+    // preserves the invariant that every enablement flag defaults false.
     polarity: 'killswitch',
     criticality: 'high',
     enforcement: 'both',

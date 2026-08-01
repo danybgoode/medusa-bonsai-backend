@@ -26,11 +26,17 @@ describe('backend flag-definition sync operator seam', () => {
       contractVersion: 1,
       entries: [],
     })
+    const configuration = resolveFlagDefinitionSyncConfiguration({
+      GROWTH_ENGINE_URL: 'https://golden.example///',
+      GOLDEN_BEANS_FLAG_SYNC_KEY: 'dedicated-key',
+    })
+    expect(configuration).toEqual({
+      baseUrl: 'https://golden.example',
+      flagSyncKey: 'dedicated-key',
+    })
+
     const result = await syncBackendFlagDefinitionCatalog(
-      resolveFlagDefinitionSyncConfiguration({
-        GROWTH_ENGINE_URL: 'https://golden.example///',
-        GOLDEN_BEANS_FLAG_SYNC_KEY: 'dedicated-key',
-      }),
+      configuration,
       { syncFlagDefinitions } as unknown as FlagDefinitionSyncClient,
     )
 

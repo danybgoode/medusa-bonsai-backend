@@ -5,6 +5,35 @@ import {
 } from '../flag-definition-catalog'
 import { BACKEND_FLAG_CATALOG } from '../flag-catalog'
 
+const SHARED_DEFINITION_CONTRACT = [
+  { key: 'catalog.bulk_enabled', defaultVariantKey: 'off', polarity: 'killswitch', criticality: 'high' },
+  {
+    key: 'catalog.inventory_channels_enabled',
+    defaultVariantKey: 'off',
+    polarity: 'enablement',
+    criticality: 'high',
+  },
+  {
+    key: 'checkout.rental_pricing_enabled',
+    defaultVariantKey: 'off',
+    polarity: 'enablement',
+    criticality: 'high',
+  },
+  { key: 'checkout.stripe_enabled', defaultVariantKey: 'on', polarity: 'killswitch', criticality: 'high' },
+  { key: 'ml.publish_enabled', defaultVariantKey: 'off', polarity: 'enablement', criticality: 'high' },
+  { key: 'ml.sync_enabled', defaultVariantKey: 'off', polarity: 'killswitch', criticality: 'high' },
+  { key: 'ml.sync_paywall_enabled', defaultVariantKey: 'off', polarity: 'enablement', criticality: 'low' },
+  { key: 'ops.profit_enabled', defaultVariantKey: 'off', polarity: 'enablement', criticality: 'medium' },
+  {
+    key: 'shipping.arranged_only_enabled',
+    defaultVariantKey: 'off',
+    polarity: 'enablement',
+    criticality: 'high',
+  },
+  { key: 'shipping.correos_enabled', defaultVariantKey: 'off', polarity: 'enablement', criticality: 'high' },
+  { key: 'shipping.envia_enabled', defaultVariantKey: 'off', polarity: 'enablement', criticality: 'high' },
+] as const
+
 describe('backend Golden flag-definition catalog', () => {
   it('publishes one deterministic entry for every backend-owned flag', () => {
     expect(BACKEND_FLAG_DEFINITION_CATALOG).toHaveLength(13)
@@ -31,36 +60,30 @@ describe('backend Golden flag-definition catalog', () => {
   })
 
   it('keeps the eleven ordinary shared definitions canonical across services', () => {
-    expect(BACKEND_FLAG_DEFINITION_SHARED_KEYS).toEqual([
-      'catalog.bulk_enabled',
-      'catalog.inventory_channels_enabled',
-      'checkout.rental_pricing_enabled',
-      'checkout.stripe_enabled',
-      'ml.publish_enabled',
-      'ml.sync_enabled',
-      'ml.sync_paywall_enabled',
-      'ops.profit_enabled',
-      'shipping.arranged_only_enabled',
-      'shipping.correos_enabled',
-      'shipping.envia_enabled',
-    ])
+    expect(BACKEND_FLAG_DEFINITION_SHARED_KEYS).toEqual(
+      SHARED_DEFINITION_CONTRACT.map((entry) => entry.key),
+    )
 
-    const sharedKeys = new Set<string>(BACKEND_FLAG_DEFINITION_SHARED_KEYS)
-    for (const entry of BACKEND_FLAG_DEFINITION_CATALOG) {
-      if (!sharedKeys.has(entry.key)) continue
-      expect(entry.definition).toEqual({
-        valueType: 'boolean',
-        description: `Miyagi flag: ${entry.key}.`,
-        defaultVariantKey: entry.definition.defaultVariantKey,
-        variants: [
-          { key: 'off', value: false },
-          { key: 'on', value: true },
-        ],
-        rules: [],
-        metadata: expect.objectContaining({
-          source: 'miyagi',
-          enforcement: 'both',
-        }),
+    for (const contract of SHARED_DEFINITION_CONTRACT) {
+      const entry = BACKEND_FLAG_DEFINITION_CATALOG.find((entry) => entry.key === contract.key)
+      expect(entry).toEqual({
+        key: contract.key,
+        definition: {
+          valueType: 'boolean',
+          description: `Miyagi flag: ${contract.key}.`,
+          defaultVariantKey: contract.defaultVariantKey,
+          variants: [
+            { key: 'off', value: false },
+            { key: 'on', value: true },
+          ],
+          rules: [],
+          metadata: {
+            source: 'miyagi',
+            polarity: contract.polarity,
+            criticality: contract.criticality,
+            enforcement: 'both',
+          },
+        },
       })
     }
   })
