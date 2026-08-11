@@ -20,6 +20,7 @@ import {
   planUsCommercePack,
   reconcileUsCommercePackLocked,
   US_RESOURCE_NAMES,
+  type UsCommercePlan,
   type UsCommerceSnapshot,
 } from '../_utils/us-commerce-provision'
 
@@ -86,30 +87,45 @@ async function respondApply(req: MedusaRequest, res: MedusaResponse) {
     return res.status(409).json({ dry_run: false, applied: false, ...outcome.plan })
   }
   if (outcome.state === 'noop') {
-    return res.json({ dry_run: false, applied: false, verified: true, ...outcome.plan })
+    return res.json({
+      dry_run: false,
+      applied: false,
+      verified: true,
+      ...outcome.plan,
+      // Provisioning workflows may succeed even when their first verification
+      // cannot load a relation. A later authenticated POST must still hand the
+      // operator the existing token; otherwise the new publishable key is
+      // irretrievable without direct database access.
+      configuration_required: configurationFor(outcome.plan, outcome.before),
+    })
   }
   const verified = outcome.verified
-  const publishableToken = outcome.after.api_keys.find((key) => key.id === verified.resources.api_key_id)?.token ?? null
   return res.status(verified.ready ? 200 : 500).json({
     dry_run: false,
     applied: true,
     verified: verified.ready,
     actions_applied: outcome.plan.actions,
     ...verified,
-    configuration_required: verified.ready ? {
-      MEDUSA_STOCK_LOCATION_ID: verified.resources.mx_stock_location_id_for_env,
-      MEDUSA_US_REGION_ID: verified.resources.region_id,
-      MEDUSA_US_MARKETPLACE_CHANNEL_ID: verified.resources.marketplace_channel_id,
-      MEDUSA_US_OPERATING_CHANNEL_ID: verified.resources.operating_channel_id,
-      MEDUSA_US_STOCK_LOCATION_ID: verified.resources.stock_location_id,
-      // Publishable tokens are browser credentials by design. Return the full token
-      // only inside this authenticated response so the operator can complete the
-      // one-run env handoff; logs/reports keep only the prefix.
-      MEDUSA_US_PUBLISHABLE_KEY: publishableToken,
-      api_key_id: verified.resources.api_key_id,
-      publishable_key_token_prefix: verified.resources.publishable_key_token_prefix,
-    } : null,
+    configuration_required: configurationFor(verified, outcome.after),
   })
+}
+
+function configurationFor(plan: UsCommercePlan, snapshot: UsCommerceSnapshot) {
+  if (!plan.ready) return null
+  const publishableToken = snapshot.api_keys.find((key) => key.id === plan.resources.api_key_id)?.token ?? null
+  return {
+    MEDUSA_STOCK_LOCATION_ID: plan.resources.mx_stock_location_id_for_env,
+    MEDUSA_US_REGION_ID: plan.resources.region_id,
+    MEDUSA_US_MARKETPLACE_CHANNEL_ID: plan.resources.marketplace_channel_id,
+    MEDUSA_US_OPERATING_CHANNEL_ID: plan.resources.operating_channel_id,
+    MEDUSA_US_STOCK_LOCATION_ID: plan.resources.stock_location_id,
+    // Publishable tokens are browser credentials by design. Return the full token
+    // only inside this authenticated POST response so the operator can complete
+    // the one-run env handoff; logs/reports keep only the prefix.
+    MEDUSA_US_PUBLISHABLE_KEY: publishableToken,
+    api_key_id: plan.resources.api_key_id,
+    publishable_key_token_prefix: plan.resources.publishable_key_token_prefix,
+  }
 }
 
 async function survey(scope: MedusaRequest['scope']): Promise<UsCommerceSnapshot> {
