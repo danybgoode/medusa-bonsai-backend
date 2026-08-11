@@ -102,14 +102,13 @@ export interface StoreOwnershipCandidate {
   supported_currencies?: Array<{ currency_code: string; is_default?: boolean }>
 }
 
-export const PLATFORM_STORE_NAME = 'Miyagi Sánchez'
-
 /**
  * Medusa can contain stale Store rows because its historical seed created one
  * on every run. Prefer the configured MX marketplace edge. Older production
- * predates that edge on Store itself, so the explicit platform identity written
- * by setup-mexico (canonical name + MXN default) is the only admitted secondary
- * identity. Row order and age are never selectors.
+ * predates that edge on Store itself. `setup-mexico` selected the platform Store
+ * before it conditionally renamed it, but always made MXN its sole default
+ * currency. A unique MXN-default Store is therefore the durable secondary
+ * identity; its display name is not. Row order and age are never selectors.
  */
 export function selectConfiguredMarketplaceStore<T extends StoreOwnershipCandidate>(
   stores: readonly T[],
@@ -128,19 +127,18 @@ export function selectConfiguredMarketplaceStore<T extends StoreOwnershipCandida
     }
   }
 
-  const namedMatches = stores.filter((store) => {
+  const mxnDefaultMatches = stores.filter((store) => {
     const defaults = (store.supported_currencies ?? []).filter((currency) => currency.is_default)
-    return store.name === PLATFORM_STORE_NAME
-      && defaults.length === 1
+    return defaults.length === 1
       && defaults[0].currency_code.toLowerCase() === 'mxn'
   })
-  if (namedMatches.length !== 1) {
+  if (mxnDefaultMatches.length !== 1) {
     return {
       store: null,
-      error: `No Store uses configured MX marketplace channel ${channelId}; expected exactly one ${PLATFORM_STORE_NAME} Store with MXN default, found ${namedMatches.length} among ${stores.length}.`,
+      error: `No Store uses configured MX marketplace channel ${channelId}; expected exactly one Store with MXN default from setup-mexico, found ${mxnDefaultMatches.length} among ${stores.length}.`,
     }
   }
-  return { store: namedMatches[0], error: null }
+  return { store: mxnDefaultMatches[0], error: null }
 }
 
 /**

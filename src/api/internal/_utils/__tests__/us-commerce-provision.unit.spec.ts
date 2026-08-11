@@ -81,8 +81,12 @@ describe('configured Store ownership', () => {
     })
   })
 
-  it('uses the explicit setup-mexico identity when historical Store rows have no channel edge', () => {
-    const historical = stores.map((store) => ({ ...store, default_sales_channel_id: null }))
+  it('uses the unique MXN default written by setup-mexico when historical Store rows have no channel edge', () => {
+    const historical = stores.map((store) => ({
+      ...store,
+      name: store.id === 'store_live' ? 'Bonsai Commerce' : store.name,
+      default_sales_channel_id: null,
+    }))
     expect(selectConfiguredMarketplaceStore(historical, 'sc_mx')).toEqual({
       store: historical[1], error: null,
     })
@@ -91,7 +95,7 @@ describe('configured Store ownership', () => {
   it('blocks missing, absent, and ambiguous ownership instead of taking the first row', () => {
     expect(selectConfiguredMarketplaceStore(stores, null).error).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
     expect(selectConfiguredMarketplaceStore(stores.map((store) => ({
-      ...store, name: 'Default Store',
+      ...store, supported_currencies: [{ currency_code: 'eur', is_default: true }],
     })), 'sc_unknown').error).toMatch(/found 0 among 2/)
     expect(selectConfiguredMarketplaceStore([
       ...stores,
@@ -99,7 +103,7 @@ describe('configured Store ownership', () => {
     ], 'sc_mx').error).toMatch(/found 2 among 3/)
     expect(selectConfiguredMarketplaceStore([
       ...stores.map((store) => ({ ...store, default_sales_channel_id: null })),
-      { id: 'store_named_duplicate', name: 'Miyagi Sánchez', default_sales_channel_id: null,
+      { id: 'store_mxn_duplicate', name: 'Another Store', default_sales_channel_id: null,
         supported_currencies: [{ currency_code: 'mxn', is_default: true }] },
     ], 'sc_mx').error).toMatch(/found 2 among 3/)
   })
