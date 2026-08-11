@@ -117,10 +117,14 @@ const trimmed = (v: unknown): string | null => {
  */
 export function planApiKeyCleanup(
   rows: unknown,
-  opts: { storefrontToken?: string | null; now?: Date } = {},
+  opts: { storefrontToken?: string | null; protectedTokens?: readonly string[]; now?: Date } = {},
 ): ApiKeyCleanupPlan {
   const list: PublishableKeyRow[] = Array.isArray(rows) ? (rows as PublishableKeyRow[]) : []
-  const storefrontToken = trimmed(opts.storefrontToken)
+  const configuredTokens = new Set(
+    [opts.storefrontToken, ...(opts.protectedTokens ?? [])]
+      .map(trimmed)
+      .filter((token): token is string => !!token),
+  )
   const now = opts.now ?? new Date()
 
   const keep: KeyPlanEntry[] = []
@@ -129,7 +133,7 @@ export function planApiKeyCleanup(
   let totalDangling = 0
   let unusableRows = 0
   let sawAnyToken = false
-  let matchedStorefront = false
+  const matchedTokens = new Set<string>()
 
   for (const row of list) {
     const id = trimmed(row?.id)
@@ -153,8 +157,8 @@ export function planApiKeyCleanup(
     totalLive += live
     totalDangling += dangling
 
-    const isStorefrontKey = !!storefrontToken && token === storefrontToken
-    if (isStorefrontKey) matchedStorefront = true
+    const isStorefrontKey = !!token && configuredTokens.has(token)
+    if (isStorefrontKey && token) matchedTokens.add(token)
 
     // A live link is the stronger signal, so it wins the reason label when both hold.
     const keepReason: KeyPlanEntry['keep_reason'] =
@@ -179,9 +183,9 @@ export function planApiKeyCleanup(
   // `unavailable` when we had nothing to compare against — either no configured
   // token, or the token field came back empty on every row (a field-selection
   // change would look exactly like that, and must not read as "not found").
-  const storefrontCheck: StorefrontTokenCheck = !storefrontToken || !sawAnyToken
+  const storefrontCheck: StorefrontTokenCheck = configuredTokens.size === 0 || !sawAnyToken
     ? 'unavailable'
-    : matchedStorefront
+    : matchedTokens.size === configuredTokens.size
       ? 'matched'
       : 'not_found'
 

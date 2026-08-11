@@ -2,6 +2,7 @@ import { UnknownMarketError } from '../markets'
 import {
   SELLER_OPERATING_MARKET_KEY,
   planMarketplaceLinkBackfill,
+  planSellerCreationMarket,
   planSellerMarketBackfill,
   publicSellerMarket,
   readSellerOperatingMarket,
@@ -52,6 +53,31 @@ describe('readSellerOperatingMarket — three states', () => {
       .toThrow(UnknownMarketError)
     expect(requireSellerOperatingMarket({ metadata: { operating_market: 'us' } })).toBe('us')
     expect(requireSellerOperatingMarket({})).toBe('mx')
+  })
+})
+
+describe('planSellerCreationMarket — immutable, retry-safe shop market', () => {
+  const us = { id: 'sel_us', metadata: { operating_market: 'us' } }
+
+  it('creates a fresh explicit US shop and keeps MX as the fresh omission default', () => {
+    expect(planSellerCreationMarket(null, 'us')).toEqual({ status: 'create', market: 'us' })
+    expect(planSellerCreationMarket(null, undefined)).toEqual({ status: 'create', market: 'mx' })
+  })
+
+  it('is idempotent for the same market and for an omitted retry', () => {
+    expect(planSellerCreationMarket(us, 'us')).toEqual({ status: 'idempotent', market: 'us' })
+    expect(planSellerCreationMarket(us, undefined)).toEqual({ status: 'idempotent', market: 'us' })
+  })
+
+  it('rejects an explicit conflicting market instead of re-marketizing', () => {
+    expect(planSellerCreationMarket(us, 'mx')).toEqual({
+      status: 'conflict', existing_market: 'us', requested_market: 'mx',
+    })
+  })
+
+  it('fails closed on invalid request and invalid stored state', () => {
+    expect(planSellerCreationMarket(null, 'en-US').status).toBe('invalid')
+    expect(planSellerCreationMarket({ metadata: { operating_market: 'ca' } }, 'us').status).toBe('invalid')
   })
 })
 

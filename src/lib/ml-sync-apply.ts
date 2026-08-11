@@ -34,6 +34,7 @@ import { materializeMlOrder } from './ml-order-materialize'
 import { notifySellerOfMlOrderEvent } from './ml-notify-seller'
 import { appendOrderLedger } from './profit-ledger-write'
 import type { MlOrder } from '../modules/mercadolibre/client'
+import { isMxSeller } from './ml-market-guard'
 
 type Scope = { resolve: (key: string) => any }
 type LinkRef = { id: string; seller_id: string; product_id: string; variant_id?: string | null; ml_item_id: string }
@@ -49,12 +50,14 @@ export type ApplyResult = 'applied' | 'skipped'
  */
 async function decrementProductStock(
   scope: Scope,
+  sellerId: string,
   productId: string,
   variantId: string | null | undefined,
   soldQty: number,
 ): Promise<number | null> {
   const qty = Math.max(0, Math.floor(soldQty))
   if (qty === 0) return 0
+  if (!(await isMxSeller(scope, sellerId))) return null
   const query = scope.resolve(ContainerRegistrationKeys.QUERY)
   let vId = variantId ?? undefined
   if (!vId) {
@@ -71,7 +74,9 @@ async function decrementProductStock(
   if (!vId) return null // unresolved → retry, don't mark applied
   const inventoryItemId = await getVariantInventoryItemId(scope, vId)
   if (!inventoryItemId) return null
-  const locationId = await resolveStockLocationId(scope)
+  // Mercado Libre integration is MX-only; never let this legacy rail guess a
+  // location from database ordering.
+  const locationId = await resolveStockLocationId(scope, 'mx')
   if (!locationId) return null
 
   const inventoryService = scope.resolve(Modules.INVENTORY)
@@ -165,7 +170,7 @@ export async function applyMlOrderToLink(
       }
 
       const decremented =
-        quantity > 0 ? await decrementProductStock(scope, link.product_id, link.variant_id, quantity) : 0
+        quantity > 0 ? await decrementProductStock(scope, sellerId, link.product_id, link.variant_id, quantity) : 0
       if (decremented == null) return null // couldn't resolve inventory → retry, do NOT mark
 
       // The decrement is now a REAL, committed inventory mutation — from here on

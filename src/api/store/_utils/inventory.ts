@@ -19,6 +19,11 @@ import {
   createInventoryLevelsWorkflow,
   linkSalesChannelsToStockLocationWorkflow,
 } from '@medusajs/medusa/core-flows'
+import type { MarketCode } from '../../../lib/markets'
+import {
+  type MarketMedusaEnv,
+  resolveStockLocationForMarket,
+} from '../../../lib/market-medusa'
 
 type Scope = { resolve: (key: string) => any }
 
@@ -31,17 +36,16 @@ export function isStockableListingType(listingType: string | null | undefined): 
 }
 
 /**
- * Resolve the stock location to use for marketplace inventory. Prefers an explicit
- * env override, else the first stock location (one is seeded).
+ * Resolve the stock location owned by `market`. There is deliberately no database
+ * fallback: "oldest location" put a US seller's stock in Mexico.
  */
-export async function resolveStockLocationId(scope: Scope): Promise<string | undefined> {
-  if (process.env.MEDUSA_STOCK_LOCATION_ID) return process.env.MEDUSA_STOCK_LOCATION_ID
-  const stockLocationService = scope.resolve(Modules.STOCK_LOCATION)
-  const [location] = await stockLocationService.listStockLocations(
-    {},
-    { select: ['id'], take: 1, order: { created_at: 'ASC' } }
-  )
-  return location?.id
+export async function resolveStockLocationId(
+  _scope: Scope,
+  market: MarketCode,
+  env: MarketMedusaEnv = process.env,
+): Promise<string | undefined> {
+  const resolution = resolveStockLocationForMarket(market, env)
+  return resolution.status === 'resolved' ? resolution.id : undefined
 }
 
 /** Find the inventory item id auto-created for a managed variant. */

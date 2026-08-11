@@ -82,6 +82,15 @@ export async function provisionOperatingChannel(
   const blocked: string[] = []
   const empty = { marketplace: [], operating_before: [], operating_after: [], missing: [], linked: [] }
 
+  if (market !== 'mx') {
+    return {
+      dry_run: !apply, market_code: market,
+      blocked_by: ['This legacy provisioner is MX-only; use /internal/us-commerce-provision for the owned US resource pack.'],
+      channel_id: null, channel_name: null, channel_created: false, would_create: false,
+      stock_locations: empty, action_required: null,
+    }
+  }
+
   // ── 0. D5's source: the marketplace channel, whose links we replicate. ──────
   const marketplaceChannel = resolveMarketplaceChannelForMarket(market, env)
   if (marketplaceChannel.status !== 'resolved') {

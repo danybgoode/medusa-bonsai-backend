@@ -9,8 +9,10 @@ import {
   resolveMarketplaceChannelId,
   resolveOperatingChannelForMarket,
   resolveOperatingChannelId,
+  resolvePublishableKeyForMarket,
   resolveRegionForMarket,
   resolveRegionIdForMarket,
+  resolveStockLocationForMarket,
 } from '../market-medusa'
 
 /**
@@ -27,12 +29,22 @@ const PROD_ENV = {
   MEDUSA_MXN_REGION_ID: 'reg_01KSK1HZAWN5ZCSPZ74ER97HD9',
 }
 
+const US_ENV = {
+  ...PROD_ENV,
+  MEDUSA_US_REGION_ID: 'reg_us',
+  MEDUSA_US_MARKETPLACE_CHANNEL_ID: 'sc_us_marketplace',
+  MEDUSA_US_OPERATING_CHANNEL_ID: 'sc_us_operating',
+  MEDUSA_US_PUBLISHABLE_KEY: 'pk_us',
+  MEDUSA_US_STOCK_LOCATION_ID: 'sloc_us',
+}
+
 describe('resolveMarketplaceChannelId', () => {
   it('mx resolves to MEDUSA_SALES_CHANNEL_ID', () => {
     expect(resolveMarketplaceChannelId('mx', PROD_ENV)).toBe('sc_01KSK1J0V81P4EPY9G0JAPX353')
   })
 
-  it('us resolves to null — there is no US Sales Channel in any environment (D0)', () => {
+  it('us resolves only from its own marketplace-channel variable', () => {
+    expect(resolveMarketplaceChannelId('us', US_ENV)).toBe('sc_us_marketplace')
     expect(resolveMarketplaceChannelId('us', PROD_ENV)).toBeNull()
   })
 
@@ -54,10 +66,10 @@ describe('resolveMarketplaceChannelForMarket — three states, never two', () =>
     })
   })
 
-  it('us is no_resource — structurally absent, NOT a configuration gap', () => {
+  it('us is unconfigured until its expected resource id is published', () => {
     const resolution = resolveMarketplaceChannelForMarket('us', PROD_ENV)
-    expect(resolution.status).toBe('no_resource')
-    if (resolution.status === 'no_resource') expect(resolution.reason).toMatch(/no Medusa marketplace_channel/)
+    expect(resolution.status).toBe('unconfigured')
+    if (resolution.status === 'unconfigured') expect(resolution.env_var).toBe('MEDUSA_US_MARKETPLACE_CHANNEL_ID')
   })
 
   it('mx with the env var missing is UNCONFIGURED — a different fact from us', () => {
@@ -71,8 +83,8 @@ describe('resolveMarketplaceChannelForMarket — three states, never two', () =>
     // helper is not enough on its own for a read boundary.
     expect(resolveMarketplaceChannelId('mx', {})).toBeNull()
     expect(resolveMarketplaceChannelId('us', {})).toBeNull()
-    expect(resolveMarketplaceChannelForMarket('mx', {}).status)
-      .not.toBe(resolveMarketplaceChannelForMarket('us', {}).status)
+    expect(resolveMarketplaceChannelForMarket('mx', {}).status).toBe('unconfigured')
+    expect(resolveMarketplaceChannelForMarket('us', {}).status).toBe('unconfigured')
   })
 })
 
@@ -89,7 +101,8 @@ describe('resolveOperatingChannelId', () => {
     expect(resolveOperatingChannelId('mx', PROD_ENV_WITH_OPERATING)).toBe('sc_operating_mx_placeholder')
   })
 
-  it('us resolves to null — there is no US operating channel in any environment', () => {
+  it('us resolves only from its own operating-channel variable', () => {
+    expect(resolveOperatingChannelId('us', US_ENV)).toBe('sc_us_operating')
     expect(resolveOperatingChannelId('us', PROD_ENV_WITH_OPERATING)).toBeNull()
   })
 
@@ -121,10 +134,10 @@ describe('resolveOperatingChannelForMarket — three states, never two', () => {
     })
   })
 
-  it('us is no_resource — structural, exactly like the marketplace channel', () => {
+  it('us is unconfigured until its expected operating channel is published', () => {
     const resolution = resolveOperatingChannelForMarket('us', PROD_ENV_WITH_OPERATING)
-    expect(resolution.status).toBe('no_resource')
-    if (resolution.status === 'no_resource') expect(resolution.reason).toMatch(/no Medusa operating_channel/)
+    expect(resolution.status).toBe('unconfigured')
+    if (resolution.status === 'unconfigured') expect(resolution.env_var).toBe('MEDUSA_US_OPERATING_CHANNEL_ID')
   })
 
   it('mx with the env var missing is UNCONFIGURED, and never falls back to the ' +
@@ -148,9 +161,11 @@ describe('resolveRegionIdForMarket', () => {
     expect(resolveRegionIdForMarket('mx', PROD_ENV)).toBe('reg_01KSK1HZAWN5ZCSPZ74ER97HD9')
   })
 
-  it('us resolves to null — production holds exactly one Region, Mexico (D0)', () => {
+  it('us is unconfigured until its expected Region id is published', () => {
     expect(resolveRegionIdForMarket('us', PROD_ENV)).toBeNull()
-    expect(resolveRegionForMarket('us', PROD_ENV).status).toBe('no_resource')
+    expect(resolveRegionForMarket('us', PROD_ENV)).toMatchObject({
+      status: 'unconfigured', env_var: 'MEDUSA_US_REGION_ID',
+    })
   })
 
   it('unknown throws', () => {
@@ -159,6 +174,25 @@ describe('resolveRegionIdForMarket', () => {
 
   it('never hands the MX region to another market', () => {
     expect(resolveRegionIdForMarket('us', PROD_ENV)).not.toBe(PROD_ENV.MEDUSA_MXN_REGION_ID)
+  })
+})
+
+describe('US resource pack resolution', () => {
+  it('resolves the Region, key and stock location from distinct variables', () => {
+    expect(resolveRegionForMarket('us', US_ENV)).toMatchObject({ status: 'resolved', id: 'reg_us' })
+    expect(resolvePublishableKeyForMarket('us', US_ENV)).toMatchObject({
+      status: 'resolved', kind: 'publishable_key_token', token: 'pk_us',
+    })
+    expect(resolveStockLocationForMarket('us', US_ENV)).toMatchObject({ status: 'resolved', id: 'sloc_us' })
+  })
+
+  it('names absent US key/location config and never falls back to MX', () => {
+    expect(resolvePublishableKeyForMarket('us', PROD_ENV)).toMatchObject({
+      status: 'unconfigured', env_var: 'MEDUSA_US_PUBLISHABLE_KEY',
+    })
+    expect(resolveStockLocationForMarket('us', PROD_ENV)).toMatchObject({
+      status: 'unconfigured', env_var: 'MEDUSA_US_STOCK_LOCATION_ID',
+    })
   })
 })
 

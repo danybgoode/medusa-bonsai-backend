@@ -49,6 +49,13 @@ export interface MarketMedusaEnv {
   readonly MEDUSA_MXN_REGION_ID?: string
   readonly MEDUSA_SALES_CHANNEL_ID?: string
   readonly MEDUSA_MX_OPERATING_CHANNEL_ID?: string
+  readonly MEDUSA_PUBLISHABLE_KEY?: string
+  readonly MEDUSA_STOCK_LOCATION_ID?: string
+  readonly MEDUSA_US_REGION_ID?: string
+  readonly MEDUSA_US_MARKETPLACE_CHANNEL_ID?: string
+  readonly MEDUSA_US_OPERATING_CHANNEL_ID?: string
+  readonly MEDUSA_US_PUBLISHABLE_KEY?: string
+  readonly MEDUSA_US_STOCK_LOCATION_ID?: string
 }
 
 /**
@@ -63,25 +70,30 @@ const MARKET_MEDUSA_ENV_KEYS: Readonly<Record<MarketCode, {
   readonly region?: keyof MarketMedusaEnv
   readonly marketplace_channel?: keyof MarketMedusaEnv
   readonly operating_channel?: keyof MarketMedusaEnv
+  readonly stock_location?: keyof MarketMedusaEnv
 }>> = Object.freeze({
   mx: Object.freeze({
     region: 'MEDUSA_MXN_REGION_ID',
     marketplace_channel: 'MEDUSA_SALES_CHANNEL_ID',
     operating_channel: 'MEDUSA_MX_OPERATING_CHANNEL_ID',
+    stock_location: 'MEDUSA_STOCK_LOCATION_ID',
   }),
-  // D0, re-derived against production 2026-07-28: exactly one Region (Mexico/MXN)
-  // and two Sales Channels (the default one and the Mexico marketplace one). There
-  // is nothing for `us` to point at, so it resolves to `no_resource` — never to the
-  // Mexico ids. `us` gets NO operating_channel entry either (owned-shop-operating-
-  // channel epic, D2/S1.2): this epic's scope is Mexico only (README explicit
-  // non-goal — no US commerce capability of any kind), so `us` stays structurally
-  // `no_resource` for the operating channel exactly as it already is for the other
-  // two kinds. Standing up a US operating channel later is one row here plus one
-  // env var, same as a US region or marketplace channel would be.
-  us: Object.freeze({}),
+  // US is now an expected resource pack. Until provisioning publishes the ids,
+  // every resolution is `unconfigured` (operator action required), never
+  // `no_resource` and never an MX fallback.
+  us: Object.freeze({
+    region: 'MEDUSA_US_REGION_ID',
+    marketplace_channel: 'MEDUSA_US_MARKETPLACE_CHANNEL_ID',
+    operating_channel: 'MEDUSA_US_OPERATING_CHANNEL_ID',
+    stock_location: 'MEDUSA_US_STOCK_LOCATION_ID',
+  }),
 })
 
-export type MedusaResourceKind = 'region' | 'marketplace_channel' | 'operating_channel'
+export type MedusaResourceKind =
+  | 'region'
+  | 'marketplace_channel'
+  | 'operating_channel'
+  | 'stock_location'
 
 /**
  * The outcome of turning a market code into a Medusa id.
@@ -160,13 +172,48 @@ export function resolveOperatingChannelForMarket(value: unknown, env: MarketMedu
   return resolve(value, 'operating_channel', env)
 }
 
+const MARKET_PUBLISHABLE_KEY_ENV_KEYS: Readonly<Record<MarketCode, keyof MarketMedusaEnv>> = Object.freeze({
+  mx: 'MEDUSA_PUBLISHABLE_KEY',
+  us: 'MEDUSA_US_PUBLISHABLE_KEY',
+})
+
+export type PublishableKeyTokenResolution =
+  | { readonly status: 'resolved'; readonly market: MarketCode; readonly kind: 'publishable_key_token'; readonly token: string }
+  | { readonly status: 'unconfigured'; readonly market: MarketCode; readonly kind: 'publishable_key_token'; readonly env_var: string; readonly reason: string }
+
+/**
+ * Resolve a browser publishable token (`pk_…`). It is deliberately not a
+ * `MedusaIdResolution`: API-key database row ids are `apk_…`, and conflating the
+ * two makes cleanup/provision verification unsafe.
+ */
+export function resolvePublishableKeyForMarket(
+  value: unknown,
+  env: MarketMedusaEnv,
+): PublishableKeyTokenResolution {
+  const market = requireMarket(value).code
+  const envKey = MARKET_PUBLISHABLE_KEY_ENV_KEYS[market]
+  const raw = env[envKey]
+  const token = typeof raw === 'string' ? raw.trim() : ''
+  return token
+    ? { status: 'resolved', market, kind: 'publishable_key_token', token }
+    : {
+      status: 'unconfigured', market, kind: 'publishable_key_token', env_var: envKey,
+      reason: `Market "${market}" expects a publishable key token but ${envKey} is unset.`,
+    }
+}
+
+/** Full resolution for the market-owned inventory location. */
+export function resolveStockLocationForMarket(value: unknown, env: MarketMedusaEnv): MedusaIdResolution {
+  return resolve(value, 'stock_location', env)
+}
+
 /**
  * The Medusa Region id for a market, or `null`.
  *
- * `mx` → `MEDUSA_MXN_REGION_ID`; `us` → `null` (no US Region — D0); unknown ⇒ throws
- * `UnknownMarketError`. Use `resolveRegionForMarket` when the caller must
- * distinguish "no US Region exists" from "someone forgot the env var" — this shape
- * deliberately collapses them and is only safe where both mean "cannot proceed".
+ * `mx` → `MEDUSA_MXN_REGION_ID`; `us` → `MEDUSA_US_REGION_ID`; unknown throws
+ * `UnknownMarketError`. Use `resolveRegionForMarket` when the caller must preserve
+ * the named `unconfigured` reason instead of collapsing it to null; this convenience
+ * shape is only safe where every unresolved state means "cannot proceed".
  *
  * NOTE for this repo specifically: `MEDUSA_MXN_REGION_ID` is a FRONTEND env var
  * today (`apps/miyagisanchez/lib/medusa.ts`); the backend resolves its Region from
@@ -183,9 +230,9 @@ export function resolveRegionIdForMarket(value: unknown, env: MarketMedusaEnv): 
 /**
  * The marketplace Sales Channel id for a market, or `null`.
  *
- * `mx` → `MEDUSA_SALES_CHANNEL_ID` (production: `sc_01KSK1J0V81P4EPY9G0JAPX353`,
- * the channel the storefront's only publishable key is linked to — D0);
- * `us` → `null`; unknown ⇒ throws `UnknownMarketError`.
+ * Both registry markets resolve their named marketplace-channel env. A missing
+ * expected env collapses to null here; callers that need the three-state reason use
+ * `resolveMarketplaceChannelForMarket`. Unknown input throws `UnknownMarketError`.
  */
 export function resolveMarketplaceChannelId(value: unknown, env: MarketMedusaEnv): string | null {
   const resolution = resolveMarketplaceChannelForMarket(value, env)
@@ -199,11 +246,21 @@ export function resolveMarketplaceChannelId(value: unknown, env: MarketMedusaEnv
  * A read boundary that must tell an outage apart from a structural absence uses
  * `resolveOperatingChannelForMarket` instead — never this one.
  *
- * `mx` → `MEDUSA_MX_OPERATING_CHANNEL_ID`; `us` → `null`; unknown ⇒ throws
+ * Both registry markets resolve their named operating-channel env; unknown throws
  * `UnknownMarketError`.
  */
 export function resolveOperatingChannelId(value: unknown, env: MarketMedusaEnv): string | null {
   const resolution = resolveOperatingChannelForMarket(value, env)
+  return resolution.status === 'resolved' ? resolution.id : null
+}
+
+export function resolvePublishableKey(value: unknown, env: MarketMedusaEnv): string | null {
+  const resolution = resolvePublishableKeyForMarket(value, env)
+  return resolution.status === 'resolved' ? resolution.token : null
+}
+
+export function resolveStockLocationIdForMarket(value: unknown, env: MarketMedusaEnv): string | null {
+  const resolution = resolveStockLocationForMarket(value, env)
   return resolution.status === 'resolved' ? resolution.id : null
 }
 

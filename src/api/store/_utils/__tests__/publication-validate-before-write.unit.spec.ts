@@ -60,6 +60,7 @@ describe('updateSellerProduct — a refused publication writes NOTHING first', (
       ...OLD,
       MEDUSA_SALES_CHANNEL_ID: 'sc_01KSK1J0V81P4EPY9G0JAPX353',
       MEDUSA_MX_OPERATING_CHANNEL_ID: 'sc_01KYWNQ0C0PFFM0K0V2EMC24AP',
+      MEDUSA_STOCK_LOCATION_ID: 'sloc_mx',
     } as any
   })
   afterAll(() => { process.env = OLD })
@@ -89,5 +90,30 @@ describe('updateSellerProduct — a refused publication writes NOTHING first', (
     )
     expect(result.ok).toBe(true)
     expect(trace.length).toBeGreaterThan(0)
+  })
+
+  it('refuses an option-dimension write before variant I/O when the US location is unavailable', async () => {
+    const result = await updateSellerProduct(
+      fakeScope(),
+      'prod_1',
+      {
+        option_dimensions: [{ title: 'Size', values: ['S'] }],
+        variant_prices: { 'Size:S': 1000 },
+      } as any,
+      { id: 'sel_us', slug: 'us-shop', metadata: { operating_market: 'us' } },
+    )
+    expect(result).toMatchObject({ ok: false, status: 503 })
+    expect(trace).toEqual([])
+  })
+
+  it('refuses tracked inventory-mode admission before product I/O when the market location is unavailable', async () => {
+    const result = await updateSellerProduct(
+      fakeScope(),
+      'prod_1',
+      { inventory_mode: 'tracked', variant_id: 'variant_1' } as any,
+      { id: 'sel_us', slug: 'us-shop', metadata: { operating_market: 'us' } },
+    )
+    expect(result).toMatchObject({ ok: false, status: 503 })
+    expect(trace).toEqual([])
   })
 })

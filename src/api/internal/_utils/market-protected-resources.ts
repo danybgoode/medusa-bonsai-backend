@@ -22,6 +22,7 @@ import {
   registryRegionIds,
   resolveMarketplaceChannelForMarket,
   resolveOperatingChannelForMarket,
+  resolvePublishableKeyForMarket,
 } from '../../../lib/market-medusa'
 
 export interface RegionLike {
@@ -133,14 +134,10 @@ export type ProtectedChannelPlan =
  *
  * The operating channel is guarded here with the SAME strictness as the marketplace
  * channel — `unconfigured` blocks the whole sweep rather than silently protecting
- * fewer channels — which is a deliberately more conservative rule than the sibling
- * `protectedSalesChannelIds` (`lib/market-medusa.ts`) applies for `cleanup-
- * default-data.ts`: that script's allow-list quietly omits an unconfigured channel
- * (there is nothing yet to protect against, since the channel row does not exist
- * before it is created), whereas THIS route deletes channels outright, so an operator
- * who has not yet finished provisioning must see "unavailable", never a prune that
- * ran short-listed. `no_resource` (a market this epic never touches, `us`) is not a
- * block — only `unconfigured` is.
+ * fewer channels. Both destructive callers now use this same complete-population
+ * refusal: an operator who has not finished provisioning sees "unavailable", never
+ * a prune that ran with a shortened allow-list. A future structurally absent
+ * resource (`no_resource`) remains the only safe omission.
  */
 export function planProtectedSalesChannels(
   env: MarketMedusaEnv,
@@ -153,8 +150,8 @@ export function planProtectedSalesChannels(
   else ids.add(storeDefault)
 
   for (const code of MARKET_CODES) {
-    if (MARKETS[code].marketplace_status !== 'active') continue
-
+    // Protect expected resources before a market is activated. Invitation status
+    // controls publication, not whether a destructive sweep may forget its rows.
     const channel = resolveMarketplaceChannelForMarket(code, env)
     if (channel.status === 'resolved') ids.add(channel.id)
     else blocked.push(channel.reason)
@@ -194,15 +191,38 @@ export function planProtectedSalesChannels(
  * var.
  *
  * "I could not check" and "there is nothing to protect" are different facts; only the
- * second one is safe to delete against. `no_resource` (a market with no operating
- * channel in ANY environment — `us`) is the genuinely-absent case and never blocks.
+ * second one is safe to delete against. A future `no_resource` registry entry is the
+ * genuinely-absent case and never blocks.
  */
 export function unconfiguredOperatingChannelReasons(env: MarketMedusaEnv): string[] {
   const reasons: string[] = []
   for (const code of MARKET_CODES) {
-    if (MARKETS[code].marketplace_status !== 'active') continue
     const operating = resolveOperatingChannelForMarket(code, env)
     if (operating.status === 'unconfigured') reasons.push(operating.reason)
   }
   return reasons
+}
+
+/**
+ * A credential sweep may run only when every market-owned publishable key is
+ * positively configured. This intentionally blocks during the provisioning window:
+ * a just-created US key is most vulnerable before its token reaches Cloud Run.
+ */
+export function planProtectedPublishableKeys(env: MarketMedusaEnv):
+  | { readonly ok: true; readonly tokens: readonly string[] }
+  | { readonly ok: false; readonly blocked_by: readonly string[] } {
+  const tokens: string[] = []
+  const blocked: string[] = []
+  for (const code of MARKET_CODES) {
+    const key = resolvePublishableKeyForMarket(code, env)
+    if (key.status === 'resolved') {
+      if (tokens.includes(key.token)) {
+        blocked.push(`Publishable key token for ${code} duplicates another market token; refusing an ambiguous credential allow-list.`)
+      } else tokens.push(key.token)
+    }
+    else blocked.push(key.reason)
+  }
+  return blocked.length > 0
+    ? { ok: false, blocked_by: blocked }
+    : { ok: true, tokens }
 }

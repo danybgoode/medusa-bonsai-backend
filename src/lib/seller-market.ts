@@ -72,9 +72,8 @@ function metadataBag(source: unknown): Record<string, unknown> | null {
  *
  * That default exists ONLY for the pre-launch migration window: every seller in the
  * database predates this registry and was created in a single-market Mexico system,
- * so "unspecified" genuinely means `mx` for that exact population (D0: 0 sellers
- * carry the key today; 18 sellers have published products). It is a
- * backward-compatibility default over a KNOWN population, not a fallback for unknown
+ * so "unspecified" genuinely means `mx` for that measured pre-launch population.
+ * It is a backward-compatibility default over a KNOWN population, not a fallback for unknown
  * input — an unrecognised stored value returns `invalid`, and every WRITE requires an
  * explicit supported market. Once the backfill has run, `legacy_default` should
  * describe nobody, and a caller seeing it can treat it as a data-repair signal.
@@ -148,15 +147,65 @@ export function setSellerOperatingMarket(
   return { ...bag, [SELLER_OPERATING_MARKET_KEY]: record.code }
 }
 
+export type SellerCreationMarketPlan =
+  | { readonly status: 'create'; readonly market: MarketCode }
+  | { readonly status: 'idempotent'; readonly market: MarketCode }
+  | { readonly status: 'conflict'; readonly existing_market: MarketCode; readonly requested_market: MarketCode }
+  | { readonly status: 'invalid'; readonly message: string }
+
+/**
+ * Decide the market outcome of a retryable seller-create request. The omission
+ * default is MX only for a genuinely fresh row. Once a shop exists its stored
+ * market is immutable: a same-market retry is idempotent and a conflicting retry
+ * is a 409, never a silent re-marketization.
+ */
+export function planSellerCreationMarket(
+  existingSeller: unknown | null,
+  requestedMarket: unknown,
+): SellerCreationMarketPlan {
+  const omitted = requestedMarket === undefined || requestedMarket === null
+    || (typeof requestedMarket === 'string' && requestedMarket.trim() === '')
+  if (existingSeller && omitted) {
+    const existing = readSellerOperatingMarket(existingSeller)
+    return existing.market
+      ? { status: 'idempotent', market: existing.market }
+      : {
+        status: 'invalid',
+        message: `Existing seller has invalid metadata.${SELLER_OPERATING_MARKET_KEY}; repair it before retrying creation.`,
+      }
+  }
+  let requested: MarketCode
+  try {
+    requested = requireMarket(requestedMarket ?? DEFAULT_MARKET).code
+  } catch (e) {
+    return { status: 'invalid', message: (e as Error).message }
+  }
+  if (!existingSeller) return { status: 'create', market: requested }
+
+  const existing = readSellerOperatingMarket(existingSeller)
+  if (!existing.market) {
+    return {
+      status: 'invalid',
+      message: `Existing seller has invalid metadata.${SELLER_OPERATING_MARKET_KEY}; repair it before retrying creation.`,
+    }
+  }
+  if (existing.market === requested) return { status: 'idempotent', market: existing.market }
+  return {
+    status: 'conflict',
+    existing_market: existing.market,
+    requested_market: requested,
+  }
+}
+
 /**
  * The commerce rails a seller's market is entitled to.
  *
  * This is the answer to "an unsupported market must not silently inherit Mexico
  * Stripe/shipping settings": every rail below is derived from the seller's OWN
- * market, so a non-Mexico shop gets `region_id: null`, `marketplace_channel_id: null`
- * and its own currency — there is no code path that hands it the MXN Region, the MX
- * marketplace channel, or a Mexico-only carrier. A caller that finds `region_id`
- * null must refuse the operation, not substitute one.
+ * market, so a US shop gets its configured US Region, an invitation-stage
+ * `marketplace_channel_id: null`, and USD — there is no code path that hands it the
+ * MXN Region, the MX marketplace channel, or a Mexico-only carrier. A caller that
+ * finds an expected `region_id` null must refuse the operation, not substitute one.
  */
 export interface SellerMarketContext {
   readonly market: MarketCode
@@ -165,7 +214,7 @@ export interface SellerMarketContext {
   /** Presentation only. Never read this to pick currency, payment or shipping. */
   readonly default_locale: string
   readonly currency_code: string
-  /** Medusa Region for this seller's checkout, or null when the market has none. */
+  /** Medusa Region for this seller's checkout, or null when its expected env is unavailable. */
   readonly region_id: string | null
   /** Marketplace Sales Channel, or null when the market's marketplace is not open. */
   readonly marketplace_channel_id: string | null

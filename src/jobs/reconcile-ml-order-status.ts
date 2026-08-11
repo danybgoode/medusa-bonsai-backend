@@ -168,6 +168,7 @@ export default async function reconcileMlOrderStatusJob(container: MedusaContain
 
       const result = await applyMlFulfillmentTransition(container as never, {
         orderId: candidate.id,
+        sellerId,
         target,
         items: (order.items ?? []).map((i) => ({ id: i.id, quantity: i.quantity ?? 1 })),
         fulfillmentId: order.fulfillments?.[0]?.id ?? null,
