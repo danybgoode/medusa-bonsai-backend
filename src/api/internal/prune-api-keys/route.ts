@@ -23,6 +23,7 @@ import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { deleteApiKeysWorkflow, revokeApiKeysWorkflow } from '@medusajs/medusa/core-flows'
 import { planApiKeyCleanup } from '../_utils/api-key-cleanup'
 import { internalSecretOk } from '../../../lib/internal-auth'
+import { planProtectedPublishableKeys } from '../_utils/market-protected-resources'
 
 function authed(req: MedusaRequest): boolean {
   // Fail CLOSED: a missing MEDUSA_INTERNAL_SECRET denies everyone. One
@@ -35,6 +36,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const body = (req.body ?? {}) as { dry_run?: boolean }
   const dryRun = body.dry_run !== false // default true — safe by default
+
+  // Market status is irrelevant to credential protection. In particular, US is
+  // still invitation-only while S1 creates its key; refuse every destructive run
+  // until all market key tokens are configured on this service.
+  const protectedKeys = planProtectedPublishableKeys(process.env)
+  if (!protectedKeys.ok) {
+    return res.status(503).json({
+      unavailable: true,
+      dry_run: dryRun,
+      applied: false,
+      blocked_by: protectedKeys.blocked_by,
+    })
+  }
 
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
@@ -60,7 +74,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const plan = planApiKeyCleanup(rows, {
-    storefrontToken: process.env.MEDUSA_PUBLISHABLE_KEY ?? null,
+    protectedTokens: protectedKeys.tokens,
   })
 
   if (plan.refuse) {
@@ -103,7 +117,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     filters: { type: 'publishable' } as any,
   })
   const verified = planApiKeyCleanup(after, {
-    storefrontToken: process.env.MEDUSA_PUBLISHABLE_KEY ?? null,
+    protectedTokens: protectedKeys.tokens,
   })
 
   return res.json({

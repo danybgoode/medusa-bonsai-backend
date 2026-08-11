@@ -34,6 +34,7 @@ import {
 import { resolveShippingOptionIds } from '../api/store/_utils/fulfillment'
 import { resolveStockLocationId } from '../api/store/_utils/inventory'
 import type { MlFulfillmentTransition } from '../modules/mercadolibre/sync-utils'
+import { isMxSeller } from './ml-market-guard'
 
 type Scope = { resolve: (key: string) => any }
 
@@ -41,18 +42,20 @@ export async function applyMlFulfillmentTransition(
   scope: Scope,
   args: {
     orderId: string
+    sellerId: string
     target: MlFulfillmentTransition
     items: { id: string; quantity: number }[]
     fulfillmentId: string | null
   },
 ): Promise<{ applied: boolean }> {
   if (args.target === 'shipped') {
+    if (!(await isMxSeller(scope, args.sellerId))) return { applied: false }
     let fulfillmentId = args.fulfillmentId
 
     if (!fulfillmentId) {
       const [optionIds, locationId] = await Promise.all([
         resolveShippingOptionIds(scope as never),
-        resolveStockLocationId(scope as never),
+        resolveStockLocationId(scope as never, 'mx'),
       ])
       const shippingOptionId = optionIds.coord
       if (!shippingOptionId || args.items.length === 0) return { applied: false } // config/data gap → retry next pass

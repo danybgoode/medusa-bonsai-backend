@@ -2,6 +2,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import {
   describeRegionKeep,
+  planProtectedPublishableKeys,
   unconfiguredOperatingChannelReasons,
   planProtectedSalesChannels,
   planRegionDeletions,
@@ -100,7 +101,7 @@ describe('cleanup-default-data.ts — the channel allow-list is wired in (source
   const source = readFileSync(join(process.cwd(), 'src/scripts/cleanup-default-data.ts'), 'utf8')
 
   it('derives its protected set from the registry, not from a literal', () => {
-    expect(source).toMatch(/protectedSalesChannelIds\(/)
+    expect(source).toMatch(/planProtectedSalesChannels\(/)
     expect(source).toMatch(/notProtected\(/)
   })
 
@@ -137,6 +138,8 @@ describe('prune-sales-channels — the sibling write primitive uses the same lis
 const PROD_ENV_PROVISIONED = {
   ...PROD_ENV,
   MEDUSA_MX_OPERATING_CHANNEL_ID: 'sc_operating_mx_placeholder',
+  MEDUSA_US_MARKETPLACE_CHANNEL_ID: 'sc_marketplace_us',
+  MEDUSA_US_OPERATING_CHANNEL_ID: 'sc_operating_us',
 }
 
 describe('planProtectedSalesChannels — destructive plans require known protection', () => {
@@ -152,6 +155,8 @@ describe('planProtectedSalesChannels — destructive plans require known protect
         'sc_default',
         PROD_ENV.MEDUSA_SALES_CHANNEL_ID,
         PROD_ENV_PROVISIONED.MEDUSA_MX_OPERATING_CHANNEL_ID,
+        PROD_ENV_PROVISIONED.MEDUSA_US_MARKETPLACE_CHANNEL_ID,
+        PROD_ENV_PROVISIONED.MEDUSA_US_OPERATING_CHANNEL_ID,
       ],
     })
   })
@@ -172,16 +177,12 @@ describe('planProtectedSalesChannels — destructive plans require known protect
     expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID/)
   })
 
-  it('never blocks on the US operating channel — structurally no_resource, not ' +
-    'unconfigured', () => {
-    // `us` has no operating_channel entry in MARKET_MEDUSA_ENV_KEYS at all (this
-    // epic's explicit non-goal), and its marketplace_status is "invitation" so the
-    // loop skips it before ever resolving either channel kind — confirmed by the
-    // fact that the ONLY blocking reason present is the MX one.
+  it('blocks on the invitation-stage US resources before they can be pruned', () => {
     const plan = planProtectedSalesChannels(PROD_ENV, 'sc_default')
     expect(plan.ok).toBe(false)
     if (plan.ok) throw new Error('unreachable')
-    expect(plan.blocked_by).toHaveLength(1)
+    expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_US_MARKETPLACE_CHANNEL_ID/)
+    expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_US_OPERATING_CHANNEL_ID/)
   })
 
   it('blocks when the store default is unavailable', () => {
@@ -192,6 +193,18 @@ describe('planProtectedSalesChannels — destructive plans require known protect
   })
 })
 
+describe('planProtectedPublishableKeys — market tokens stay distinct', () => {
+  it('blocks equal MX and US tokens instead of Set-deduping an ambiguous allow-list', () => {
+    const plan = planProtectedPublishableKeys({
+      MEDUSA_PUBLISHABLE_KEY: 'pk_shared',
+      MEDUSA_US_PUBLISHABLE_KEY: 'pk_shared',
+    })
+    expect(plan.ok).toBe(false)
+    if (plan.ok) throw new Error('unreachable')
+    expect(plan.blocked_by.join(' ')).toMatch(/duplicates another market token/)
+  })
+})
+
 describe('unconfiguredOperatingChannelReasons — cleanup-default-data must fail CLOSED', () => {
   // The gap this closes (D10): once the operating channel EXISTS in the database but
   // MEDUSA_MX_OPERATING_CHANNEL_ID is unset in the environment running
@@ -199,25 +212,42 @@ describe('unconfiguredOperatingChannelReasons — cleanup-default-data must fail
   // delete takes the channel plus every product_sales_channel row pointing at it.
   // The marketplace channel is spared by that script's hardcoded KEEP_CHANNEL_ID
   // backstop; the operating channel has none, and deliberately gets none.
-  it('reports the active market whose operating channel is unconfigured', () => {
+  it('reports every expected market whose operating channel is unconfigured', () => {
     const reasons = unconfiguredOperatingChannelReasons(PROD_ENV)
-    expect(reasons).toHaveLength(1)
+    expect(reasons).toHaveLength(2)
     expect(reasons.join(' ')).toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID/)
+    expect(reasons.join(' ')).toMatch(/MEDUSA_US_OPERATING_CHANNEL_ID/)
   })
 
   it('is empty once the operating channel is configured — nothing to refuse on', () => {
     expect(unconfiguredOperatingChannelReasons(PROD_ENV_PROVISIONED)).toEqual([])
   })
 
-  it('never blocks on a market that has no operating channel in ANY environment', () => {
-    // `us` is `no_resource`, not `unconfigured` — genuinely absent, never an outage.
-    // Collapsing the two is exactly the "unknown vs none" error this guard exists for.
-    const reasons = unconfiguredOperatingChannelReasons(PROD_ENV_PROVISIONED)
-    expect(reasons.join(' ')).not.toMatch(/"us"/)
+  it('blocks on the US operating channel before activation/provisioning', () => {
+    const reasons = unconfiguredOperatingChannelReasons({
+      ...PROD_ENV,
+      MEDUSA_MX_OPERATING_CHANNEL_ID: 'sc_mx',
+    })
+    expect(reasons.join(' ')).toMatch(/MEDUSA_US_OPERATING_CHANNEL_ID/)
   })
 })
 
-describe('cleanup-default-data.ts — the operating-channel refusal is wired in', () => {
+describe('planProtectedPublishableKeys — tokens are a protected population', () => {
+  it('blocks while either market token is unavailable', () => {
+    const plan = planProtectedPublishableKeys({ MEDUSA_PUBLISHABLE_KEY: 'pk_mx' })
+    expect(plan.ok).toBe(false)
+    if (plan.ok) throw new Error('unreachable')
+    expect(plan.blocked_by.join(' ')).toMatch(/MEDUSA_US_PUBLISHABLE_KEY/)
+  })
+
+  it('returns tokens, not api_key row ids, once both are configured', () => {
+    expect(planProtectedPublishableKeys({
+      MEDUSA_PUBLISHABLE_KEY: 'pk_mx', MEDUSA_US_PUBLISHABLE_KEY: 'pk_us',
+    })).toEqual({ ok: true, tokens: ['pk_mx', 'pk_us'] })
+  })
+})
+
+describe('cleanup-default-data.ts — the full channel-population refusal is wired in', () => {
   const source = readFileSync(join(process.cwd(), 'src/scripts/cleanup-default-data.ts'), 'utf8')
 
   it('aborts before deleting anything when the operating channel is unresolvable', () => {
@@ -227,11 +257,11 @@ describe('cleanup-default-data.ts — the operating-channel refusal is wired in'
     // separate it from the return — so renaming the variable or adding a comment
     // would have silently passed it. The real contract is: the guard's early return
     // happens BEFORE any delete can run. (Cross-agent review, claude-opus-4-6.)
-    const guardAt = source.indexOf('unconfiguredOperatingChannelReasons(')
+    const guardAt = source.indexOf('planProtectedSalesChannels(')
     expect(guardAt).toBeGreaterThan(-1)
 
     const returnAfterGuard = source.indexOf('return', guardAt)
-    const firstDelete = source.indexOf('delete from')
+    const firstDelete = source.indexOf('await trx.raw(\n      `delete from')
     expect(returnAfterGuard).toBeGreaterThan(-1)
     expect(firstDelete).toBeGreaterThan(-1)
     expect(returnAfterGuard).toBeLessThan(firstDelete)

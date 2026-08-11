@@ -27,6 +27,7 @@ import { createWorkflow, WorkflowResponse } from '@medusajs/framework/workflows-
 import { cancelOrdersStep } from '@medusajs/medusa/core-flows'
 import type MercadolibreModuleService from '../modules/mercadolibre/service'
 import { getVariantInventoryItemId, resolveStockLocationId } from '../api/store/_utils/inventory'
+import { isMxSeller } from './ml-market-guard'
 
 type Scope = { resolve: (key: string) => any }
 
@@ -62,6 +63,7 @@ export async function applyMlOrderCancel(
 
       const link = await ml.getLink(linkId)
       if (!link) return 'skipped' // link deleted/unresolvable → nothing to restock against
+      if (!(await isMxSeller(scope, (link as { seller_id?: string }).seller_id ?? ''))) return 'skipped'
 
       if (restockQty > 0) {
         const query = scope.resolve(ContainerRegistrationKeys.QUERY)
@@ -86,7 +88,7 @@ export async function applyMlOrderCancel(
         if (!variantId) return 'skipped'
         const inventoryItemId = await getVariantInventoryItemId(scope, variantId)
         if (!inventoryItemId) return 'skipped'
-        const locationId = await resolveStockLocationId(scope)
+        const locationId = await resolveStockLocationId(scope, 'mx')
         if (!locationId) return 'skipped'
 
         const inventoryService = scope.resolve(Modules.INVENTORY)

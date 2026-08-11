@@ -1,9 +1,13 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { Modules } from '@medusajs/framework/utils'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
 import { extractClerkUserId } from '../../_utils/clerk-auth'
-import { DEFAULT_MARKET } from '../../../../lib/markets'
-import { SELLER_OPERATING_MARKET_KEY, setSellerOperatingMarket } from '../../../../lib/seller-market'
+import {
+  SELLER_OPERATING_MARKET_KEY,
+  planSellerCreationMarket,
+  setSellerOperatingMarket,
+} from '../../../../lib/seller-market'
 
 export function slugify(text: string) {
   return text
@@ -68,15 +72,32 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
-  // Idempotent — return existing if already created
-  const [existing] = await sellerService.listSellers({ clerk_user_id: clerkUserId })
-  if (existing) {
-    return res.json({ seller: existing })
-  }
-
   const body = req.body as {
     name?: string; slug?: string; description?: string; location?: string
     operating_market?: string
+  }
+
+  const locking: any = req.scope.resolve(Modules.LOCKING)
+  try {
+    return await locking.execute(`seller-self-create:${clerkUserId}`, async () => {
+  // Re-read inside the distributed lock. The clerk id is the durable idempotency
+  // identity; without serialization two instances can both observe no seller.
+  // Idempotent only for the same market. A retry asking to move an existing shop
+  // across countries is a conflict, not a successful-looking no-op.
+  const [existing] = await sellerService.listSellers({ clerk_user_id: clerkUserId })
+  const marketPlan = planSellerCreationMarket(existing ?? null, body.operating_market)
+  if (marketPlan.status === 'invalid') {
+    return res.status(422).json({ message: marketPlan.message })
+  }
+  if (marketPlan.status === 'conflict') {
+    return res.status(409).json({
+      message: `Shop already operates in ${marketPlan.existing_market}; requested ${marketPlan.requested_market}.`,
+      existing_market: marketPlan.existing_market,
+      requested_market: marketPlan.requested_market,
+    })
+  }
+  if (existing && marketPlan.status === 'idempotent') {
+    return res.json({ seller: existing })
   }
 
   if (!body.name) {
@@ -94,7 +115,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // unsupported value is refused rather than defaulted.
   let marketMetadata: Record<string, unknown>
   try {
-    marketMetadata = setSellerOperatingMarket({}, body.operating_market ?? DEFAULT_MARKET)
+    marketMetadata = setSellerOperatingMarket({}, marketPlan.market)
   } catch (e) {
     return res.status(422).json({ message: (e as Error).message })
   }
@@ -123,7 +144,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     metadata: marketMetadata,
   })
 
-  res.status(201).json({ seller })
+      return res.status(201).json({ seller })
+    }, { timeout: 5 })
+  } catch (e) {
+    return res.status(503).json({ message: `Seller creation lock unavailable: ${e instanceof Error ? e.message : String(e)}` })
+  }
 }
 
 // PATCH /store/sellers/me — update seller profile

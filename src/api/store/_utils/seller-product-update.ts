@@ -251,6 +251,7 @@ async function applyOptionDimensions(
   dimensionsRaw: Array<{ title: string; values: string[] }>,
   variantPrices: Record<string, number> | undefined,
   currencyCode: string,
+  inventoryLocationId: string | undefined,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   const remoteQuery = scope.resolve('remoteQuery')
 
@@ -346,7 +347,7 @@ async function applyOptionDimensions(
       filters: { id },
     })
     const newVariantIds: string[] = ((afterRows?.[0] as any)?.variants ?? []).map((v: any) => v.id)
-    const locationId = await resolveStockLocationId(scope)
+    const locationId = inventoryLocationId
     if (locationId) {
       for (const variantId of newVariantIds) {
         await provisionVariantInventory(scope, { variantId, locationId, quantity: 0 })
@@ -368,6 +369,39 @@ export async function updateSellerProduct(
   const productService: IProductModuleService = scope.resolve(Modules.PRODUCT)
   const pricingService: IPricingModuleService = scope.resolve(Modules.PRICING)
   const remoteQuery = scope.resolve('remoteQuery')
+  let sellerMarketForWrite: MarketCode | undefined
+  let inventoryLocationForWrite: string | undefined
+
+  // Stock-location admission is checked before any product mutation. This function
+  // is not transactional; discovering a missing US location after title/price writes
+  // would return an error around a partial success.
+  const writesManagedInventory = (body.quantity !== undefined && body.quantity !== null)
+    || body.option_dimensions !== undefined
+    || body.inventory_mode === 'tracked'
+    || body.inventory_mode === 'backorder'
+  if (writesManagedInventory) {
+    if (!seller?.id) return { ok: false, status: 422, message: 'A stock update requires seller context.' }
+    let sellerForMarket: unknown = seller
+    if (seller.metadata === undefined) {
+      const sellerService: SellerModuleService = scope.resolve(SELLER_MODULE)
+      const [sellerRow] = await sellerService.listSellers({ id: seller.id }, { take: 1 })
+      if (!sellerRow) return { ok: false, status: 404, message: 'Seller not found' }
+      sellerForMarket = sellerRow
+    }
+    try {
+      sellerMarketForWrite = requireSellerOperatingMarket(sellerForMarket)
+      inventoryLocationForWrite = await resolveStockLocationId(scope, sellerMarketForWrite)
+    } catch (e) {
+      return { ok: false, status: 422, message: (e as Error).message }
+    }
+    if (!inventoryLocationForWrite) {
+      return {
+        ok: false,
+        status: 503,
+        message: `No stock location is configured for market "${sellerMarketForWrite}". Refusing before product update.`,
+      }
+    }
+  }
 
   // ── VALIDATE PUBLICATION BEFORE ANY WRITE (S3.2) ─────────────────────────────
   // This planning used to sit at the BOTTOM of this function, after the title /
@@ -397,6 +431,7 @@ export async function updateSellerProduct(
     let sellerMarket: MarketCode
     try {
       sellerMarket = requireSellerOperatingMarket(sellerForMarket)
+      sellerMarketForWrite = sellerMarket
     } catch (e) {
       return { ok: false, status: 422, message: (e as Error).message }
     }
@@ -431,7 +466,9 @@ export async function updateSellerProduct(
       sellerForMarket = sellerRow
     }
     try {
-      currencyCode = resolveSellerProductMoneyContext(sellerForMarket).currency_code
+      const money = resolveSellerProductMoneyContext(sellerForMarket)
+      currencyCode = money.currency_code
+      sellerMarketForWrite = money.market
     } catch (e) {
       return { ok: false, status: 422, message: (e as Error).message }
     }
@@ -462,7 +499,7 @@ export async function updateSellerProduct(
   // ── Priced option dimensions (print-configurator listings) ───────────────
   if (body.option_dimensions !== undefined) {
     const result = await applyOptionDimensions(
-      scope, id, body.option_dimensions, body.variant_prices, currencyCode!,
+      scope, id, body.option_dimensions, body.variant_prices, currencyCode!, inventoryLocationForWrite,
     )
     if (!result.ok) return result
   }
@@ -965,7 +1002,7 @@ export async function updateSellerProduct(
       return { ok: false, status: 422, message: 'Este producto tiene varias variantes; especifica variant_id.' }
     }
     if (variant) {
-      const locationId = await resolveStockLocationId(scope)
+      const locationId = inventoryLocationForWrite!
       if (locationId) {
         if (!variant.manage_inventory) {
           await (productService as any).updateProductVariants(variant.id, { manage_inventory: true })

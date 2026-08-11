@@ -76,14 +76,15 @@ describe('resolveCheckoutAdmissionGate — three states, never two', () => {
     expect(gate.body.message).toMatch(/LOCALE/)
   })
 
-  it('us ⇒ 404 CLOSED, for the epic-correct reason: it has no operating channel anywhere', () => {
-    // Not "the marketplace is invitation-only". Buyability and publication are
-    // different facts — conflating them is the exact bug this epic exists to fix.
+  it('us ⇒ 503 CLOSED while its expected operating-channel env is unconfigured', () => {
+    // S1 makes this an expected resource. Missing config is an operator outage,
+    // distinct from structural absence and from invitation publication status.
     const gate = resolveCheckoutAdmissionGate('us', PROD_ENV)
     expect(gate.ok).toBe(false)
     if (gate.ok) throw new Error('unreachable')
-    expect(gate.status).toBe(404)
-    expect(gate.body.reason).toBe('market_has_no_operating_channel')
+    expect(gate.status).toBe(503)
+    expect(gate.body.reason).toBe('operating_channel_unavailable')
+    expect(gate.body.message).toMatch(/MEDUSA_US_OPERATING_CHANNEL_ID/)
     expect(JSON.stringify(gate)).not.toContain(OPERATING)
     expect(JSON.stringify(gate)).not.toContain(MARKETPLACE)
   })

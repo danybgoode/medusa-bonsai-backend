@@ -57,22 +57,13 @@ describe('provisionOperatingChannel — refusals happen before any write', () =>
     expect(report.channel_id).toBeNull()
   })
 
-  it('refuses `us` — structurally, and at the FIRST gate it trips', async () => {
-    // `us` has no marketplace channel in any environment either, so it is refused by
-    // the D5-source check before the operating-channel branch is ever reached. The
-    // property that matters is that it is refused and creates nothing — asserting the
-    // *operating*-channel wording here would have been asserting the wrong gate, and
-    // the fix would have been to weaken real code to match a wrong test.
+  it('refuses `us` through the explicit legacy boundary', async () => {
     const { scope } = scopeWith({})
     const report = await provisionOperatingChannel(scope, {
       market: 'us', apply: true, env: ENV_BOTH,
     })
-    // Assert WHICH gate fired, not merely that something did. `/in any environment/`
-    // matches BOTH gates' message templates, so it would have passed even if the
-    // operating-channel branch had been the one to refuse — a spec asserting less
-    // than its own comment claims. (Cross-agent review, claude-opus-4-6.)
     expect(report.blocked_by).toHaveLength(1)
-    expect(report.blocked_by[0]).toMatch(/^Marketplace channel unavailable/)
+    expect(report.blocked_by[0]).toMatch(/MX-only.*us-commerce-provision/)
     expect(report.channel_created).toBe(false)
     expect(report.would_create).toBe(false)
     expect(report.channel_id).toBeNull()

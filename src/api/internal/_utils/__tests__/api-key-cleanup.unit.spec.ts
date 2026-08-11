@@ -69,6 +69,16 @@ describe('planApiKeyCleanup · the production shape', () => {
 })
 
 describe('planApiKeyCleanup · the keep rule', () => {
+  it('protects every configured market token, not only the MX singleton', () => {
+    const plan = planApiKeyCleanup([
+      { id: 'apk_mx', token: 'pk_mx', sales_channels: [live('sc_mx')] },
+      { id: 'apk_us', token: 'pk_us', sales_channels: [DANGLING] },
+    ], { protectedTokens: ['pk_mx', 'pk_us'] })
+    expect(plan.refuse).toBeNull()
+    expect(plan.keep.map((key) => key.id)).toEqual(['apk_mx', 'apk_us'])
+    expect(plan.storefront_token_check).toBe('matched')
+  })
+
   it('keeps the configured storefront key even when its channel link is broken', () => {
     const plan = planApiKeyCleanup(
       [

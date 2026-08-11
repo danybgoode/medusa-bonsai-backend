@@ -325,6 +325,16 @@ export async function createSellerProduct(
   // not stockable. Default quantity 1 (unique P2P item).
   const manageInventory = isStockableListingType(body.listing_type)
   const quantity = Math.max(0, Math.floor(body.quantity ?? 1))
+  const inventoryLocationId = manageInventory
+    ? await resolveStockLocationId(scope, sellerMarket)
+    : undefined
+  if (manageInventory && !inventoryLocationId) {
+    return {
+      ok: false,
+      status: 503,
+      message: `No stock location is configured for market "${sellerMarket}". Refusing before product creation.`,
+    }
+  }
   const sku = generateSku()
   const weightGrams = body.weight_grams != null && body.weight_grams > 0
     ? Math.round(body.weight_grams)
@@ -420,7 +430,7 @@ export async function createSellerProduct(
     const variantIds = ((product.variants ?? []) as { id?: string }[])
       .map((v) => v.id)
       .filter((id): id is string => !!id)
-    const locationId = await resolveStockLocationId(scope)
+    const locationId = inventoryLocationId
     // `body.quantity` means "how many units of this ONE item" for a
     // single-variant listing — applying it to every generated combination on
     // a multi-variant (configurator) create would phantom-multiply stock

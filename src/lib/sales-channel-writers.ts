@@ -133,6 +133,30 @@ export const SALES_CHANNEL_WRITER_REGISTRY: readonly SalesChannelWriter[] = [
     note: 'S2.1 — the ONLY site that changes which channel the storefront key resolves to (D3).',
   },
   {
+    file: 'src/api/internal/us-commerce-provision/route.ts',
+    primitive: SALES_CHANNEL_PROPERTY,
+    kind: 'response_shape',
+    note: 'Survey snapshot response field only; mutation sites are classified separately below.',
+  },
+  {
+    file: 'src/api/internal/us-commerce-provision/route.ts',
+    primitive: 'createSalesChannelsWorkflow',
+    kind: 'channel_lifecycle',
+    note: 'Creates the owned US operating and marketplace channel pair after a blocking survey.',
+  },
+  {
+    file: 'src/api/internal/us-commerce-provision/route.ts',
+    primitive: 'linkSalesChannelsToApiKeyWorkflow',
+    kind: 'publishable_key_membership',
+    note: 'Links the US publishable key once, to the US operating channel only.',
+  },
+  {
+    file: 'src/api/internal/us-commerce-provision/route.ts',
+    primitive: 'linkSalesChannelsToStockLocationWorkflow',
+    kind: 'stock_location_membership',
+    note: 'Links the US stock location to both owned US channels before verification.',
+  },
+  {
     file: 'src/api/store/_utils/inventory.ts',
     primitive: 'linkSalesChannelsToStockLocationWorkflow',
     kind: 'stock_location_membership',

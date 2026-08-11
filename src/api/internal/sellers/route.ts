@@ -16,10 +16,12 @@
  */
 
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { Modules } from '@medusajs/framework/utils'
+import { createHash } from 'node:crypto'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
 import { DEFAULT_MARKET } from '../../../lib/markets'
-import { setSellerOperatingMarket } from '../../../lib/seller-market'
+import { planSellerCreationMarket, setSellerOperatingMarket } from '../../../lib/seller-market'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -72,9 +74,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // Idempotent on source provenance — re-importing the same external shop
   // returns the existing seller instead of minting a duplicate.
   const sourceUrl = body.source_url?.trim() || null
+  const createOrRead = async () => {
   if (sourceUrl) {
     const [existing] = await sellerService.listSellers({ source_url: sourceUrl } as never, { take: 1 })
     if (existing) {
+      const plan = planSellerCreationMarket(existing, body.operating_market)
+      if (plan.status === 'invalid') return res.status(422).json({ message: plan.message })
+      if (plan.status === 'conflict') {
+        return res.status(409).json({
+          message: `Shop already operates in ${plan.existing_market}; requested ${plan.requested_market}.`,
+          existing_market: plan.existing_market,
+          requested_market: plan.requested_market,
+        })
+      }
       return res.json({ seller: existing, created: false })
     }
   }
@@ -105,5 +117,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     metadata: marketMetadata,
   })
 
-  res.status(201).json({ seller, created: true })
+    return res.status(201).json({ seller, created: true })
+  }
+
+  if (!sourceUrl) return createOrRead()
+  const locking: any = req.scope.resolve(Modules.LOCKING)
+  const claim = createHash('sha256').update(sourceUrl).digest('hex')
+  try {
+    // Re-read source_url inside the shared lock. The hash keeps credentials/query
+    // parameters out of Redis lock keys and logs.
+    return await locking.execute(`seller-import:${claim}`, createOrRead, { timeout: 5 })
+  } catch (e) {
+    return res.status(503).json({ message: `Seller import lock unavailable: ${e instanceof Error ? e.message : String(e)}` })
+  }
 }
