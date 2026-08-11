@@ -29,7 +29,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   // marketplace catalog was every published product in the database, with no Sales
   // Channel constraint whatsoever. `?market=` is optional and defaults to `mx` for
   // the pre-launch window; an unknown market 400s, a market whose marketplace is
-  // `invitation` (us) 404s, and an open market whose channel cannot be addressed
+  // a non-active marketplace 404s, and an open market whose channel cannot be addressed
   // 503s. None of those return rows — a marketplace read must never answer with
   // another market's catalog, and it must never answer an empty 200 that reads as
   // "this market has no products".

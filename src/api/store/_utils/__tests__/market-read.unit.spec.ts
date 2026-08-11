@@ -25,7 +25,11 @@ import { isHiddenCatalogProduct } from '../support'
  */
 
 const MX_CHANNEL = 'sc_01KSK1J0V81P4EPY9G0JAPX353'
-const PROD_ENV = { MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL }
+const US_CHANNEL = 'sc_01KZQA8RYRWJ9NDE7AVREQQ646'
+const PROD_ENV = {
+  MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL,
+  MEDUSA_US_MARKETPLACE_CHANNEL_ID: US_CHANNEL,
+}
 
 describe('resolveRequestedMarket', () => {
   it('defaults to mx when the parameter is absent (pre-launch compatibility)', () => {
@@ -52,21 +56,12 @@ describe('resolveMarketReadGate — four outcomes, all named', () => {
     expect(resolveMarketReadGate(undefined, PROD_ENV)).toEqual({ ok: true, market: 'mx', channel_id: MX_CHANNEL })
   })
 
-  it('us CLOSES with a structured body — never an empty success, never MX rows', () => {
-    const gate = resolveMarketReadGate('us', PROD_ENV)
-    expect(gate.ok).toBe(false)
-    if (gate.ok) throw new Error('unreachable')
-    expect(gate.kind).toBe('closed')
-    expect(gate.status).toBe(404)
-    expect(gate.body).toEqual({
-      unavailable: true,
-      market_code: 'us',
-      marketplace_status: 'invitation',
-      reason: 'marketplace_not_open',
-      message: expect.stringMatching(/invitation/),
+  it('us opens only against its configured marketplace channel', () => {
+    expect(resolveMarketReadGate('us', PROD_ENV)).toEqual({
+      ok: true,
+      market: 'us',
+      channel_id: US_CHANNEL,
     })
-    // The whole point: no catalog key at all, so no caller can read it as "0 results".
-    expect(gate.body).not.toHaveProperty('listings')
   })
 
   it('an unknown market is a 400 that names the caller mistake', () => {
@@ -79,22 +74,27 @@ describe('resolveMarketReadGate — four outcomes, all named', () => {
     expect(gate.body.message).toMatch(/LOCALE/)
   })
 
-  it('an OPEN market with no addressable channel FAILS CLOSED (503), it does not serve unfiltered', () => {
-    const gate = resolveMarketReadGate('mx', {})
-    expect(gate.ok).toBe(false)
-    if (gate.ok) throw new Error('unreachable')
-    expect(gate.kind).toBe('unavailable')
-    expect(gate.status).toBe(503)
-    expect(gate.body.reason).toBe('market_filter_unavailable')
-    expect(gate.body.message).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
-    // Distinct from the `us` case — a misconfigured deploy must not read as
-    // "this market has no marketplace".
-    const usGate = resolveMarketReadGate('us', {})
-    expect(usGate.ok).toBe(false)
-    if (usGate.ok) throw new Error('unreachable')
-    expect(usGate.kind).toBe('closed')
-    expect(gate.kind).not.toBe(usGate.kind)
-  })
+  it.each([
+    ['mx', 'MEDUSA_SALES_CHANNEL_ID'],
+    ['us', 'MEDUSA_US_MARKETPLACE_CHANNEL_ID'],
+  ] as const)(
+    'an OPEN %s market with no addressable channel is named unavailable, never an empty success',
+    (market, expectedEnv) => {
+      const gate = resolveMarketReadGate(market, {})
+      expect(gate.ok).toBe(false)
+      if (gate.ok) throw new Error('unreachable')
+      expect(gate.kind).toBe('unavailable')
+      expect(gate.status).toBe(503)
+      expect(gate.body).toEqual(expect.objectContaining({
+        unavailable: true,
+        market_code: market,
+        marketplace_status: 'active',
+        reason: 'market_filter_unavailable',
+        message: expect.stringMatching(expectedEnv),
+      }))
+      expect(gate.body).not.toHaveProperty('listings')
+    },
+  )
 })
 
 describe('productInMarketplaceChannel', () => {
@@ -113,6 +113,29 @@ describe('productInMarketplaceChannel', () => {
     expect(() => productInMarketplaceChannel({ sales_channels: [null, undefined, {}] as any }, MX_CHANNEL)).not.toThrow()
     expect(productInMarketplaceChannel({ sales_channels: [null, { id: MX_CHANNEL }] as any }, MX_CHANNEL)).toBe(true)
     expect(productInMarketplaceChannel({ sales_channels: [null, {}] as any }, MX_CHANNEL)).toBe(false)
+  })
+})
+
+describe('marketplace filtering is isolated in BOTH directions', () => {
+  const catalog = [
+    { id: 'mx_only', sales_channels: [{ id: MX_CHANNEL }] },
+    { id: 'us_only', sales_channels: [{ id: US_CHANNEL }] },
+    { id: 'both', sales_channels: [{ id: MX_CHANNEL }, { id: US_CHANNEL }] },
+    { id: 'neither', sales_channels: [] },
+  ]
+
+  it('an MX read returns no US-only row', () => {
+    const gate = resolveMarketReadGate('mx', PROD_ENV)
+    if (!gate.ok) throw new Error('mx gate must open')
+    expect(filterToMarketplaceChannel(catalog, gate.channel_id).map((p) => p.id))
+      .toEqual(['mx_only', 'both'])
+  })
+
+  it('a US read returns no MX-only row', () => {
+    const gate = resolveMarketReadGate('us', PROD_ENV)
+    if (!gate.ok) throw new Error('us gate must open')
+    expect(filterToMarketplaceChannel(catalog, gate.channel_id).map((p) => p.id))
+      .toEqual(['us_only', 'both'])
   })
 })
 

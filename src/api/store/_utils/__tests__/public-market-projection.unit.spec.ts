@@ -56,7 +56,7 @@ describe('public seller market projection', () => {
       market_code: 'us',
       country_code: 'us',
       currency_code: 'usd',
-      marketplace_status: 'invitation',
+      marketplace_status: 'active',
     })
     expect(projected.metadata).toEqual({
       mp_enabled: true,

@@ -158,7 +158,7 @@ export function planProductPublication(
         http_status: 503,
         message: operating.status === 'unconfigured'
           ? `${operating.reason} Sin el canal operativo el producto no se puede crear en ningún estado; ` +
-            'configura MEDUSA_MX_OPERATING_CHANNEL_ID en el backend.'
+            `configura ${operating.env_var} en el backend.`
           : `Market "${sellerMarket}" has no operating channel in any environment: ${operating.reason}`,
       }
     }
@@ -188,11 +188,9 @@ export function planProductPublication(
 
   const record = MARKETS[target]
   if (!isMarketplaceOpen(target)) {
-    // A US seller cannot create a marketplace product. That is CORRECT, not a gap:
-    // US commerce (money, shipping, tax, KYC) is an explicit non-goal of this epic,
-    // and story 3.3 requires exactly this shape — a write that would enable
-    // unsupported US commerce fails with an actionable message rather than quietly
-    // succeeding against Mexico's rails.
+    // A registry market that is not active cannot create a marketplace product.
+    // This branch is permanent fail-closed behaviour for any future invitation-stage
+    // market; activation is a registry decision, never inferred from configured ids.
     return {
       status: 'refused',
       market: record.code,
@@ -231,7 +229,7 @@ export function planProductPublication(
       http_status: 503,
       message: operating.status === 'unconfigured'
         ? `${operating.reason} Sin el canal operativo el producto se crearía sin poder venderse; ` +
-          'configura MEDUSA_MX_OPERATING_CHANNEL_ID en el backend antes de publicar.'
+          `configura ${operating.env_var} en el backend antes de publicar.`
         : `Market "${record.code}" has no operating channel in any environment: ${operating.reason}`,
     }
   }

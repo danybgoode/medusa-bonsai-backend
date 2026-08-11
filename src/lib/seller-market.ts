@@ -218,7 +218,7 @@ export interface SellerMarketContext {
   readonly region_id: string | null
   /** Marketplace Sales Channel, or null when the market's marketplace is not open. */
   readonly marketplace_channel_id: string | null
-  /** `marketplace_status === 'active'`. `us` is `invitation` ⇒ false. */
+  /** `marketplace_status === 'active'`. */
   readonly marketplace_open: boolean
 }
 
