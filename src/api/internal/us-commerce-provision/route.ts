@@ -19,6 +19,7 @@ import { internalSecretOk } from '../../../lib/internal-auth'
 import {
   planUsCommercePack,
   reconcileUsCommercePackLocked,
+  selectConfiguredMarketplaceStore,
   US_RESOURCE_NAMES,
   type UsCommercePlan,
   type UsCommerceSnapshot,
@@ -142,7 +143,9 @@ async function survey(scope: MedusaRequest['scope']): Promise<UsCommerceSnapshot
     // returned currency codes without `is_default` in staging, which made an
     // otherwise safe USD append submit zero default currencies. Load it explicitly.
     storeService.listStores({}, {
-      select: ['id'], relations: ['supported_currencies'], take: 2,
+      select: ['id', 'name', 'default_sales_channel_id'],
+      relations: ['supported_currencies'],
+      take: MAX_SURVEY_ROWS + 1,
     }),
     regionService.listRegions({}, { select: ['id', 'name', 'currency_code'], relations: ['countries'], take: MAX_SURVEY_ROWS + 1 }),
     taxService.listTaxRegions({}, { select: ['id', 'country_code', 'provider_id', 'parent_id'], take: MAX_SURVEY_ROWS + 1 }),
@@ -162,11 +165,13 @@ async function survey(scope: MedusaRequest['scope']): Promise<UsCommerceSnapshot
       entity: 'fulfillment_provider', fields: ['id', 'locations.id'], filters: { id: 'manual_manual' },
     }),
   ])
-  for (const [name, rows] of Object.entries({ rawRegions, rawTaxes, rawChannels, rawLocations, rawSets, keys: keyGraph.data })) {
+  for (const [name, rows] of Object.entries({ stores, rawRegions, rawTaxes, rawChannels, rawLocations, rawSets, keys: keyGraph.data })) {
     if (!Array.isArray(rows)) throw new Error(`${name} survey did not return an array`)
     if (rows.length > MAX_SURVEY_ROWS) throw new Error(`${name} survey exceeded ${MAX_SURVEY_ROWS} rows; refusing a truncated graph`)
   }
-  if (!Array.isArray(stores) || stores.length !== 1) throw new Error(`expected exactly one Store, found ${Array.isArray(stores) ? stores.length : 'unavailable'}`)
+  const ownedStore = selectConfiguredMarketplaceStore(stores, process.env.MEDUSA_SALES_CHANNEL_ID)
+  if (!ownedStore.store) throw new Error(ownedStore.error ?? 'owned Store unavailable')
+  const store = ownedStore.store
   if (!Array.isArray(providerGraph.data)) throw new Error('manual provider survey did not return an array')
 
   const regionGraph = await Promise.all(rawRegions.map(async (r: any) => {
@@ -215,8 +220,8 @@ async function survey(scope: MedusaRequest['scope']): Promise<UsCommerceSnapshot
         .map((location: any) => location.id),
     },
     store: {
-      id: stores[0].id,
-      supported_currencies: (stores[0].supported_currencies ?? []).map((c: any) => ({
+      id: store.id,
+      supported_currencies: (store.supported_currencies ?? []).map((c: any) => ({
         currency_code: String(c.currency_code), is_default: !!c.is_default,
       })),
     },

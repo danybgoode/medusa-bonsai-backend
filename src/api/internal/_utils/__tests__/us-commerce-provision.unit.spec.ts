@@ -1,6 +1,7 @@
 import {
   planUsCommercePack,
   reconcileUsCommercePackLocked,
+  selectConfiguredMarketplaceStore,
   US_RESOURCE_NAMES,
   type UsCommerceSnapshot,
 } from '../us-commerce-provision'
@@ -65,6 +66,28 @@ describe('US commerce provision route shell', () => {
   it('reports apply failures as partial/unknown, never as a confident no-write result', () => {
     expect(source).toMatch(/applied: applyStarted \? 'unknown' : false/)
     expect(source).toMatch(/partial_or_unknown/)
+  })
+})
+
+describe('configured Store ownership', () => {
+  const stores = [
+    { id: 'store_stale', name: 'Default Store', default_sales_channel_id: 'sc_stale' },
+    { id: 'store_live', name: 'Miyagi Sánchez', default_sales_channel_id: 'sc_mx' },
+  ]
+
+  it('selects only the Store attached to the configured MX marketplace channel', () => {
+    expect(selectConfiguredMarketplaceStore(stores, ' sc_mx ')).toEqual({
+      store: stores[1], error: null,
+    })
+  })
+
+  it('blocks missing, absent, and ambiguous ownership instead of taking the first row', () => {
+    expect(selectConfiguredMarketplaceStore(stores, null).error).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
+    expect(selectConfiguredMarketplaceStore(stores, 'sc_unknown').error).toMatch(/found 0 among 2/)
+    expect(selectConfiguredMarketplaceStore([
+      ...stores,
+      { id: 'store_duplicate', default_sales_channel_id: 'sc_mx' },
+    ], 'sc_mx').error).toMatch(/found 2 among 3/)
   })
 })
 

@@ -95,6 +95,36 @@ export type UsCommerceApplyOutcome =
   | { state: 'noop'; before: UsCommerceSnapshot; plan: UsCommercePlan }
   | { state: 'applied'; before: UsCommerceSnapshot; plan: UsCommercePlan; after: UsCommerceSnapshot; verified: UsCommercePlan }
 
+export interface StoreOwnershipCandidate {
+  id: string
+  name?: string | null
+  default_sales_channel_id?: string | null
+  supported_currencies?: Array<{ currency_code: string; is_default?: boolean }>
+}
+
+/**
+ * Medusa can contain stale Store rows. The configured MX marketplace channel is
+ * the durable ownership edge already used by live catalog traffic, so it is the
+ * only safe selector; row order, age, and display name are not identities.
+ */
+export function selectConfiguredMarketplaceStore<T extends StoreOwnershipCandidate>(
+  stores: readonly T[],
+  configuredMarketplaceChannelId: string | null | undefined,
+): { store: T | null; error: string | null } {
+  const channelId = configuredMarketplaceChannelId?.trim()
+  if (!channelId) {
+    return { store: null, error: 'MEDUSA_SALES_CHANNEL_ID is required to identify the owned Store.' }
+  }
+  const matches = stores.filter((store) => store.default_sales_channel_id === channelId)
+  if (matches.length !== 1) {
+    return {
+      store: null,
+      error: `Expected exactly one Store owned by configured MX marketplace channel ${channelId}; found ${matches.length} among ${stores.length}.`,
+    }
+  }
+  return { store: matches[0], error: null }
+}
+
 /**
  * Serialize the entire read-decide-write-verify sequence. Names are operational
  * identities, not database uniqueness constraints, so surveying outside the
