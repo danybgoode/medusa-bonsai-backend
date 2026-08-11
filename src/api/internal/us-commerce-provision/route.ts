@@ -131,7 +131,12 @@ async function survey(scope: MedusaRequest['scope']): Promise<UsCommerceSnapshot
     regionService.listRegions({}, { select: ['id', 'name', 'currency_code'], relations: ['countries'], take: MAX_SURVEY_ROWS + 1 }),
     taxService.listTaxRegions({}, { select: ['id', 'country_code', 'provider_id', 'parent_id'], take: MAX_SURVEY_ROWS + 1 }),
     salesChannelService.listSalesChannels({}, { select: ['id', 'name'], take: MAX_SURVEY_ROWS + 1 }),
-    stockService.listStockLocations({}, { select: ['id', 'name', 'address'], take: MAX_SURVEY_ROWS + 1 }),
+    // `address` follows the same Medusa relation-loading rule as Store
+    // currencies. Staging proved that selecting it without `relations` returns
+    // an owned location with no country and makes a correct pack look corrupt.
+    stockService.listStockLocations({}, {
+      select: ['id', 'name'], relations: ['address'], take: MAX_SURVEY_ROWS + 1,
+    }),
     fulfillmentService.listFulfillmentSets({}, { select: ['id', 'name', 'type'], relations: ['service_zones', 'service_zones.geo_zones'], take: MAX_SURVEY_ROWS + 1 }),
     query.graph({
       entity: 'api_key', fields: ['id', 'title', 'token', 'sales_channels.*'],

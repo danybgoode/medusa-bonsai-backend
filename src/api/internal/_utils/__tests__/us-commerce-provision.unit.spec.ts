@@ -57,6 +57,7 @@ describe('US commerce provision route shell', () => {
     expect(source).toMatch(/Modules\.LOCKING/)
     expect(source).toMatch(/reconcileUsCommercePackLocked/)
     expect(source).toContain("relations: ['supported_currencies']")
+    expect(source).toContain("relations: ['address']")
     expect(source).not.toMatch(/list(?:Regions|SalesChannels|StockLocations)[\s\S]{0,120}\.catch\(\(\) => \[\]\)/)
   })
 
