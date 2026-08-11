@@ -102,10 +102,14 @@ export interface StoreOwnershipCandidate {
   supported_currencies?: Array<{ currency_code: string; is_default?: boolean }>
 }
 
+export const PLATFORM_STORE_NAME = 'Miyagi Sánchez'
+
 /**
- * Medusa can contain stale Store rows. The configured MX marketplace channel is
- * the durable ownership edge already used by live catalog traffic, so it is the
- * only safe selector; row order, age, and display name are not identities.
+ * Medusa can contain stale Store rows because its historical seed created one
+ * on every run. Prefer the configured MX marketplace edge. Older production
+ * predates that edge on Store itself, so the explicit platform identity written
+ * by setup-mexico (canonical name + MXN default) is the only admitted secondary
+ * identity. Row order and age are never selectors.
  */
 export function selectConfiguredMarketplaceStore<T extends StoreOwnershipCandidate>(
   stores: readonly T[],
@@ -115,14 +119,28 @@ export function selectConfiguredMarketplaceStore<T extends StoreOwnershipCandida
   if (!channelId) {
     return { store: null, error: 'MEDUSA_SALES_CHANNEL_ID is required to identify the owned Store.' }
   }
-  const matches = stores.filter((store) => store.default_sales_channel_id === channelId)
-  if (matches.length !== 1) {
+  const channelMatches = stores.filter((store) => store.default_sales_channel_id === channelId)
+  if (channelMatches.length === 1) return { store: channelMatches[0], error: null }
+  if (channelMatches.length > 1) {
     return {
       store: null,
-      error: `Expected exactly one Store owned by configured MX marketplace channel ${channelId}; found ${matches.length} among ${stores.length}.`,
+      error: `Expected at most one Store owned by configured MX marketplace channel ${channelId}; found ${channelMatches.length} among ${stores.length}.`,
     }
   }
-  return { store: matches[0], error: null }
+
+  const namedMatches = stores.filter((store) => {
+    const defaults = (store.supported_currencies ?? []).filter((currency) => currency.is_default)
+    return store.name === PLATFORM_STORE_NAME
+      && defaults.length === 1
+      && defaults[0].currency_code.toLowerCase() === 'mxn'
+  })
+  if (namedMatches.length !== 1) {
+    return {
+      store: null,
+      error: `No Store uses configured MX marketplace channel ${channelId}; expected exactly one ${PLATFORM_STORE_NAME} Store with MXN default, found ${namedMatches.length} among ${stores.length}.`,
+    }
+  }
+  return { store: namedMatches[0], error: null }
 }
 
 /**

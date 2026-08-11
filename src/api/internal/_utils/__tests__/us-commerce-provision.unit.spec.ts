@@ -71,8 +71,8 @@ describe('US commerce provision route shell', () => {
 
 describe('configured Store ownership', () => {
   const stores = [
-    { id: 'store_stale', name: 'Default Store', default_sales_channel_id: 'sc_stale' },
-    { id: 'store_live', name: 'Miyagi Sánchez', default_sales_channel_id: 'sc_mx' },
+    { id: 'store_stale', name: 'Default Store', default_sales_channel_id: 'sc_stale', supported_currencies: [{ currency_code: 'eur', is_default: true }] },
+    { id: 'store_live', name: 'Miyagi Sánchez', default_sales_channel_id: 'sc_mx', supported_currencies: [{ currency_code: 'mxn', is_default: true }] },
   ]
 
   it('selects only the Store attached to the configured MX marketplace channel', () => {
@@ -81,12 +81,26 @@ describe('configured Store ownership', () => {
     })
   })
 
+  it('uses the explicit setup-mexico identity when historical Store rows have no channel edge', () => {
+    const historical = stores.map((store) => ({ ...store, default_sales_channel_id: null }))
+    expect(selectConfiguredMarketplaceStore(historical, 'sc_mx')).toEqual({
+      store: historical[1], error: null,
+    })
+  })
+
   it('blocks missing, absent, and ambiguous ownership instead of taking the first row', () => {
     expect(selectConfiguredMarketplaceStore(stores, null).error).toMatch(/MEDUSA_SALES_CHANNEL_ID/)
-    expect(selectConfiguredMarketplaceStore(stores, 'sc_unknown').error).toMatch(/found 0 among 2/)
+    expect(selectConfiguredMarketplaceStore(stores.map((store) => ({
+      ...store, name: 'Default Store',
+    })), 'sc_unknown').error).toMatch(/found 0 among 2/)
     expect(selectConfiguredMarketplaceStore([
       ...stores,
-      { id: 'store_duplicate', default_sales_channel_id: 'sc_mx' },
+      { id: 'store_duplicate', default_sales_channel_id: 'sc_mx', supported_currencies: [] },
+    ], 'sc_mx').error).toMatch(/found 2 among 3/)
+    expect(selectConfiguredMarketplaceStore([
+      ...stores.map((store) => ({ ...store, default_sales_channel_id: null })),
+      { id: 'store_named_duplicate', name: 'Miyagi Sánchez', default_sales_channel_id: null,
+        supported_currencies: [{ currency_code: 'mxn', is_default: true }] },
     ], 'sc_mx').error).toMatch(/found 2 among 3/)
   })
 })
