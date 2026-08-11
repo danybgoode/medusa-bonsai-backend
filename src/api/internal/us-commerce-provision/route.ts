@@ -122,7 +122,12 @@ async function survey(scope: MedusaRequest['scope']): Promise<UsCommerceSnapshot
   const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
 
   const [stores, rawRegions, rawTaxes, rawChannels, rawLocations, rawSets, keyGraph, providerGraph] = await Promise.all([
-    storeService.listStores({}, { select: ['id', 'supported_currencies'], take: 2 }),
+    // `supported_currencies` is a relation. Selecting only the relation name
+    // returned currency codes without `is_default` in staging, which made an
+    // otherwise safe USD append submit zero default currencies. Load it explicitly.
+    storeService.listStores({}, {
+      select: ['id'], relations: ['supported_currencies'], take: 2,
+    }),
     regionService.listRegions({}, { select: ['id', 'name', 'currency_code'], relations: ['countries'], take: MAX_SURVEY_ROWS + 1 }),
     taxService.listTaxRegions({}, { select: ['id', 'country_code', 'provider_id', 'parent_id'], take: MAX_SURVEY_ROWS + 1 }),
     salesChannelService.listSalesChannels({}, { select: ['id', 'name'], take: MAX_SURVEY_ROWS + 1 }),

@@ -133,7 +133,15 @@ export function planUsCommercePack(s: UsCommerceSnapshot): UsCommercePlan {
     blocked.push('Configured MEDUSA_STOCK_LOCATION_ID does not match the single MX channel/manual-provider-owned location.')
   }
   if (!s.store) blocked.push('No Store row was returned; seed the environment first.')
-  else if (!s.store.supported_currencies.some((c) => c.currency_code.toLowerCase() === 'usd')) actions.push('add_store_usd')
+  else {
+    const defaultCurrencies = s.store.supported_currencies.filter((c) => c.is_default)
+    const usd = s.store.supported_currencies.find((c) => lower(c.currency_code) === 'usd')
+    if (defaultCurrencies.length !== 1) {
+      blocked.push(`Store must expose exactly one default currency before USD can be reconciled; found ${defaultCurrencies.length}.`)
+    } else if (usd?.is_default) {
+      blocked.push('USD must be supported but non-default; the existing market default must remain unchanged.')
+    } else if (!usd) actions.push('add_store_usd')
+  }
 
   const namedRegions = s.regions.filter((r) => r.name === US_RESOURCE_NAMES.region)
   const countryRegions = s.regions.filter((r) => r.country_codes.map(lower).includes('us'))

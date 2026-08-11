@@ -56,6 +56,7 @@ describe('US commerce provision route shell', () => {
     expect(source.match(/internalSecretOk\(req\)/g)).toHaveLength(2)
     expect(source).toMatch(/Modules\.LOCKING/)
     expect(source).toMatch(/reconcileUsCommercePackLocked/)
+    expect(source).toContain("relations: ['supported_currencies']")
     expect(source).not.toMatch(/list(?:Regions|SalesChannels|StockLocations)[\s\S]{0,120}\.catch\(\(\) => \[\]\)/)
   })
 
@@ -76,6 +77,23 @@ describe('US commerce resource-pack planner', () => {
       'link_location_marketplace_channel', 'link_location_operating_channel',
       'create_fulfillment_set', 'link_location_fulfillment_set',
     ])
+  })
+
+  it('blocks when the Store survey cannot prove exactly one default currency', () => {
+    const snapshot = empty()
+    snapshot.store!.supported_currencies = [{ currency_code: 'mxn', is_default: false }]
+    const plan = planUsCommercePack(snapshot)
+    expect(plan.blocked_by.join(' ')).toMatch(/exactly one default currency/)
+    expect(plan.actions).not.toContain('add_store_usd')
+  })
+
+  it('blocks an existing USD default instead of silently changing the market default', () => {
+    const snapshot = complete()
+    snapshot.store!.supported_currencies = [
+      { currency_code: 'mxn', is_default: false },
+      { currency_code: 'usd', is_default: true },
+    ]
+    expect(planUsCommercePack(snapshot).blocked_by.join(' ')).toMatch(/USD must be supported but non-default/)
   })
 
   it('is a verified no-op on a complete second run', () => {
