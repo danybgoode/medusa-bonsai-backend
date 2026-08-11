@@ -43,14 +43,14 @@ describe('markets registry — golden record', () => {
     })
   })
 
-  it('us — every field, and it is invitation (fail-closed), not active', () => {
+  it('us — every field, and its marketplace is active', () => {
     expect(MARKETS.us).toEqual({
       code: 'us',
       country_code: 'us',
       currency_code: 'usd',
       default_locale: 'en-US',
       timezone: 'America/New_York',
-      marketplace_status: 'invitation',
+      marketplace_status: 'active',
     })
   })
 
@@ -160,9 +160,9 @@ describe('markets registry — requireMarket rejects a locale loudly (D3)', () =
 })
 
 describe('markets registry — marketplace openness is an ALLOW-list', () => {
-  it('mx is open, us is not', () => {
+  it('mx and us are open', () => {
     expect(isMarketplaceOpen('mx')).toBe(true)
-    expect(isMarketplaceOpen('us')).toBe(false)
+    expect(isMarketplaceOpen('us')).toBe(true)
   })
 
   it('an unknown value is not open (a deny-list would have called it good)', () => {
@@ -172,7 +172,7 @@ describe('markets registry — marketplace openness is an ALLOW-list', () => {
   })
 
   it('openMarketCodes is derived from the records, not a second list', () => {
-    expect(openMarketCodes()).toEqual(['mx'])
+    expect(openMarketCodes()).toEqual(['mx', 'us'])
     expect(openMarketCodes().every((code) => MARKETS[code].marketplace_status === 'active')).toBe(true)
   })
 })

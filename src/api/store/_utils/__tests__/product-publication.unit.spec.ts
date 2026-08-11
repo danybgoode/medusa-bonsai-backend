@@ -17,6 +17,13 @@ const PROD_ENV = {
   MEDUSA_SALES_CHANNEL_ID: MX_CHANNEL,
   MEDUSA_MX_OPERATING_CHANNEL_ID: MX_OPERATING,
 }
+const US_MARKETPLACE = 'sc_01KZQA8RYRWJ9NDE7AVREQQ646'
+const US_OPERATING = 'sc_01KZQA8RYSWA3GYNWESQN8Z9HW'
+const TWO_MARKET_ENV = {
+  ...PROD_ENV,
+  MEDUSA_US_MARKETPLACE_CHANNEL_ID: US_MARKETPLACE,
+  MEDUSA_US_OPERATING_CHANNEL_ID: US_OPERATING,
+}
 
 describe('planProductPublication — the market comes from the SELLER', () => {
   it('an mx seller with no stated market publishes to the MX marketplace channel', () => {
@@ -41,16 +48,17 @@ describe('planProductPublication — the market comes from the SELLER', () => {
       })
   })
 
-  it('a US seller is REFUSED and gets NO Mexico channel — not even by default', () => {
-    // The bug this replaces: the default intent was DEFAULT_MARKET ('mx') regardless
-    // of who the seller was, so a US shop silently published into Mexico and
-    // inherited Mexico's Stripe/shipping rails.
-    const plan = planProductPublication({ sellerMarket: 'us' }, PROD_ENV)
-    expect(plan.status).toBe('refused')
-    if (plan.status !== 'refused') throw new Error('unreachable')
-    expect(plan.market).toBe('us')
-    expect(plan.message).toMatch(/no está abierto/)
+  it('a US seller publishes to BOTH configured US channels and gets NO Mexico channel', () => {
+    const plan = planProductPublication({ sellerMarket: 'us' }, TWO_MARKET_ENV)
+    expect(plan).toEqual({
+      status: 'channels',
+      market: 'us',
+      operating_channel_id: US_OPERATING,
+      marketplace_channel_id: US_MARKETPLACE,
+      channel_ids: [US_OPERATING, US_MARKETPLACE],
+    })
     expect(JSON.stringify(plan)).not.toContain(MX_CHANNEL)
+    expect(JSON.stringify(plan)).not.toContain(MX_OPERATING)
   })
 
   it('a US seller cannot bypass the refusal by NAMING mx in the request', () => {
@@ -121,11 +129,18 @@ describe('planProductPublication — "owned shop only" (S3.1), gated on catalog.
     expect(JSON.stringify(plan)).not.toContain(MX_CHANNEL)
   })
 
-  it('a US seller gets no owned-shop-only channel either, flag or no flag — us is structurally fail-closed', () => {
-    for (const ownedShopOnlyEnabled of [true, false]) {
-      const plan = planProductPublication({ requested: null, sellerMarket: 'us', ownedShopOnlyEnabled }, PROD_ENV)
-      expect(plan.status).toBe('refused')
-    }
+  it('a US owned-shop-only create uses the US operating channel when enabled', () => {
+    expect(planProductPublication({
+      requested: null,
+      sellerMarket: 'us',
+      ownedShopOnlyEnabled: true,
+    }, TWO_MARKET_ENV)).toEqual({
+      status: 'channels',
+      market: 'us',
+      operating_channel_id: US_OPERATING,
+      marketplace_channel_id: null,
+      channel_ids: [US_OPERATING],
+    })
   })
 })
 
@@ -225,6 +240,19 @@ describe('planProductPublication — D2: every product joins the OPERATING chann
     expect(plan.message).toMatch(/canal operativo/)
   })
 
+  it('a US operating-channel outage names the US env var and never tells the operator to configure MX', () => {
+    const plan = planProductPublication(
+      { sellerMarket: 'us' },
+      { MEDUSA_US_MARKETPLACE_CHANNEL_ID: US_MARKETPLACE },
+    )
+    expect(plan.status).toBe('refused')
+    if (plan.status !== 'refused') throw new Error('unreachable')
+    expect(plan.http_status).toBe(503)
+    expect(plan.message).toMatch(/MEDUSA_US_OPERATING_CHANNEL_ID/)
+    expect(plan.message).not.toMatch(/MEDUSA_MX_OPERATING_CHANNEL_ID/)
+    expect(JSON.stringify(plan)).not.toContain(MX_CHANNEL)
+  })
+
   it('a misconfiguration pointing BOTH env vars at one channel yields ONE link, not two', () => {
     // Duplicate and dangling link rows are the entire history of this repo's channel
     // incidents. Never make more of them.
@@ -236,10 +264,12 @@ describe('planProductPublication — D2: every product joins the OPERATING chann
     expect([...plan.channel_ids]).toEqual([MX_CHANNEL])
   })
 
-  it('a US seller gets NO operating channel either — us is structurally fail-closed', () => {
-    const plan = planProductPublication({ sellerMarket: 'us' }, PROD_ENV)
-    expect(plan.status).toBe('refused')
+  it('a US seller gets its own operating + marketplace channels and no MX leakage', () => {
+    const plan = planProductPublication({ sellerMarket: 'us' }, TWO_MARKET_ENV)
+    if (plan.status !== 'channels') throw new Error('unreachable')
+    expect([...plan.channel_ids]).toEqual([US_OPERATING, US_MARKETPLACE])
     expect(JSON.stringify(plan)).not.toContain(MX_OPERATING)
+    expect(JSON.stringify(plan)).not.toContain(MX_CHANNEL)
   })
 
   it('an unknown seller market throws rather than defaulting to MX', () => {
@@ -303,19 +333,18 @@ describe('planPublicationChange — publish/unpublish touches ONLY the marketpla
     expect(plan.message).toMatch(/específica de cada país/)
   })
 
-  it('publishing to a market whose marketplace is not open fails closed with an actionable message', () => {
-    // Smoke walkthrough step 6: "Attempt to publish it to us through any surface —
-    // fails closed with an actionable message; nothing mutates." A `us` seller can
-    // only reach this via `sellerMarket: 'us'` (a `mx` seller is refused one branch
-    // earlier, by the cross-market check above), so both refusal paths are covered.
+  it('publishing a US product adds only the US marketplace channel', () => {
     const plan = planPublicationChange(
       { requested: 'us', sellerMarket: 'us', ownedShopOnlyEnabled: true },
-      PROD_ENV,
+      TWO_MARKET_ENV,
     )
-    expect(plan.status).toBe('refused')
-    if (plan.status !== 'refused') throw new Error('unreachable')
-    expect(plan.http_status).toBe(422)
-    expect(plan.message).toMatch(/todavía no está abierto/)
+    expect(plan).toEqual({
+      status: 'add_marketplace',
+      market: 'us',
+      marketplace_channel_id: US_MARKETPLACE,
+    })
+    expect(JSON.stringify(plan)).not.toContain(US_OPERATING)
+    expect(JSON.stringify(plan)).not.toContain(MX_CHANNEL)
   })
 
   it('unpublish fails closed (503) when the marketplace channel itself is unconfigured', () => {

@@ -107,8 +107,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // ── Operating market at the entry seam (story 1.2) ────────────────────────
   // Every new shop is stamped with a market NOW, so the pre-launch backfill
   // converges instead of chasing a moving population. The caller may state one;
-  // otherwise we DELIBERATELY default to `mx` — this is a Mexico-native platform
-  // and `us` is invitation-only, so a self-serve signup cannot land there.
+  // otherwise we DELIBERATELY default to `mx` — legacy callers predate the market
+  // field and are part of the measured pre-launch Mexico population. A caller that
+  // intends to open a US shop must state `us`; no browser property can imply it.
   //
   // The market is never inferred from the request's language header: locale is
   // presentation and is a FIELD of a market, never a selector for one. An

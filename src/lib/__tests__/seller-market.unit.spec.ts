@@ -119,13 +119,13 @@ describe('resolveSellerMarketContext — an unsupported market cannot inherit Me
     expect(ctx.marketplace_open).toBe(true)
   })
 
-  it('a us seller gets NO region, NO channel, usd — nothing Mexican leaks across', () => {
+  it('a us seller is open but gets no unconfigured rail and nothing Mexican leaks across', () => {
     const ctx = resolveSellerMarketContext({ metadata: { operating_market: 'us' } }, PROD_ENV)
     expect(ctx.market).toBe('us')
     expect(ctx.currency_code).toBe('usd')
     expect(ctx.region_id).toBeNull()
     expect(ctx.marketplace_channel_id).toBeNull()
-    expect(ctx.marketplace_open).toBe(false)
+    expect(ctx.marketplace_open).toBe(true)
     // The load-bearing assertion: not merely "null", but specifically NOT Mexico's.
     expect(ctx.region_id).not.toBe(PROD_ENV.MEDUSA_MXN_REGION_ID)
     expect(ctx.marketplace_channel_id).not.toBe(PROD_ENV.MEDUSA_SALES_CHANNEL_ID)

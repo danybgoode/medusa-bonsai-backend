@@ -78,8 +78,8 @@ export interface MarketUnavailableBody {
  *
  *   open        — proceed, filtering by `channel_id`.
  *   unknown     — 400. The caller asked for a market that does not exist.
- *   closed      — 404. The market exists but its marketplace is `invitation`
- *                 (`us`). Structurally has no catalog — never another market's rows.
+ *   closed      — 404. The market exists but its marketplace is not active.
+ *                 Structurally has no catalog — never another market's rows.
  *   unavailable — 503. The market IS open but its channel cannot be addressed
  *                 (`MEDUSA_SALES_CHANNEL_ID` unset). This is an operator fault, and
  *                 it fails CLOSED and loudly rather than serving the unfiltered

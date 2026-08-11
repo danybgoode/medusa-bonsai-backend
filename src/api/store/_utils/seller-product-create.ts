@@ -24,7 +24,10 @@ import { resolveDefaultShippingProfileId } from './fulfillment'
 import { resolveDeliveryModeForWrite } from './delivery-catalog'
 import { planProductPublication } from './product-publication'
 import SellerModuleService from '../../../modules/seller/service'
-import { resolveSellerProductMoneyContext } from './product-market-currency'
+import {
+  admitSellerProductCreatePrice,
+  resolveSellerProductMoneyContext,
+} from './product-market-currency'
 import type { MarketCode } from '../../../lib/markets'
 import { isEnabled } from '../../../lib/flags'
 
@@ -100,7 +103,7 @@ export interface CreateProductBody {
    *              behind `catalog.owned_shop_only_enabled` (D8) — refused with the
    *              pre-Sprint-3 error while the flag is OFF.
    *
-   * A market whose marketplace is not open (`us` is `invitation`) is REFUSED with an
+   * A market whose marketplace is not open is REFUSED with an
    * actionable message, never silently downgraded to Mexico's channel. See the header
    * of `product-publication.ts` for the full rule; the operating channel is always
    * attached (D2), so no value of this field ever produces a channel-less product.
@@ -280,6 +283,13 @@ export async function createSellerProduct(
     // Repair the row or request the registry currency; never guess a money rail.
     return { ok: false, status: 422, message: (e as Error).message }
   }
+
+  // D8 (US marketplace Sprint 3): a public US listing must carry a real native USD
+  // price row from birth. This admission deliberately sits before `isEnabled`, the
+  // product workflow, seller linking and inventory provisioning: a refused request
+  // has performed no write and is safe for the caller to correct and retry.
+  const priceAdmission = admitSellerProductCreatePrice(sellerMarket, body)
+  if (!priceAdmission.ok) return priceAdmission
 
   // Resolved unconditionally (not only when `body.publish_to_market === null`) so a
   // flag-store outage never depends on WHICH value a caller happened to send —

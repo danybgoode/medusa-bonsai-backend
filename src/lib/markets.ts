@@ -40,7 +40,7 @@ export type MarketCode = (typeof MARKET_CODES)[number]
  *
  *   active     — the country marketplace is open; catalog reads and marketplace
  *                publication are allowed.
- *   invitation — a private-pilot/invitation surface exists, but there is NO
+ *   invitation — an invitation surface exists, but there is NO
  *                marketplace: catalog reads fail closed and nothing can be
  *                published into it. This is the fail-closed state.
  *
@@ -82,10 +82,10 @@ export const MARKETS: Readonly<Record<MarketCode, MarketRecord>> = Object.freeze
     country_code: 'us',
     currency_code: 'usd',
     default_locale: 'en-US',
-    // The US pilot is operator-led out of the eastern US; this is a rendering
+    // The US marketplace is operated out of the eastern US; this is a rendering
     // default only and carries no commerce meaning.
     timezone: 'America/New_York',
-    marketplace_status: 'invitation',
+    marketplace_status: 'active',
   }),
 })
 
