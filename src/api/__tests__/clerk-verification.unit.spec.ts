@@ -55,6 +55,45 @@ describe('resolveClerkIssuer', () => {
     await expect(resolveClerkIssuer('offline.example.test')).resolves.toBe('https://offline.example.test')
   })
 
+  it('does not re-discover on every verification — success is cached', async () => {
+    const f = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ issuer: 'https://cached.example.test' }) })
+    global.fetch = f as unknown as typeof fetch
+    await resolveClerkIssuer('cache-hit.example.test')
+    await resolveClerkIssuer('cache-hit.example.test')
+    await resolveClerkIssuer('cache-hit.example.test')
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-discover on every verification during an outage either', async () => {
+    // Found by the Antigravity cross-family pass on PR #148: without a negative cache,
+    // every token verification during a discovery outage pays the full 5s timeout
+    // first, so a degraded dependency becomes a degraded API.
+    const f = jest.fn().mockRejectedValue(new Error('ETIMEDOUT'))
+    global.fetch = f as unknown as typeof fetch
+    await resolveClerkIssuer('outage.example.test')
+    await resolveClerkIssuer('outage.example.test')
+    await resolveClerkIssuer('outage.example.test')
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries discovery after the failure TTL — the fallback must not outlive the outage', async () => {
+    const f = jest.fn().mockRejectedValue(new Error('ETIMEDOUT'))
+    global.fetch = f as unknown as typeof fetch
+    await resolveClerkIssuer('recovers.example.test')
+
+    // A negative entry cached forever would pin the derived issuer permanently and we
+    // would never pick the published one back up.
+    const realNow = Date.now
+    Date.now = () => realNow() + 61_000
+    try {
+      f.mockResolvedValue({ ok: true, json: async () => ({ issuer: 'https://recovered.example.test' }) })
+      await expect(resolveClerkIssuer('recovers.example.test')).resolves.toBe('https://recovered.example.test')
+    } finally {
+      Date.now = realNow
+    }
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
   it('refuses a discovery document that does not name an https issuer', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,

@@ -53,8 +53,16 @@ export function clerkIssuer(frontendApi: string): string {
   return `https://${frontendApi}`
 }
 
-// One discovery call per host, cached for the process lifetime alongside the JWKS.
-const _issuerByHost = new Map<string, string>()
+// One discovery call per host, cached alongside the JWKS resolver above.
+//
+// A SUCCESS is cached for the process lifetime — the issuer of a Clerk instance does
+// not change under it. A FAILURE is cached too, briefly: without that, every single
+// token verification during a Clerk discovery outage pays the full 5s timeout before
+// falling back, turning a degraded dependency into a degraded API. Caching it forever
+// would be the opposite mistake — the derived fallback would outlive the outage and we
+// would never pick the published issuer back up.
+const DISCOVERY_FAILURE_TTL_MS = 60_000
+const _issuerByHost = new Map<string, { issuer: string; expiresAt: number }>()
 
 /**
  * The issuer to enforce, read from the instance's own OIDC discovery document.
@@ -67,19 +75,28 @@ const _issuerByHost = new Map<string, string>()
  */
 export async function resolveClerkIssuer(frontendApi: string): Promise<string> {
   const cached = _issuerByHost.get(frontendApi)
-  if (cached) return cached
+  if (cached && cached.expiresAt > Date.now()) return cached.issuer
+
   const fallback = clerkIssuer(frontendApi)
+  const remember = (issuer: string, ttlMs: number) => {
+    _issuerByHost.set(frontendApi, { issuer, expiresAt: Date.now() + ttlMs })
+    return issuer
+  }
+
   try {
     const res = await fetch(`https://${frontendApi}/.well-known/openid-configuration`, {
       signal: AbortSignal.timeout(5000),
     })
-    if (!res.ok) return fallback
+    if (!res.ok) return remember(fallback, DISCOVERY_FAILURE_TTL_MS)
     const doc = (await res.json()) as { issuer?: unknown }
-    if (typeof doc.issuer !== 'string' || !doc.issuer.startsWith('https://')) return fallback
-    _issuerByHost.set(frontendApi, doc.issuer)
-    return doc.issuer
+    // A discovery document that does not name an https issuer is a failed read, not a
+    // licence to accept what it says — an http issuer would be a downgrade.
+    if (typeof doc.issuer !== 'string' || !doc.issuer.startsWith('https://')) {
+      return remember(fallback, DISCOVERY_FAILURE_TTL_MS)
+    }
+    return remember(doc.issuer, Number.POSITIVE_INFINITY)
   } catch {
-    return fallback
+    return remember(fallback, DISCOVERY_FAILURE_TTL_MS)
   }
 }
 

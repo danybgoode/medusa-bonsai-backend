@@ -116,6 +116,55 @@ describe('Clerk verification — middleware coverage', () => {
     }
   })
 
+  it('Express really does run the middleware on nested routes (not a modelled claim)', async () => {
+    /**
+     * `matcherCovers` above MODELS Express prefix semantics. A model that is wrong in
+     * the same direction as the code proves nothing — the Antigravity pass on PR #148
+     * called exactly this out, arguing the matchers needed `'/store/sellers/me*'` and
+     * that nested routes would otherwise bypass verification, 401-ing the whole seller
+     * portal. That claim is wrong, but only an execution can say so.
+     *
+     * Medusa registers a middleware with no `methods` as `app.use(matcher, handler)`
+     * (`framework/dist/http/router.js`, the `if (!route.methods) ` branch; the loader
+     * passes `methods: route.methods` through UNDEFAULTED). `app.use` with a path is a
+     * MOUNT POINT: it matches that path and everything beneath it. So this exercises
+     * the real thing with the real matchers.
+     */
+    const express = require('express')
+    const app = express()
+    const seen: string[] = []
+    for (const matcher of CLERK_VERIFIED_MATCHERS) {
+      app.use(matcher, (req: { originalUrl: string }, _res: unknown, next: () => void) => {
+        seen.push(req.originalUrl)
+        next()
+      })
+    }
+    app.use((_req: unknown, res: { end: () => void }) => res.end())
+
+    const server = app.listen(0)
+    try {
+      const port = (server.address() as { port: number }).port
+      const paths = [
+        '/store/sellers/me',
+        '/store/sellers/me/stripe-connect',
+        '/store/sellers/me/orders/ord_1/ship',
+        '/store/buyer/me/orders/ord_1/return-request',
+        '/store/customers/sync',
+        '/store/carts/cart_1/start-checkout',
+      ]
+      const unguarded = '/store/listings'
+      for (const p of [...paths, unguarded]) await fetch(`http://127.0.0.1:${port}${p}`)
+
+      // Every covered path, including the deeply nested ones.
+      expect(seen).toEqual(paths)
+      // …and the middleware must NOT blanket the whole Store API: allow the negation
+      // of what you ban, or the next person widens a matcher to make a test pass.
+      expect(seen).not.toContain(unguarded)
+    } finally {
+      server.close()
+    }
+  })
+
   it('the detector recognises every way a route can import clerk-auth', () => {
     // The detector IS the population. If it misses a spelling, every assertion above
     // it silently stops covering that route while still reporting green.
