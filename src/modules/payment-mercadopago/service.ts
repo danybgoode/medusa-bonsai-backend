@@ -72,10 +72,16 @@ export class MercadoPagoProviderService extends AbstractPaymentProvider<Options>
   async authorizePayment(input: AuthorizePaymentInput): Promise<AuthorizePaymentOutput> {
     const data = (input.data ?? {}) as Record<string, unknown>
 
-    if (data.status === 'approved') {
-      return { status: 'authorized' as PaymentSessionStatus, data }
-    }
-
+    // NEVER short-circuit on `data.status`. That field is session data, and
+    // `POST /store/carts/:id/mp-authorize` writes it — a route that took no auth, so
+    // anyone could set `status: 'approved'` on any cart and then call `/complete` to
+    // place an order that was never paid for. Trusting it here was the second half of
+    // that hole: authorization was granted on the strength of a value the caller
+    // supplied, without ever asking MercadoPago.
+    //
+    // Authorization is now ALWAYS decided by MercadoPago's own answer for a payment
+    // id. A missing id is `pending`, never `authorized`: no id means no evidence, and
+    // absence of evidence must not read as proof of payment.
     const mpPaymentId = data.mp_payment_id as string
     if (!mpPaymentId) {
       return { status: 'pending' as PaymentSessionStatus, data }
