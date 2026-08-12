@@ -16,6 +16,11 @@
 import Stripe from 'stripe'
 import { AbstractPaymentProvider, BigNumber } from '@medusajs/framework/utils'
 import {
+  readStripePaymentContext,
+  stripeRefundParams,
+  stripeRequestOptions,
+} from '../../lib/stripe-market-strategy'
+import {
   InitiatePaymentInput,
   InitiatePaymentOutput,
   AuthorizePaymentInput,
@@ -42,6 +47,26 @@ import {
 type Options = {
   apiKey: string
   webhookSecret: string
+}
+
+/**
+ * Rebuild the Stripe request context from the DURABLE payment-session data.
+ *
+ * A US direct charge lives on the SELLER's connected account, so every lifecycle call
+ * must address that account. Called from the platform context instead, a `cs_…`/`pi_…`
+ * created on a connected account simply 404s — silently catastrophic here:
+ * `authorizePayment` returns `error`, the cart never completes, and the buyer is
+ * charged with no order, no fulfilment and no email. `capturePayment` is worse still —
+ * the escrow hold expires after ~7 days and the money returns AFTER the seller shipped.
+ *
+ * MX is unaffected by construction: a destination charge IS a platform charge, and
+ * `readStripePaymentContext` maps legacy sessions (which carry only
+ * `stripe_seller_account`) to `destination_charge`, whose request options are
+ * `undefined` — byte-identical to the behaviour before this existed.
+ */
+function requestContextFor(data: Record<string, unknown>) {
+  const context = readStripePaymentContext(data)
+  return { context, options: context ? stripeRequestOptions(context) : undefined }
 }
 
 export class StripeConnectProviderService extends AbstractPaymentProvider<Options> {
@@ -85,7 +110,8 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
     }
 
     try {
-      const session = await this.stripe_.checkout.sessions.retrieve(sessionId)
+      const { options } = requestContextFor(data)
+      const session = await this.stripe_.checkout.sessions.retrieve(sessionId, options)
       if (session.payment_status === 'paid') {
         return { status: 'authorized' as PaymentSessionStatus, data: { ...data, status: 'paid', stripe_payment_intent: session.payment_intent } }
       }
@@ -106,7 +132,7 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
     const pi = data.stripe_payment_intent as string | undefined
     if (data.escrow_mode && pi) {
       try {
-        await this.stripe_.paymentIntents.capture(pi)
+        await this.stripe_.paymentIntents.capture(pi, undefined, requestContextFor(data).options)
       } catch (e) {
         throw new Error(`Stripe escrow capture failed: ${(e as Error).message}`)
       }
@@ -124,11 +150,11 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
     const sessionId = data.stripe_session_id as string | undefined
     if (data.escrow_mode && pi && !data.escrow_captured) {
       try {
-        await this.stripe_.paymentIntents.cancel(pi)
+        await this.stripe_.paymentIntents.cancel(pi, undefined, requestContextFor(data).options)
       } catch { /* already canceled or captured — ok */ }
     } else if (sessionId) {
       try {
-        await this.stripe_.checkout.sessions.expire(sessionId)
+        await this.stripe_.checkout.sessions.expire(sessionId, undefined, requestContextFor(data).options)
       } catch { /* already expired or completed — ok */ }
     }
     return { data: { ...data, status: 'canceled' } }
@@ -148,7 +174,7 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
     if (!sessionId) return { status: 'pending' as PaymentSessionStatus }
 
     try {
-      const session = await this.stripe_.checkout.sessions.retrieve(sessionId)
+      const session = await this.stripe_.checkout.sessions.retrieve(sessionId, requestContextFor(data).options)
       if (session.payment_status === 'paid') return { status: 'captured' as PaymentSessionStatus }
       if (session.status === 'expired') return { status: 'canceled' as PaymentSessionStatus }
       return { status: 'pending' as PaymentSessionStatus }
@@ -164,11 +190,17 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
     if (!paymentIntent) return { data }
 
     try {
-      await this.stripe_.refunds.create({
-        payment_intent: paymentIntent,
-        amount: input.amount ? Math.round(Number(input.amount)) : undefined,
-        reverse_transfer: true,
-      })
+      const { context, options } = requestContextFor(data)
+      const amount = input.amount ? Math.round(Number(input.amount)) : undefined
+      // `reverse_transfer` reverses the destination transfer of an MX destination
+      // charge. A direct charge has no transfer to reverse, and Stripe REJECTS the
+      // parameter — so the refund shape is derived, never hard-coded.
+      await this.stripe_.refunds.create(
+        context
+          ? stripeRefundParams(context, amount)
+          : { payment_intent: paymentIntent, amount, reverse_transfer: true },
+        options,
+      )
     } catch (e) {
       throw new Error(`Stripe refund failed: ${(e as Error).message}`)
     }
