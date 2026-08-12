@@ -44,8 +44,41 @@ export interface UsDeliveryAdmissionInput {
   provider: string
   /** True when the caller sent a `shipping_quote` body fragment of any shape. */
   hasClientShippingQuote: boolean
-  /** True when the cart already carries a usable shipping address. */
-  hasShippingAddress: boolean
+  /**
+   * The cart's shipping address, passed WHOLE rather than pre-reduced to a boolean.
+   *
+   * The first version took `hasShippingAddress: boolean` and the route computed it as
+   * `address_1 || city` — so a cart carrying only `{ city: 'Austin' }` and no street
+   * was admitted as deliverable. Deciding completeness at the call site is what let a
+   * one-field address through; the rule lives here now, where it is tested.
+   */
+  shippingAddress: ShippingAddressLike | null | undefined
+}
+
+/** Medusa's cart shipping address, loosely typed — only the fields this rule reads. */
+export interface ShippingAddressLike {
+  address_1?: string | null
+  city?: string | null
+  province?: string | null
+  postal_code?: string | null
+  country_code?: string | null
+}
+
+/**
+ * A US parcel needs a street, a city, a state and a ZIP. Anything less is not an
+ * address a seller can put on a package, and admitting it means the seller discovers
+ * the problem after the money has moved.
+ */
+export function isDeliverableUsAddress(address: ShippingAddressLike | null | undefined): boolean {
+  if (!address) return false
+  const present = (value: string | null | undefined) => typeof value === 'string' && value.trim().length > 0
+  return (
+    present(address.address_1) &&
+    present(address.city) &&
+    present(address.province) &&
+    present(address.postal_code) &&
+    address.country_code?.trim().toLowerCase() === 'us'
+  )
 }
 
 /** Fulfillment methods that put a parcel in front of a buyer's door. */
@@ -60,7 +93,7 @@ const ADDRESSED_METHODS = new Set(['shipping', 'manual_carrier'])
 const US_ONLINE_PROVIDERS = new Set(['stripe'])
 
 export function admitUsDelivery(input: UsDeliveryAdmissionInput): UsDeliveryAdmission {
-  const { market, fulfillmentMethod, provider, hasClientShippingQuote, hasShippingAddress } = input
+  const { market, fulfillmentMethod, provider, hasClientShippingQuote } = input
 
   // MX is untouched by construction — it returns before any US rule is consulted, so
   // no MX behaviour can change through this function no matter what is added below.
@@ -79,7 +112,7 @@ export function admitUsDelivery(input: UsDeliveryAdmissionInput): UsDeliveryAdmi
   // the cart total.
   if (hasClientShippingQuote) return refuse('US_CLIENT_SHIPPING_FORBIDDEN')
 
-  if (ADDRESSED_METHODS.has(fulfillmentMethod) && !hasShippingAddress) {
+  if (ADDRESSED_METHODS.has(fulfillmentMethod) && !isDeliverableUsAddress(input.shippingAddress)) {
     return refuse('US_ADDRESS_REQUIRED')
   }
 

@@ -1,4 +1,4 @@
-import { admitUsDelivery, manualCarrierShipmentGap } from '../us-delivery-admission'
+import { admitUsDelivery, isDeliverableUsAddress, manualCarrierShipmentGap } from '../us-delivery-admission'
 import { buildDeliveryCatalog } from '../delivery-catalog'
 
 /**
@@ -7,12 +7,16 @@ import { buildDeliveryCatalog } from '../delivery-catalog'
  * this is the authorization half, which agents and stale checkout pages hit directly.
  */
 
+const usAddress = {
+  address_1: '1 Main St', city: 'Austin', province: 'TX', postal_code: '78701', country_code: 'us',
+}
+
 const base = {
   market: 'us' as const,
   fulfillmentMethod: 'manual_carrier',
   provider: 'stripe',
   hasClientShippingQuote: false,
-  hasShippingAddress: true,
+  shippingAddress: usAddress,
 }
 
 describe('admitUsDelivery', () => {
@@ -34,8 +38,38 @@ describe('admitUsDelivery', () => {
   })
 
   it('refuses an addressed delivery with no address', () => {
-    const result = admitUsDelivery({ ...base, hasShippingAddress: false })
-    expect(result).toMatchObject({ ok: false, status: 422, code: 'US_ADDRESS_REQUIRED' })
+    expect(admitUsDelivery({ ...base, shippingAddress: null }))
+      .toMatchObject({ ok: false, status: 422, code: 'US_ADDRESS_REQUIRED' })
+  })
+
+  it('refuses a PARTIAL address — a city alone is not somewhere a parcel can go', () => {
+    // Codex cross-family review on PR #149. The first version reduced the address to a
+    // boolean at the CALL SITE, as `address_1 || city`, so a cart carrying only
+    // `{ city: 'Austin' }` was admitted and the seller discovered it after the money
+    // had moved. Deciding completeness away from the rule is what let it through.
+    for (const missing of ['address_1', 'city', 'province', 'postal_code'] as const) {
+      // Reported with the field name so a failure says WHICH one slipped through.
+      expect({
+        missing,
+        result: admitUsDelivery({ ...base, shippingAddress: { ...usAddress, [missing]: '' } }),
+      }).toEqual({ missing, result: expect.objectContaining({ ok: false, code: 'US_ADDRESS_REQUIRED' }) })
+    }
+    expect(admitUsDelivery({ ...base, shippingAddress: { city: 'Austin' } }))
+      .toMatchObject({ ok: false, code: 'US_ADDRESS_REQUIRED' })
+  })
+
+  it('refuses a complete address in the wrong country', () => {
+    expect(admitUsDelivery({ ...base, shippingAddress: { ...usAddress, country_code: 'mx' } }))
+      .toMatchObject({ ok: false, code: 'US_ADDRESS_REQUIRED' })
+  })
+
+  it('does not demand an address for an UNaddressed US delivery', () => {
+    // Always allow the negation of what you ban: a US digital good, service, rental
+    // and local pickup are all supported and none of them ships to an address.
+    for (const method of ['digital', 'service', 'rental', 'local_pickup']) {
+      expect(admitUsDelivery({ ...base, fulfillmentMethod: method, shippingAddress: null }))
+        .toMatchObject({ ok: true })
+    }
   })
 
   it.each(['mercadopago', 'spei', 'cash', 'manual'])(
@@ -68,8 +102,19 @@ describe('admitUsDelivery', () => {
       fulfillmentMethod: method as string,
       provider: 'mercadopago',
       hasClientShippingQuote: quote as boolean,
-      hasShippingAddress: addr as boolean,
+      shippingAddress: (addr as boolean) ? usAddress : null,
     })).toEqual({ ok: true, shipping_amount_cents: null })
+  })
+})
+
+describe('isDeliverableUsAddress', () => {
+  it('needs a street, a city, a state, a ZIP and the US', () => {
+    expect(isDeliverableUsAddress(usAddress)).toBe(true)
+    expect(isDeliverableUsAddress(null)).toBe(false)
+    expect(isDeliverableUsAddress({ ...usAddress, address_1: '   ' })).toBe(false)
+    expect(isDeliverableUsAddress({ ...usAddress, country_code: 'MX' })).toBe(false)
+    // Case is not significance: Medusa stores lowercase, callers may not.
+    expect(isDeliverableUsAddress({ ...usAddress, country_code: 'US' })).toBe(true)
   })
 })
 

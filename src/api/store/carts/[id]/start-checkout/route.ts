@@ -502,9 +502,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     fulfillmentMethod,
     provider: body.provider,
     hasClientShippingQuote: body.shipping_quote != null,
-    hasShippingAddress: Boolean(
-      (cart as any)?.shipping_address?.address_1 || (cart as any)?.shipping_address?.city,
-    ),
+    shippingAddress: (cart as any)?.shipping_address ?? null,
   })
   if (!admission.ok) {
     return res.status(admission.status).json({ message: admission.message, code: admission.code })
