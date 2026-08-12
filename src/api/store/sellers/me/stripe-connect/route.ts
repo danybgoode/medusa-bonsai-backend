@@ -198,8 +198,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const projection = await persistProjection(sellerService, seller, account.json)
   if (!projection) return res.status(502).json({ message: 'Stripe returned an unreadable account.' })
 
+  // Readiness must be computed over the MERGED settings, not the bare projection.
+  // The projection has no `enabled` key, but `start-checkout` reads the persisted
+  // settings where a seller-set `enabled: false` short-circuits to
+  // SELLER_STRIPE_ACCOUNT_MISSING. Reading only the projection let this endpoint tell
+  // a seller `ready: true` while every checkout 422'd — the worst kind of wrong,
+  // because it sends them to support insisting the page said they were fine.
+  const mergedSettings = mergeStripeSettings(
+    ((((seller.metadata ?? {}) as Record<string, unknown>).settings ?? {}) as Record<string, unknown>),
+    { ...projection },
+  ).stripe as Record<string, unknown>
   const readiness = resolveStripeReadiness({
-    metadata: { operating_market: 'us', settings: { stripe: projection } },
+    metadata: { operating_market: 'us', settings: { stripe: mergedSettings } },
   })
   return res.json({
     connected: true,

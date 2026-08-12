@@ -47,7 +47,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   // a silent correctness cliff rather than a harmless cap.
   const seller = await findSellerByStripeAccount(
     body.stripe_account_id,
-    (skip, take) => sellerService.listSellers({}, { take, skip }),
+    // An OFFSET/LIMIT walk with no ORDER BY is not stable under concurrent writes: a
+    // row can shift between pages and be skipped entirely, which here means an
+    // account.updated webhook silently reports `found: false`.
+    (skip, take) => sellerService.listSellers({}, { take, skip, order: { id: 'ASC' } } as never),
   )
 
   if (!seller) {
