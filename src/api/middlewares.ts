@@ -67,8 +67,11 @@ export async function verifyClerkIdentity(
 ): Promise<void> {
   const token = bearerToken(req)
   if (!token) {
-    // Known-absent, not unverifiable: record it so a downstream route can tell a
-    // genuinely anonymous request from one the middleware never saw.
+    // Recorded, so a downstream route can tell a request this middleware SAW and
+    // found anonymous from one it never ran on at all. Note it does NOT distinguish
+    // "no bearer" from "bad bearer" — both collapse to `unverified`, deliberately,
+    // because they grant exactly the same thing (nothing) and the distinction would
+    // only tempt a caller into treating one as softer than the other.
     recordVerifiedClerkIdentity(req, null)
     return next()
   }

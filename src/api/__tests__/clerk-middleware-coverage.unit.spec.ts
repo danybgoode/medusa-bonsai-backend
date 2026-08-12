@@ -30,6 +30,20 @@ function routeFiles(dir: string): string[] {
 const read = (file: string) => readFileSync(file, 'utf8')
 const rel = (file: string) => relative(process.cwd(), file)
 
+/**
+ * Source with comments removed.
+ *
+ * A guard that rejects CORRECT output is worse than one that misses a rare fault, so a
+ * ban on a code shape must never fire on the comment that explains why the shape is
+ * banned. The first version of the issuer guard below reddened `lib/clerk-issuer.ts`
+ * itself — the one file whose whole job is documenting that bug. Always allow the
+ * negation of what you ban (LEARNINGS).
+ */
+const code = (file: string) =>
+  read(file)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+
 /** `src/api/store/sellers/me/orders/[id]/route.ts` → `/store/sellers/me/orders/:id` */
 function urlPath(file: string): string {
   return (
@@ -67,6 +81,14 @@ const allRoutes = routeFiles(API_ROOT)
  * that happens to be in use today is a guard with an expiry date on it.
  */
 export const CLERK_AUTH_IMPORT = /from\s+['"][^'"]*_utils\/clerk-auth(\.[cm]?[jt]s)?['"]/
+
+/**
+ * A hand-rolled JWT payload decode: split the token on a dot, then base64-decode the
+ * second segment. Independent of quote style and of what the pieces are named — the
+ * first version of this hard-coded `'.'` in single quotes and the identifier `parts`.
+ */
+export const DECODES_JWT_PAYLOAD = (source: string): boolean =>
+  /split\(\s*['"]\.['"]\s*\)/.test(source) && /Buffer\.from\(\s*\w+\[1\]\s*,\s*['"]base64/.test(source)
 
 const clerkRoutes = allRoutes.filter((file) => CLERK_AUTH_IMPORT.test(read(file)))
 
@@ -110,9 +132,30 @@ describe('Clerk verification — middleware coverage', () => {
 
     for (const file of apiFiles) {
       const source = read(file)
-      const decodesJwtPayload =
-        /split\(\s*'\.'\s*\)/.test(source) && /base64url|from\(\s*parts\[1\]/.test(source)
+      const decodesJwtPayload = DECODES_JWT_PAYLOAD(source)
       expect({ file: rel(file), decodesJwtPayload }).toEqual({ file: rel(file), decodesJwtPayload: false })
+    }
+  })
+
+  it('the decode detector is not spelling-dependent either', () => {
+    // Found by the fresh-reviewer pass on PR #148: this detector had the SAME
+    // single-quote-only defect Codex had just made us fix two tests above — a
+    // double-quoted `split(".")`, or any identifier other than `parts`, walked
+    // straight through. The repo has no eslint `quotes` rule and double-quoted
+    // strings already exist under src/api, so it was live, not theoretical.
+    for (const source of [
+      "const parts = jwt.split('.'); Buffer.from(parts[1], 'base64url')",
+      'const parts = jwt.split("."); Buffer.from(parts[1], "base64url")',
+      "const segs = token.split('.'); Buffer.from(segs[1], 'base64')",
+    ]) {
+      expect({ source, detected: DECODES_JWT_PAYLOAD(source) }).toEqual({ source, detected: true })
+    }
+    // The negation: splitting on a dot for any other reason is not a JWT decode.
+    for (const source of [
+      "const [major] = version.split('.')",
+      "const host = url.split('.').slice(1).join('.')",
+    ]) {
+      expect({ source, detected: DECODES_JWT_PAYLOAD(source) }).toEqual({ source, detected: false })
     }
   })
 
@@ -184,6 +227,48 @@ describe('Clerk verification — middleware coverage', () => {
     ]) {
       expect({ source, detected: CLERK_AUTH_IMPORT.test(source) }).toEqual({ source, detected: false })
     }
+  })
+
+  it('nothing anywhere derives a clerk-prefixed issuer, or retries without one', () => {
+    /**
+     * The issuer bug existed in TWO copies — `api/store/_utils/clerk-verify.ts` and
+     * `modules/auth-clerk/service.ts` — each with its own `getFrontendApiFromKey` and
+     * each building `https://clerk.${frontendApi}`, which is wrong for both key shapes.
+     * Both always threw and both caught it and retried with NO issuer check, so no
+     * token this platform ever accepted was issuer-bound.
+     *
+     * Fixing one copy and leaving the other is how a class of bug survives its own fix.
+     * Both now share `lib/clerk-issuer.ts`, and this guards the whole SOURCE TREE, not
+     * just the two files we happened to find — a third copy would be caught at birth.
+     */
+    const srcRoot = join(process.cwd(), 'src')
+    const sourceFiles = readdirSync(srcRoot, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => /\.[jt]s$/.test(entry) && !entry.includes(`__tests__${sep}`))
+      .map((entry) => join(srcRoot, entry))
+    expect(sourceFiles.length).toBeGreaterThan(150)
+
+    for (const file of sourceFiles) {
+      const source = code(file)
+      // `https://clerk.${...}` — the wrong derivation, in any spelling.
+      const clerkPrefixedIssuer = /https:\/\/clerk\.\$\{/.test(source)
+      expect({ file: rel(file), clerkPrefixedIssuer })
+        .toEqual({ file: rel(file), clerkPrefixedIssuer: false })
+
+      // A second `jwtVerify` with no options object is the retry-without-issuer shape.
+      const unboundRetry = /jwtVerify\(\s*\w+\s*,\s*\w+\s*\)/.test(source)
+      expect({ file: rel(file), unboundRetry }).toEqual({ file: rel(file), unboundRetry: false })
+    }
+  })
+
+  it('there is exactly ONE copy of the Clerk instance-identity seam', () => {
+    // Two copies is what let one bug live in two places. Any file that derives the
+    // Frontend API host from a publishable key must be the shared seam itself.
+    const srcRoot = join(process.cwd(), 'src')
+    const derivers = readdirSync(srcRoot, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => /\.[jt]s$/.test(entry) && !entry.includes(`__tests__${sep}`))
+      .map((entry) => join(srcRoot, entry))
+      .filter((file) => /function getFrontendApiFromKey/.test(code(file)))
+    expect(derivers.map(rel)).toEqual(['src/lib/clerk-issuer.ts'.split('/').join(sep)])
   })
 
   it('clerk-auth reads only what the middleware verified', () => {

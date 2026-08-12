@@ -18,87 +18,12 @@
  */
 
 import type { MedusaRequest } from '@medusajs/framework/http'
+import { getFrontendApiFromKey, jwksUrl, logIssuerMismatch, resolveClerkIssuer } from '../../../lib/clerk-issuer'
 
-/**
- * Extract the Clerk Frontend API host from the publishable key.
- * pk_test_aG9uZXN0LWVlbC0zOS5jbGVyay5hY2NvdW50cy5kZXYk → honest-eel-39.clerk.accounts.dev
- * pk_live_Y2xlcmsubWl5YWdpc2FuY2hlei5jb20k              → clerk.miyagisanchez.com
- * (mirrors `getFrontendApiFromKey` in src/modules/auth-clerk/service.ts).
- */
-export function getFrontendApiFromKey(publishableKey: string): string {
-  const stripped = publishableKey.replace(/^pk_(test|live)_/, '')
-  return Buffer.from(stripped, 'base64').toString('utf-8').replace(/\$$/, '')
-}
-
-/**
- * The token issuer for a Clerk instance is its Frontend API origin.
- *
- * This was previously built as `https://clerk.${frontendApi}`, which is wrong for
- * BOTH key shapes — the live key decodes to `clerk.miyagisanchez.com`, giving
- * `https://clerk.clerk.miyagisanchez.com`, and a dev key decodes to
- * `<slug>.clerk.accounts.dev`, giving `https://clerk.<slug>.clerk.accounts.dev`.
- * The issuer check therefore ALWAYS threw, and the old code caught that and retried
- * with no issuer check at all — so no token was ever issuer-bound.
- *
- * Confirmed against the live instance on 2026-08-12:
- *   GET https://clerk.miyagisanchez.com/.well-known/openid-configuration
- *   → {"issuer":"https://clerk.miyagisanchez.com", ...}
- *
- * This is the FALLBACK only. `resolveClerkIssuer` below prefers the value the
- * instance publishes about itself, because an issuer this code DERIVES can be wrong
- * — it already was once, and being wrong here locks every seller out of their own
- * portal. An issuer the instance publishes cannot be.
- */
-export function clerkIssuer(frontendApi: string): string {
-  return `https://${frontendApi}`
-}
-
-// One discovery call per host, cached alongside the JWKS resolver above.
-//
-// A SUCCESS is cached for the process lifetime — the issuer of a Clerk instance does
-// not change under it. A FAILURE is cached too, briefly: without that, every single
-// token verification during a Clerk discovery outage pays the full 5s timeout before
-// falling back, turning a degraded dependency into a degraded API. Caching it forever
-// would be the opposite mistake — the derived fallback would outlive the outage and we
-// would never pick the published issuer back up.
-const DISCOVERY_FAILURE_TTL_MS = 60_000
-const _issuerByHost = new Map<string, { issuer: string; expiresAt: number }>()
-
-/**
- * The issuer to enforce, read from the instance's own OIDC discovery document.
- *
- * Falls back to the derived origin when discovery is unreachable — a Clerk outage
- * must not silently DISABLE the issuer check, and it must not lock out every seller
- * either. Both paths still require a valid signature from the instance's JWKS, which
- * is what actually makes a forged `sub` impossible; the issuer check is defence in
- * depth on top of it.
- */
-export async function resolveClerkIssuer(frontendApi: string): Promise<string> {
-  const cached = _issuerByHost.get(frontendApi)
-  if (cached && cached.expiresAt > Date.now()) return cached.issuer
-
-  const fallback = clerkIssuer(frontendApi)
-  const remember = (issuer: string, ttlMs: number) => {
-    _issuerByHost.set(frontendApi, { issuer, expiresAt: Date.now() + ttlMs })
-    return issuer
-  }
-
-  try {
-    const res = await fetch(`https://${frontendApi}/.well-known/openid-configuration`, {
-      signal: AbortSignal.timeout(5000),
-    })
-    if (!res.ok) return remember(fallback, DISCOVERY_FAILURE_TTL_MS)
-    const doc = (await res.json()) as { issuer?: unknown }
-    // A discovery document that does not name an https issuer is a failed read, not a
-    // licence to accept what it says — an http issuer would be a downgrade.
-    if (typeof doc.issuer !== 'string' || !doc.issuer.startsWith('https://')) {
-      return remember(fallback, DISCOVERY_FAILURE_TTL_MS)
-    }
-    return remember(doc.issuer, Number.POSITIVE_INFINITY)
-  } catch {
-    return remember(fallback, DISCOVERY_FAILURE_TTL_MS)
-  }
-}
+// The instance-identity seam lives in `lib/clerk-issuer.ts` — ONE copy, because this
+// file and `modules/auth-clerk/service.ts` each had their own and each carried the
+// same issuer bug. Re-exported so existing importers (and specs) are unaffected.
+export { clerkIssuer, getFrontendApiFromKey, resolveClerkIssuer, __resetClerkIssuerCache } from '../../../lib/clerk-issuer'
 
 export interface VerifiedClerkUser {
   sub: string
@@ -112,7 +37,7 @@ export interface VerifiedClerkUser {
 const _jwksByHost = new Map<string, Awaited<ReturnType<typeof loadJwks>>>()
 async function loadJwks(frontendApi: string) {
   const { createRemoteJWKSet } = await import('jose')
-  return createRemoteJWKSet(new URL(`https://${frontendApi}/.well-known/jwks.json`))
+  return createRemoteJWKSet(new URL(jwksUrl(frontendApi)))
 }
 async function getJwks(frontendApi: string) {
   const cached = _jwksByHost.get(frontendApi)
@@ -162,6 +87,7 @@ export async function verifyClerkJwt(token: string | null): Promise<VerifiedCler
     // NO fallback retry without the issuer check. The old code had one, and because
     // the issuer it built never matched, that fallback was the only path that ever
     // ran — a token from any Clerk instance in the world would have verified.
+    logIssuerMismatch('clerk-verify', token, await resolveClerkIssuer(frontendApi))
     console.warn('[clerk-verify] invalid JWT:', (e as Error).message)
     return null
   }
