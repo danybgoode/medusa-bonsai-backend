@@ -63,13 +63,15 @@ export function resolveStripeReadiness(seller: unknown): StripeReadiness {
   if (stripe.merchant_configuration !== 'active') {
     return { ready: false, reason: 'SELLER_STRIPE_MERCHANT_INACTIVE', account_id: accountId, blocking_requirements: blocking }
   }
-  // MEASURED against a real Accounts v2 account (2026-08-11): the merchant
+  // MEASURED against real Accounts v2 accounts (2026-08-11): the merchant
   // configuration exposes exactly ONE capability carrying a status — `card_payments`
-  // — and `configuration.recipient` comes back empty. There is no payouts capability
-  // to read at all. Requiring `payouts_status === 'active'` here, as this originally
-  // did, made US readiness UNSATISFIABLE: no US seller could ever have taken a
-  // payment, and no unit test would have noticed, because a fixture can assert a
-  // field the real API never returns.
+  // — and `configuration.recipient` comes back empty. Payouts DO exist as a
+  // capability, named `stripe_balance.payouts` in a requirement's
+  // `impact.restricts_capabilities`, but we never request it for this account shape,
+  // so no status is ever reported for it. Requiring `payouts_status === 'active'`
+  // here, as this originally did, made US readiness UNSATISFIABLE: no US seller could
+  // ever have taken a payment, and no unit test would have noticed, because a fixture
+  // can assert a field the real API never returns.
   //
   // Payouts are also not the platform's gate in this model. The account holds a full
   // dashboard and Stripe collects both fees and losses, so it manages its own
