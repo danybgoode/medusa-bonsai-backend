@@ -3,17 +3,12 @@ import {
   MedusaError,
 } from '@medusajs/framework/utils'
 import { AuthIdentityProviderService, AuthenticationInput, AuthenticationResponse, AuthIdentityDTO } from '@medusajs/framework/types'
+// ONE copy of the instance-identity seam — see lib/clerk-issuer.ts for why.
+import { getFrontendApiFromKey, jwksUrl, logIssuerMismatch, resolveClerkIssuer } from '../../lib/clerk-issuer'
 
 type ClerkOptions = {
   clerkPublishableKey: string
   clerkSecretKey: string
-}
-
-// Extracts the Clerk Frontend API host from the publishable key.
-// pk_test_aG9uZXN0LWVlbC0zOS5jbGVyay5hY2NvdW50cy5kZXYk → honest-eel-39.clerk.accounts.dev
-function getFrontendApiFromKey(publishableKey: string): string {
-  const stripped = publishableKey.replace(/^pk_(test|live)_/, '')
-  return Buffer.from(stripped, 'base64').toString('utf-8').replace(/\$$/, '')
 }
 
 class ClerkAuthProviderService extends AbstractAuthModuleProvider {
@@ -30,8 +25,7 @@ class ClerkAuthProviderService extends AbstractAuthModuleProvider {
   }
 
   private getJwksUrl(): string {
-    const frontendApi = getFrontendApiFromKey(this.clerkOptions.clerkPublishableKey)
-    return `https://${frontendApi}/.well-known/jwks.json`
+    return jwksUrl(getFrontendApiFromKey(this.clerkOptions.clerkPublishableKey))
   }
 
   async authenticate(
@@ -51,19 +45,26 @@ class ClerkAuthProviderService extends AbstractAuthModuleProvider {
     const jwks = createRemoteJWKSet(new URL(this.getJwksUrl()))
     let payload: { sub?: string; email?: string; [k: string]: unknown }
 
+    // The SECOND copy of the issuer bug fixed in `api/store/_utils/clerk-verify.ts`
+    // (PR #148). `https://clerk.${frontendApi}` is wrong for both key shapes — the live
+    // key already decodes to `clerk.miyagisanchez.com`, so this asked for
+    // `https://clerk.clerk.miyagisanchez.com`, always threw, and the catch below
+    // retried with NO issuer check. Every token this provider ever accepted was
+    // therefore unbound to an issuer.
+    //
+    // Fixing one copy and leaving the other is how a class of bug survives its own
+    // fix, so both move together. The signature check here was always sound (the JWKS
+    // URL is right), so no `sub` was forgeable through this provider — but a token
+    // minted by any Clerk instance would have passed.
+    const issuer = await resolveClerkIssuer(getFrontendApiFromKey(this.clerkOptions.clerkPublishableKey))
     try {
-      const { payload: p } = await jwtVerify(token, jwks, {
-        issuer: `https://clerk.${getFrontendApiFromKey(this.clerkOptions.clerkPublishableKey)}`,
-      })
+      const { payload: p } = await jwtVerify(token, jwks, { issuer, clockTolerance: 30 })
       payload = p as typeof payload
-    } catch {
-      // Clerk dev/test tokens use a different issuer format — try without issuer check
-      try {
-        const { payload: p } = await jwtVerify(token, jwks)
-        payload = p as typeof payload
-      } catch (e) {
-        return { success: false, error: `Invalid Clerk JWT: ${(e as Error).message}` }
-      }
+    } catch (e) {
+      // Diagnose, then refuse. No retry without the issuer check: that retry was the
+      // only path this code ever took.
+      logIssuerMismatch('auth-clerk', token, issuer)
+      return { success: false, error: `Invalid Clerk JWT: ${(e as Error).message}` }
     }
 
     const clerkUserId = payload.sub

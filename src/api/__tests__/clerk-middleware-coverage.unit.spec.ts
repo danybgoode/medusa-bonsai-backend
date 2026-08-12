@@ -1,0 +1,281 @@
+import { readFileSync, readdirSync } from 'fs'
+import { join, relative, sep } from 'path'
+import { CLERK_VERIFIED_MATCHERS } from '../middlewares'
+
+/**
+ * THE POPULATION GUARD for Clerk identity verification.
+ *
+ * `src/api/middlewares.ts` is what makes a `sub` claim mean anything: without it,
+ * `extractClerkUserId` was returning an attacker-supplied string and every
+ * `/store/sellers/me/**` route authenticated on it. The fix is only as good as its
+ * coverage, so coverage is derived here — never listed.
+ *
+ * Guard the population, not the door you found (LEARNINGS): the finding that started
+ * this named ONE route, `sellers/me/stripe-connect`, because that was the new one.
+ * Thirty-seven siblings had the identical hole. A guard that hand-picks its roots
+ * decays while still passing, so this spec globs every `route.ts` under `src/api`, derives which
+ * files consume Clerk identity, and asserts each one's URL is covered by a matcher.
+ *
+ * cwd is the package root under jest, same convention as `market-boundary-population`.
+ */
+
+const API_ROOT = join(process.cwd(), 'src/api')
+
+function routeFiles(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, encoding: 'utf8' })
+    .filter((entry) => entry.endsWith(`${sep}route.ts`) || entry === 'route.ts')
+    .map((entry) => join(dir, entry))
+}
+
+const read = (file: string) => readFileSync(file, 'utf8')
+const rel = (file: string) => relative(process.cwd(), file)
+
+/**
+ * Source with comments removed.
+ *
+ * A guard that rejects CORRECT output is worse than one that misses a rare fault, so a
+ * ban on a code shape must never fire on the comment that explains why the shape is
+ * banned. The first version of the issuer guard below reddened `lib/clerk-issuer.ts`
+ * itself — the one file whose whole job is documenting that bug. Always allow the
+ * negation of what you ban (LEARNINGS).
+ */
+const code = (file: string) =>
+  read(file)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+
+/** `src/api/store/sellers/me/orders/[id]/route.ts` → `/store/sellers/me/orders/:id` */
+function urlPath(file: string): string {
+  return (
+    '/' +
+    rel(file)
+      .split(sep)
+      .slice(2, -1) // drop `src`, `api`, and the trailing `route.ts`
+      .map((segment) => (segment.startsWith('[') ? `:${segment.slice(1, -1)}` : segment))
+      .join('/')
+  )
+}
+
+/**
+ * A matcher is an Express `app.use` prefix: it covers itself and everything beneath.
+ * Its own params (`/store/carts/:id/start-checkout`) match any single segment.
+ */
+function matcherCovers(matcher: string, path: string): boolean {
+  const m = matcher.split('/').filter(Boolean)
+  const p = path.split('/').filter(Boolean)
+  if (p.length < m.length) return false
+  return m.every((segment, i) => segment.startsWith(':') || segment === p[i])
+}
+
+const allRoutes = routeFiles(API_ROOT)
+
+/**
+ * A route consumes Clerk identity iff it imports the helpers that read it. Matched on
+ * the IMPORT, not on a name that could appear in a comment — and `resolveSeller` is
+ * deliberately included because it is `clerk-auth`'s own Clerk-keyed seller lookup.
+ *
+ * BOTH quote styles, and an optional extension. The first version of this matched
+ * single quotes only, which is the repo's prevailing style — so it passed, and a route
+ * written `from "../_utils/clerk-auth"` would have dropped straight out of the
+ * population while the guard stayed green. A detector that only recognises the style
+ * that happens to be in use today is a guard with an expiry date on it.
+ */
+export const CLERK_AUTH_IMPORT = /from\s+['"][^'"]*_utils\/clerk-auth(\.[cm]?[jt]s)?['"]/
+
+/**
+ * A hand-rolled JWT payload decode: split the token on a dot, then base64-decode the
+ * second segment. Independent of quote style and of what the pieces are named — the
+ * first version of this hard-coded `'.'` in single quotes and the identifier `parts`.
+ */
+export const DECODES_JWT_PAYLOAD = (source: string): boolean =>
+  /split\(\s*['"]\.['"]\s*\)/.test(source) && /Buffer\.from\(\s*\w+\[1\]\s*,\s*['"]base64/.test(source)
+
+const clerkRoutes = allRoutes.filter((file) => CLERK_AUTH_IMPORT.test(read(file)))
+
+describe('Clerk verification — middleware coverage', () => {
+  it('scans a real route tree (a guard that scans nothing is not a guard)', () => {
+    expect(allRoutes.length).toBeGreaterThan(80)
+    // The route that exposed the hole must be in the derived set, or the derivation
+    // itself is broken and everything below is vacuous.
+    expect(clerkRoutes.map(rel)).toContain(
+      'src/api/store/sellers/me/stripe-connect/route.ts'.split('/').join(sep),
+    )
+    expect(clerkRoutes.length).toBeGreaterThan(30)
+  })
+
+  it.each(clerkRoutes.map((file) => [urlPath(file), file]))(
+    '%s is covered by a verification matcher',
+    (path) => {
+      const covered = CLERK_VERIFIED_MATCHERS.filter((m) => matcherCovers(m, path as string))
+      // Reported as the path itself, so a failure names the unguarded route rather
+      // than printing `false`.
+      expect({ path, covered }).toEqual({ path, covered: expect.arrayContaining([expect.any(String)]) })
+    },
+  )
+
+  it('every matcher still covers something — a dead prefix is a silent gap', () => {
+    // A matcher left behind after its routes move reads as coverage and provides none.
+    for (const matcher of CLERK_VERIFIED_MATCHERS) {
+      const covered = clerkRoutes.filter((file) => matcherCovers(matcher, urlPath(file)))
+      expect({ matcher, routes: covered.length }).toEqual({ matcher, routes: expect.any(Number) })
+      expect(covered.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('no route reads an unverified JWT payload of its own', () => {
+    // The hole was a base64 decode of the payload segment. Ban re-growing one anywhere
+    // in the API tree — including a helper that a route might import later.
+    const apiFiles = readdirSync(API_ROOT, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => entry.endsWith('.ts') && !entry.includes(`__tests__${sep}`))
+      .map((entry) => join(API_ROOT, entry))
+    expect(apiFiles.length).toBeGreaterThan(100)
+
+    for (const file of apiFiles) {
+      const source = read(file)
+      const decodesJwtPayload = DECODES_JWT_PAYLOAD(source)
+      expect({ file: rel(file), decodesJwtPayload }).toEqual({ file: rel(file), decodesJwtPayload: false })
+    }
+  })
+
+  it('the decode detector is not spelling-dependent either', () => {
+    // Found by the fresh-reviewer pass on PR #148: this detector had the SAME
+    // single-quote-only defect Codex had just made us fix two tests above — a
+    // double-quoted `split(".")`, or any identifier other than `parts`, walked
+    // straight through. The repo has no eslint `quotes` rule and double-quoted
+    // strings already exist under src/api, so it was live, not theoretical.
+    for (const source of [
+      "const parts = jwt.split('.'); Buffer.from(parts[1], 'base64url')",
+      'const parts = jwt.split("."); Buffer.from(parts[1], "base64url")',
+      "const segs = token.split('.'); Buffer.from(segs[1], 'base64')",
+    ]) {
+      expect({ source, detected: DECODES_JWT_PAYLOAD(source) }).toEqual({ source, detected: true })
+    }
+    // The negation: splitting on a dot for any other reason is not a JWT decode.
+    for (const source of [
+      "const [major] = version.split('.')",
+      "const host = url.split('.').slice(1).join('.')",
+    ]) {
+      expect({ source, detected: DECODES_JWT_PAYLOAD(source) }).toEqual({ source, detected: false })
+    }
+  })
+
+  it('Express really does run the middleware on nested routes (not a modelled claim)', async () => {
+    /**
+     * `matcherCovers` above MODELS Express prefix semantics. A model that is wrong in
+     * the same direction as the code proves nothing — the Antigravity pass on PR #148
+     * called exactly this out, arguing the matchers needed `'/store/sellers/me*'` and
+     * that nested routes would otherwise bypass verification, 401-ing the whole seller
+     * portal. That claim is wrong, but only an execution can say so.
+     *
+     * Medusa registers a middleware with no `methods` as `app.use(matcher, handler)`
+     * (`framework/dist/http/router.js`, the `if (!route.methods) ` branch; the loader
+     * passes `methods: route.methods` through UNDEFAULTED). `app.use` with a path is a
+     * MOUNT POINT: it matches that path and everything beneath it. So this exercises
+     * the real thing with the real matchers.
+     */
+    const express = require('express')
+    const app = express()
+    const seen: string[] = []
+    for (const matcher of CLERK_VERIFIED_MATCHERS) {
+      app.use(matcher, (req: { originalUrl: string }, _res: unknown, next: () => void) => {
+        seen.push(req.originalUrl)
+        next()
+      })
+    }
+    app.use((_req: unknown, res: { end: () => void }) => res.end())
+
+    const server = app.listen(0)
+    try {
+      const port = (server.address() as { port: number }).port
+      const paths = [
+        '/store/sellers/me',
+        '/store/sellers/me/stripe-connect',
+        '/store/sellers/me/orders/ord_1/ship',
+        '/store/buyer/me/orders/ord_1/return-request',
+        '/store/customers/sync',
+        '/store/carts/cart_1/start-checkout',
+      ]
+      const unguarded = '/store/listings'
+      for (const p of [...paths, unguarded]) await fetch(`http://127.0.0.1:${port}${p}`)
+
+      // Every covered path, including the deeply nested ones.
+      expect(seen).toEqual(paths)
+      // …and the middleware must NOT blanket the whole Store API: allow the negation
+      // of what you ban, or the next person widens a matcher to make a test pass.
+      expect(seen).not.toContain(unguarded)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('the detector recognises every way a route can import clerk-auth', () => {
+    // The detector IS the population. If it misses a spelling, every assertion above
+    // it silently stops covering that route while still reporting green.
+    for (const source of [
+      "import { extractClerkUserId } from '../../_utils/clerk-auth'",
+      'import { extractClerkUserId } from "../../_utils/clerk-auth"',
+      'import { resolveSeller } from "../../../_utils/clerk-auth.js"',
+      "export { extractClerkEmail } from '../_utils/clerk-auth'",
+    ]) {
+      expect({ source, detected: CLERK_AUTH_IMPORT.test(source) }).toEqual({ source, detected: true })
+    }
+    // …and does not fire on a mere mention, which would drag unrelated routes in and
+    // train someone to loosen it. Always allow the negation of what you ban.
+    for (const source of [
+      '// see _utils/clerk-auth for how identity is established',
+      "import { somethingElse } from '../../_utils/clerk-auth-helpers'",
+    ]) {
+      expect({ source, detected: CLERK_AUTH_IMPORT.test(source) }).toEqual({ source, detected: false })
+    }
+  })
+
+  it('nothing anywhere derives a clerk-prefixed issuer, or retries without one', () => {
+    /**
+     * The issuer bug existed in TWO copies — `api/store/_utils/clerk-verify.ts` and
+     * `modules/auth-clerk/service.ts` — each with its own `getFrontendApiFromKey` and
+     * each building `https://clerk.${frontendApi}`, which is wrong for both key shapes.
+     * Both always threw and both caught it and retried with NO issuer check, so no
+     * token this platform ever accepted was issuer-bound.
+     *
+     * Fixing one copy and leaving the other is how a class of bug survives its own fix.
+     * Both now share `lib/clerk-issuer.ts`, and this guards the whole SOURCE TREE, not
+     * just the two files we happened to find — a third copy would be caught at birth.
+     */
+    const srcRoot = join(process.cwd(), 'src')
+    const sourceFiles = readdirSync(srcRoot, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => /\.[jt]s$/.test(entry) && !entry.includes(`__tests__${sep}`))
+      .map((entry) => join(srcRoot, entry))
+    expect(sourceFiles.length).toBeGreaterThan(150)
+
+    for (const file of sourceFiles) {
+      const source = code(file)
+      // `https://clerk.${...}` — the wrong derivation, in any spelling.
+      const clerkPrefixedIssuer = /https:\/\/clerk\.\$\{/.test(source)
+      expect({ file: rel(file), clerkPrefixedIssuer })
+        .toEqual({ file: rel(file), clerkPrefixedIssuer: false })
+
+      // A second `jwtVerify` with no options object is the retry-without-issuer shape.
+      const unboundRetry = /jwtVerify\(\s*\w+\s*,\s*\w+\s*\)/.test(source)
+      expect({ file: rel(file), unboundRetry }).toEqual({ file: rel(file), unboundRetry: false })
+    }
+  })
+
+  it('there is exactly ONE copy of the Clerk instance-identity seam', () => {
+    // Two copies is what let one bug live in two places. Any file that derives the
+    // Frontend API host from a publishable key must be the shared seam itself.
+    const srcRoot = join(process.cwd(), 'src')
+    const derivers = readdirSync(srcRoot, { recursive: true, encoding: 'utf8' })
+      .filter((entry) => /\.[jt]s$/.test(entry) && !entry.includes(`__tests__${sep}`))
+      .map((entry) => join(srcRoot, entry))
+      .filter((file) => /function getFrontendApiFromKey/.test(code(file)))
+    expect(derivers.map(rel)).toEqual(['src/lib/clerk-issuer.ts'.split('/').join(sep)])
+  })
+
+  it('clerk-auth reads only what the middleware verified', () => {
+    const source = read(join(API_ROOT, 'store/_utils/clerk-auth.ts'))
+    expect(source).toMatch(/readVerifiedClerkIdentity/)
+    // The negation of what we ban is explicitly allowed: the file may still mention
+    // the header in prose. What it may not do is read it for identity.
+    expect(source).not.toMatch(/headers\s*\[\s*['"]authorization/i)
+  })
+})

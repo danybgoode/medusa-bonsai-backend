@@ -1,19 +1,26 @@
 /**
  * Shared Clerk JWT auth helpers for Store API routes.
  *
- * Why manual JWT decode instead of Medusa's auth_context?
- * The Clerk auth middleware only populates auth_context for routes registered
- * as protected via Medusa's middleware config. For custom /store/* routes that
- * aren't in that list, we decode the Clerk JWT ourselves — which is safe because
- * Clerk's public key validation happens at the edge (middleware), not here.
- * We only read the `sub` claim (Clerk user ID) for DB lookups; we do not treat
- * the decoded payload as proof of identity on its own.
+ * Why not Medusa's auth_context?
+ * The Clerk auth middleware only populates auth_context for routes registered as
+ * protected via Medusa's middleware config, and these custom /store/* routes are not
+ * in that list. So identity is established by `src/api/middlewares.ts`, which verifies
+ * the bearer token against Clerk's JWKS and records the result on the request. The
+ * helpers here READ that verified result and nothing else.
+ *
+ * This file used to base64-DECODE the JWT payload and return its `sub`, with a comment
+ * claiming "Clerk's public key validation happens at the edge (middleware)". No such
+ * middleware existed anywhere in this repo, so the claim was false and every caller of
+ * `extractClerkUserId` was authenticating on an attacker-supplied string. Nothing in
+ * this module reads an unverified token any more; a route the middleware does not cover
+ * gets `null` and denies, and `clerk-verify` logs the matcher gap.
  */
 
 import { MedusaRequest } from '@medusajs/framework/http'
 import { Modules, ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { SELLER_MODULE } from '../../../modules/seller'
 import SellerModuleService from '../../../modules/seller/service'
+import { readVerifiedClerkIdentity } from './clerk-verify'
 
 // ── Clerk Backend API: resolve a user's emails from their id (cached) ─────────
 // The default Clerk session token carries no email claim, and Medusa's customer
@@ -46,28 +53,16 @@ export async function getClerkUserEmails(clerkUserId: string): Promise<string[]>
   }
 }
 
-function decodeClerkPayload(req: MedusaRequest): Record<string, unknown> | null {
-  const authHeader = req.headers['authorization'] as string | undefined
-  const jwt = authHeader?.replace(/^Bearer\s+/i, '')
-  if (!jwt) return null
-  try {
-    const parts = jwt.split('.')
-    if (parts.length !== 3) return null
-    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'))
-  } catch {
-    return null
-  }
-}
-
-/** Extracts the Clerk user ID (`sub` claim) from the Authorization header. */
+/** The Clerk user ID (`sub`) of the caller, or null if the token did not verify. */
 export function extractClerkUserId(req: MedusaRequest): string | null {
-  return (decodeClerkPayload(req)?.sub as string) ?? null
+  const identity = readVerifiedClerkIdentity(req)
+  return identity.state === 'verified' ? identity.identity.sub : null
 }
 
-/** Extracts the buyer's email from the Clerk JWT, if the template includes it. */
+/** The caller's email from the verified Clerk JWT, if the token template includes it. */
 export function extractClerkEmail(req: MedusaRequest): string | null {
-  const p = decodeClerkPayload(req)
-  return (p?.email as string) ?? (p?.email_address as string) ?? null
+  const identity = readVerifiedClerkIdentity(req)
+  return identity.state === 'verified' ? identity.identity.email ?? null : null
 }
 
 /**
