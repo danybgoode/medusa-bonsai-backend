@@ -253,5 +253,17 @@ export function webhookMatchesPaymentContext(event: Stripe.Event, session: Strip
   const accountId = metadata.stripe_account_id
   if (strategy === 'direct_charge') return !!accountId && event.account === accountId
   if (strategy === 'destination_charge') return !event.account
+
+  // NO strategy in metadata means a session created BEFORE this change shipped —
+  // every one of which is an MX destination charge, because US could not check out.
+  // Rejecting those would fail payment completion for every in-flight MX checkout
+  // across the deploy boundary, which is exactly the MX regression this epic forbids.
+  // `readStripePaymentContext` already tolerates these legacy sessions; this is the
+  // same tolerance, stated on the same terms.
+  //
+  // The tolerance is deliberately NARROW: it accepts only PLATFORM events. A
+  // connected-account event carrying no strategy is not legacy — it is an event we
+  // cannot attribute — and it stays rejected.
+  if (strategy === undefined) return !event.account
   return false
 }

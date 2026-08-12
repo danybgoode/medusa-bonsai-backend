@@ -224,3 +224,33 @@ describe('review findings — status codes and the Region cross-check', () => {
     }).ok).toBe(true)
   })
 })
+
+describe('webhook attribution across the deploy boundary', () => {
+  const ev = (account?: string) => ({ ...(account ? { account } : {}) }) as never
+  const sess = (metadata: Record<string, string> | null) => ({ metadata }) as never
+
+  // Sessions created BEFORE this change carry no strategy, and every one of them is
+  // an MX destination charge because US could not check out. Rejecting them would
+  // fail payment completion for every in-flight MX checkout across the deploy.
+  it('accepts a legacy PLATFORM event whose session predates the strategy metadata', () => {
+    expect(webhookMatchesPaymentContext(ev(), sess({ cart_id: 'cart_1' }))).toBe(true)
+    expect(webhookMatchesPaymentContext(ev(), sess(null))).toBe(true)
+  })
+
+  // The tolerance is narrow on purpose: a connected-account event with no strategy is
+  // not legacy, it is unattributable, and must not be accepted.
+  it('still rejects a legacy-shaped event that arrives on a CONNECTED account', () => {
+    expect(webhookMatchesPaymentContext(ev('acct_someone'), sess({ cart_id: 'cart_1' }))).toBe(false)
+  })
+
+  it('does not weaken direct-charge attribution', () => {
+    const direct = sess({ stripe_strategy: 'direct_charge', stripe_account_id: 'acct_us' })
+    expect(webhookMatchesPaymentContext(ev('acct_us'), direct)).toBe(true)
+    expect(webhookMatchesPaymentContext(ev('acct_other'), direct)).toBe(false)
+    expect(webhookMatchesPaymentContext(ev(), direct)).toBe(false)
+  })
+
+  it('rejects an unknown strategy value rather than guessing', () => {
+    expect(webhookMatchesPaymentContext(ev(), sess({ stripe_strategy: 'wat' }))).toBe(false)
+  })
+})

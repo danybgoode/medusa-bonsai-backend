@@ -28,7 +28,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
 
-  const body = req.body as {
+  // `req.body` is absent on an empty POST or a non-JSON content-type. Dereferencing
+  // it straight away turns a malformed request into a 500, which reads as "our bug"
+  // in monitoring rather than "your request", and hides the real signal.
+  const body = (req.body ?? {}) as {
     stripe_account_id?: string
     charges_enabled?: boolean
     details_submitted?: boolean

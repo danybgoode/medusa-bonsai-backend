@@ -183,8 +183,15 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     key,
   )
   if (!account.ok) {
-    // Unavailable is NOT "not ready": a Stripe outage must not read as a seller who
-    // failed onboarding, which is what would make support chase the wrong problem.
+    // Three states, and 404 is the third one. An account that no longer exists —
+    // deleted in the dashboard, or lost to a test-mode reset — is KNOWN-ABSENT, not
+    // unavailable. Reporting it as an outage sends clients into an endless retry
+    // against an account that will never come back.
+    if (account.status === 404) {
+      return res.json({ connected: false, ready: false, reason: 'STRIPE_ACCOUNT_ABSENT', requirements: [] })
+    }
+    // Genuinely unavailable is NOT "not ready": a Stripe outage must not read as a
+    // seller who failed onboarding, which would make support chase the wrong problem.
     return res.status(503).json({ message: 'Stripe is unavailable; readiness is unknown.', code: 'STRIPE_UNAVAILABLE' })
   }
 
