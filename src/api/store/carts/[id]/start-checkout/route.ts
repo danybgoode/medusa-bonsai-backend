@@ -33,6 +33,8 @@ import {
   checkoutRefusalResponse,
   planStripeMarketStrategy,
 } from '../../../../../lib/stripe-market-strategy'
+import { readSellerOperatingMarket } from '../../../../../lib/seller-market'
+import { resolveRegionIdForMarket } from '../../../../../lib/market-medusa'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -741,7 +743,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // `checkoutRefusalResponse` keeps MX's refusal wire contract byte-identical
     // (422 / SELLER_NOT_CONNECTED / same Spanish copy) because the storefront's
     // BuyButton and CheckoutPayButton branch on that literal code. See its comment.
-    const strategy = planStripeMarketStrategy({ seller, cart_currency: currency })
+    // The Region cross-check is only a guard if it is actually given both ids. Passing
+    // `seller` and the currency alone left `expected_region_id` undefined, which made
+    // the check skip silently at the one call site that matters — a guard that cannot
+    // fire is decoration. `resolveRegionIdForMarket` returns null when a market has no
+    // configured Region, and a null expectation correctly declines to assert a
+    // mismatch rather than refusing every checkout in an unconfigured environment.
+    const sellerMarketForRegion = readSellerOperatingMarket(seller).market
+    const strategy = planStripeMarketStrategy({
+      seller,
+      cart_currency: currency,
+      cart_region_id: cart.region_id ?? null,
+      expected_region_id: sellerMarketForRegion
+        ? resolveRegionIdForMarket(sellerMarketForRegion, process.env)
+        : null,
+    })
     if (!strategy.ok) {
       const refusal = checkoutRefusalResponse(strategy)
       return res.status(refusal.status).json(refusal.body)

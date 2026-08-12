@@ -19,6 +19,7 @@
  * the pinned SDK's surface, and these exact calls were verified live on 2026-08-11.
  */
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
+import { Modules } from '@medusajs/framework/utils'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { extractClerkUserId } from '../../../_utils/clerk-auth'
@@ -90,22 +91,54 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const key = process.env.STRIPE_SECRET_KEY
   if (!key) return res.status(500).json({ message: 'Stripe not configured' })
 
-  let accountId = plan.action === 'reuse' ? plan.account_id : null
-
-  if (!accountId) {
-    const email = (seller as { email?: string }).email ?? `shop+${seller.id}@miyagisanchez.com`
-    const created = await stripeV2('/v2/core/accounts', key, {
-      method: 'POST',
-      body: usAccountCreateParams(email, (seller as { name?: string }).name ?? 'Miyagi shop'),
-    })
-    // A failed create must NOT return a green body: the seller would be told to
-    // onboard against an account that does not exist.
-    if (!created.ok || typeof created.json.id !== 'string') {
-      return res.status(502).json({ message: 'Could not create the Stripe account.', detail: created.json.error ?? null })
-    }
-    accountId = created.json.id
-    await persistProjection(sellerService, seller, created.json)
+  // Creating the account is SERIALIZED per seller, and the decision is re-taken
+  // inside the lock — validate, then claim, then apply.
+  //
+  // Two concurrent POSTs (a double-click, or a retry racing the original) would
+  // otherwise both read "no account", both create one at Stripe, and both persist:
+  // last write wins, leaving the seller onboarding account A while checkout later
+  // charges through the account B that got stored. The orphan is invisible — it is a
+  // real connected account nobody points at. The plan read outside the lock is not a
+  // claim; only the re-read inside it is.
+  const locking = req.scope.resolve(Modules.LOCKING) as {
+    execute: <T>(key: string, fn: () => Promise<T>, opts?: { timeout?: number }) => Promise<T>
   }
+
+  type EnsureResult =
+    | { readonly ok: true; readonly account_id: string }
+    | { readonly ok: false; readonly status: number; readonly body: Record<string, unknown> }
+
+  // The lock RETURNS its outcome rather than assigning to outer state: a closure
+  // mutating captured variables defeats TypeScript's narrowing, and more importantly
+  // it makes the "what did the critical section decide" question ambiguous to read.
+  const ensured: EnsureResult = plan.action === 'reuse'
+    ? { ok: true, account_id: plan.account_id }
+    : await locking.execute(`stripe-onboarding:${seller.id}`, async (): Promise<EnsureResult> => {
+      const [fresh] = await sellerService.listSellers({ id: seller.id } as never, { take: 1 })
+      const row = (fresh ?? seller) as { email?: string; name?: string; metadata?: unknown }
+      const freshPlan = planStripeOnboarding(row)
+      // Re-read wins: a racing request may have created the account already.
+      if (freshPlan.action === 'reuse') return { ok: true, account_id: freshPlan.account_id }
+      if (freshPlan.action === 'refuse') {
+        return { ok: false, status: freshPlan.status, body: { message: freshPlan.message, code: freshPlan.code } }
+      }
+
+      const email = row.email ?? `shop+${seller.id}@miyagisanchez.com`
+      const created = await stripeV2('/v2/core/accounts', key, {
+        method: 'POST',
+        body: usAccountCreateParams(email, row.name ?? 'Miyagi shop'),
+      })
+      // A failed create must NOT return a green body: the seller would be told to
+      // onboard against an account that does not exist.
+      if (!created.ok || typeof created.json.id !== 'string') {
+        return { ok: false, status: 502, body: { message: 'Could not create the Stripe account.', detail: created.json.error ?? null } }
+      }
+      await persistProjection(sellerService, { id: seller.id, metadata: row.metadata }, created.json)
+      return { ok: true, account_id: created.json.id }
+    }, { timeout: 10 })
+
+  if (!ensured.ok) return res.status(ensured.status).json(ensured.body)
+  const accountId = ensured.account_id
 
   const link = await stripeV2('/v2/core/account_links', key, {
     method: 'POST',

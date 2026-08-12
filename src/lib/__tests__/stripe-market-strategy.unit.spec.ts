@@ -175,3 +175,52 @@ describe('US readiness matches the REAL Accounts v2 shape', () => {
     expect(plan).toMatchObject({ ok: true, strategy: 'direct_charge', request_options: { stripeAccount: 'acct_us' } })
   })
 })
+
+describe('review findings — status codes and the Region cross-check', () => {
+  const notReady = (stripe: Record<string, unknown>) => ({
+    metadata: { operating_market: 'us', settings: { stripe } },
+  })
+  const ready = {
+    account_id: 'acct_us', api_generation: 'v2', account_country: 'us',
+    merchant_configuration: 'active', card_payments_status: 'active',
+  }
+
+  // A known seller state is never a 503: that tells the caller "retry, this is
+  // temporary" about something that will never change on its own, and buries real
+  // outages in seller-configuration noise.
+  it.each([
+    ['no account', {}],
+    ['capability restricted', { ...ready, card_payments_status: 'restricted' }],
+    ['requirements due', { ...ready, blocking_requirements: ['configuration.merchant.mcc'] }],
+    ['legacy generation', { ...ready, api_generation: 'v1' }],
+    ['country mismatch', { ...ready, account_country: 'mx' }],
+    ['merchant inactive', { ...ready, merchant_configuration: 'inactive' }],
+    ['payouts explicitly inactive', { ...ready, payouts_status: 'restricted' }],
+  ])('%s refuses with 422, never 503', (_label, stripe) => {
+    const plan = planStripeMarketStrategy({ seller: notReady(stripe), cart_currency: 'usd' })
+    expect(plan).toMatchObject({ ok: false, status: 422 })
+  })
+
+  it('the Region cross-check fires when both ids are supplied', () => {
+    expect(planStripeMarketStrategy({
+      seller: notReady(ready), cart_currency: 'usd',
+      cart_region_id: 'reg_wrong', expected_region_id: 'reg_us',
+    })).toMatchObject({ ok: false, code: 'CHECKOUT_REGION_MISMATCH' })
+  })
+
+  it('passes when the cart Region matches the market Region', () => {
+    expect(planStripeMarketStrategy({
+      seller: notReady(ready), cart_currency: 'usd',
+      cart_region_id: 'reg_us', expected_region_id: 'reg_us',
+    }).ok).toBe(true)
+  })
+
+  // An unconfigured environment must not refuse every checkout: with no expected
+  // Region there is nothing to contradict, so the guard declines to assert one.
+  it('declines to assert a mismatch when the market has no configured Region', () => {
+    expect(planStripeMarketStrategy({
+      seller: notReady(ready), cart_currency: 'usd',
+      cart_region_id: 'reg_anything', expected_region_id: null,
+    }).ok).toBe(true)
+  })
+})

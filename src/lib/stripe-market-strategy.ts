@@ -123,9 +123,17 @@ export function planStripeMarketStrategy(input: {
   }
   const readiness = resolveStripeReadiness(input.seller)
   if (!readiness.ready || !readiness.account_id) {
+    // ALWAYS 422, never 503. Every reason this function can produce is a known,
+    // durable fact about the seller — no account, capability restricted, requirements
+    // outstanding. None of them is a service outage, and answering 503 would tell the
+    // caller "retry, this is temporary" about a state that will never change on its
+    // own, while polluting outage monitoring with seller-configuration noise.
+    //
+    // 503 is reserved for the genuinely unavailable case — Stripe unreachable — which
+    // is raised by the route that actually talks to Stripe, not by this pure planner.
     return {
       ok: false,
-      status: readiness.reason === 'SELLER_STRIPE_ACCOUNT_MISSING' ? 422 : 503,
+      status: 422,
       code: readiness.reason ?? 'SELLER_STRIPE_NOT_READY',
       message: 'This seller is not ready to accept Stripe payments.',
       market: marketRead.market,
