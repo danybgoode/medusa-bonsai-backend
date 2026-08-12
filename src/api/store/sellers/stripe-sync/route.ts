@@ -11,8 +11,23 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
+import { internalSecretMissing } from '../../../../lib/internal-auth'
+import { findSellerByStripeAccount } from '../../_utils/seller-stripe-lookup'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
+  // This route flips `charges_enabled` — whether a seller can take card payments —
+  // and lived UNAUTHENTICATED under `/store/`, so any anonymous caller could set it.
+  //
+  // The repo-wide fail-closed sweep that produced `internal-auth.ts` swept
+  // `/internal/*`; this route escaped it purely by sitting under `/store/` while
+  // doing privileged work. Guard the population, not the door you found.
+  //
+  // The caller (the storefront's Stripe `account.updated` webhook) began sending this
+  // header in a prior frontend deploy, so enforcing it here breaks nothing.
+  if (internalSecretMissing(req)) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
   const body = req.body as {
     stripe_account_id?: string
     charges_enabled?: boolean
@@ -25,15 +40,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
-  // Find seller with this Stripe account ID (iterate — no JSON path index in custom module)
-  const allSellers = await sellerService.listSellers({}, { take: 500 })
-
-  const seller = allSellers.find(s => {
-    const meta = (s.metadata ?? {}) as Record<string, unknown>
-    const settings = (meta.settings ?? {}) as Record<string, unknown>
-    const stripe = (settings.stripe ?? {}) as Record<string, unknown>
-    return stripe.account_id === body.stripe_account_id
-  })
+  // Paged scan — see `seller-stripe-lookup.ts` for why the old flat `take: 500` was
+  // a silent correctness cliff rather than a harmless cap.
+  const seller = await findSellerByStripeAccount(
+    body.stripe_account_id,
+    (skip, take) => sellerService.listSellers({}, { take, skip }),
+  )
 
   if (!seller) {
     // Not an error — account may belong to a seller not yet in Medusa
