@@ -11,9 +11,27 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
+import { internalSecretMissing } from '../../../../lib/internal-auth'
+import { findSellerByStripeAccount } from '../../_utils/seller-stripe-lookup'
 
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  const body = req.body as {
+  // This route flips `charges_enabled` — whether a seller can take card payments —
+  // and lived UNAUTHENTICATED under `/store/`, so any anonymous caller could set it.
+  //
+  // The repo-wide fail-closed sweep that produced `internal-auth.ts` swept
+  // `/internal/*`; this route escaped it purely by sitting under `/store/` while
+  // doing privileged work. Guard the population, not the door you found.
+  //
+  // The caller (the storefront's Stripe `account.updated` webhook) began sending this
+  // header in a prior frontend deploy, so enforcing it here breaks nothing.
+  if (internalSecretMissing(req)) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
+  // `req.body` is absent on an empty POST or a non-JSON content-type. Dereferencing
+  // it straight away turns a malformed request into a 500, which reads as "our bug"
+  // in monitoring rather than "your request", and hides the real signal.
+  const body = (req.body ?? {}) as {
     stripe_account_id?: string
     charges_enabled?: boolean
     details_submitted?: boolean
@@ -25,15 +43,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
 
-  // Find seller with this Stripe account ID (iterate — no JSON path index in custom module)
-  const allSellers = await sellerService.listSellers({}, { take: 500 })
-
-  const seller = allSellers.find(s => {
-    const meta = (s.metadata ?? {}) as Record<string, unknown>
-    const settings = (meta.settings ?? {}) as Record<string, unknown>
-    const stripe = (settings.stripe ?? {}) as Record<string, unknown>
-    return stripe.account_id === body.stripe_account_id
-  })
+  // Paged scan — see `seller-stripe-lookup.ts` for why the old flat `take: 500` was
+  // a silent correctness cliff rather than a harmless cap.
+  const seller = await findSellerByStripeAccount(
+    body.stripe_account_id,
+    // An OFFSET/LIMIT walk with no ORDER BY is not stable under concurrent writes: a
+    // row can shift between pages and be skipped entirely, which here means an
+    // account.updated webhook silently reports `found: false`.
+    (skip, take) => sellerService.listSellers({}, { take, skip, order: { id: 'ASC' } } as never),
+  )
 
   if (!seller) {
     // Not an error — account may belong to a seller not yet in Medusa
