@@ -59,8 +59,16 @@ const allRoutes = routeFiles(API_ROOT)
  * A route consumes Clerk identity iff it imports the helpers that read it. Matched on
  * the IMPORT, not on a name that could appear in a comment — and `resolveSeller` is
  * deliberately included because it is `clerk-auth`'s own Clerk-keyed seller lookup.
+ *
+ * BOTH quote styles, and an optional extension. The first version of this matched
+ * single quotes only, which is the repo's prevailing style — so it passed, and a route
+ * written `from "../_utils/clerk-auth"` would have dropped straight out of the
+ * population while the guard stayed green. A detector that only recognises the style
+ * that happens to be in use today is a guard with an expiry date on it.
  */
-const clerkRoutes = allRoutes.filter((file) => /from\s+'[^']*_utils\/clerk-auth'/.test(read(file)))
+export const CLERK_AUTH_IMPORT = /from\s+['"][^'"]*_utils\/clerk-auth(\.[cm]?[jt]s)?['"]/
+
+const clerkRoutes = allRoutes.filter((file) => CLERK_AUTH_IMPORT.test(read(file)))
 
 describe('Clerk verification — middleware coverage', () => {
   it('scans a real route tree (a guard that scans nothing is not a guard)', () => {
@@ -105,6 +113,27 @@ describe('Clerk verification — middleware coverage', () => {
       const decodesJwtPayload =
         /split\(\s*'\.'\s*\)/.test(source) && /base64url|from\(\s*parts\[1\]/.test(source)
       expect({ file: rel(file), decodesJwtPayload }).toEqual({ file: rel(file), decodesJwtPayload: false })
+    }
+  })
+
+  it('the detector recognises every way a route can import clerk-auth', () => {
+    // The detector IS the population. If it misses a spelling, every assertion above
+    // it silently stops covering that route while still reporting green.
+    for (const source of [
+      "import { extractClerkUserId } from '../../_utils/clerk-auth'",
+      'import { extractClerkUserId } from "../../_utils/clerk-auth"',
+      'import { resolveSeller } from "../../../_utils/clerk-auth.js"',
+      "export { extractClerkEmail } from '../_utils/clerk-auth'",
+    ]) {
+      expect({ source, detected: CLERK_AUTH_IMPORT.test(source) }).toEqual({ source, detected: true })
+    }
+    // …and does not fire on a mere mention, which would drag unrelated routes in and
+    // train someone to loosen it. Always allow the negation of what you ban.
+    for (const source of [
+      '// see _utils/clerk-auth for how identity is established',
+      "import { somethingElse } from '../../_utils/clerk-auth-helpers'",
+    ]) {
+      expect({ source, detected: CLERK_AUTH_IMPORT.test(source) }).toEqual({ source, detected: false })
     }
   })
 
