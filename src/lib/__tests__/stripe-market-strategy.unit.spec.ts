@@ -15,7 +15,7 @@ const mxSeller = {
 const usSeller = {
   metadata: { operating_market: 'us', settings: { stripe: {
     account_id: 'acct_us', api_generation: 'v2', account_country: 'us',
-    merchant_configuration: 'active', card_payments_status: 'active', payouts_status: 'active',
+    merchant_configuration: 'active', card_payments_status: 'active',
     blocking_requirements: [],
   } } },
 }
@@ -45,7 +45,10 @@ describe('Stripe market strategy — D14–D16', () => {
       ['account_country', 'mx', 'SELLER_STRIPE_COUNTRY_MISMATCH'],
       ['merchant_configuration', 'inactive', 'SELLER_STRIPE_MERCHANT_INACTIVE'],
       ['card_payments_status', 'pending', 'SELLER_STRIPE_CAPABILITY_INACTIVE'],
-      ['payouts_status', 'pending', 'SELLER_STRIPE_CAPABILITY_INACTIVE'],
+      // Its own reason, not the card-payments one: a real v2 account reports no
+      // payouts capability at all, so an explicitly non-active value is a distinct
+      // and much rarer signal worth naming separately.
+      ['payouts_status', 'pending', 'SELLER_STRIPE_PAYOUTS_INACTIVE'],
     ] as const) {
       const seller = { metadata: { operating_market: 'us', settings: { stripe: { ...base, [key]: value } } } }
       expect(resolveStripeReadiness(seller)).toMatchObject({ ready: false, reason })
@@ -126,5 +129,49 @@ describe('checkout refusal — the MX wire contract is frozen', () => {
 
   it('a ready US seller is not refused at all', () => {
     expect(planStripeMarketStrategy({ seller: usSeller, cart_currency: 'usd' }).ok).toBe(true)
+  })
+})
+
+describe('US readiness matches the REAL Accounts v2 shape', () => {
+  // Measured 2026-08-11 against a live test account: configuration.merchant exposes
+  // only card_payments with a status, and configuration.recipient is empty. A gate
+  // requiring payouts_status would be unsatisfiable — US could never transact.
+  const base = {
+    account_id: 'acct_us', api_generation: 'v2', account_country: 'us',
+    merchant_configuration: 'active', card_payments_status: 'active',
+  }
+  const sellerWith = (stripe: Record<string, unknown>) => ({
+    metadata: { operating_market: 'us', settings: { stripe } },
+  })
+
+  it('is READY with no payouts_status at all — the real account never reports one', () => {
+    expect(resolveStripeReadiness(sellerWith(base))).toMatchObject({ ready: true, reason: null })
+  })
+
+  it('is ready when payouts_status is explicitly active', () => {
+    expect(resolveStripeReadiness(sellerWith({ ...base, payouts_status: 'active' })).ready).toBe(true)
+  })
+
+  it('is NOT ready when payouts_status is explicitly non-active (unknown != inactive)', () => {
+    expect(resolveStripeReadiness(sellerWith({ ...base, payouts_status: 'restricted' }))).toMatchObject({
+      ready: false, reason: 'SELLER_STRIPE_PAYOUTS_INACTIVE',
+    })
+  })
+
+  it('is NOT ready when card_payments is not active', () => {
+    expect(resolveStripeReadiness(sellerWith({ ...base, card_payments_status: 'restricted' }))).toMatchObject({
+      ready: false, reason: 'SELLER_STRIPE_CAPABILITY_INACTIVE',
+    })
+  })
+
+  it('is NOT ready with blocking requirements outstanding', () => {
+    expect(resolveStripeReadiness(sellerWith({ ...base, blocking_requirements: ['individual.id_number'] }))).toMatchObject({
+      ready: false, reason: 'SELLER_STRIPE_REQUIREMENTS_DUE',
+    })
+  })
+
+  it('a real-shaped US seller plans a direct charge end to end', () => {
+    const plan = planStripeMarketStrategy({ seller: sellerWith(base), cart_currency: 'usd' })
+    expect(plan).toMatchObject({ ok: true, strategy: 'direct_charge', request_options: { stripeAccount: 'acct_us' } })
   })
 })

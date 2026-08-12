@@ -63,8 +63,25 @@ export function resolveStripeReadiness(seller: unknown): StripeReadiness {
   if (stripe.merchant_configuration !== 'active') {
     return { ready: false, reason: 'SELLER_STRIPE_MERCHANT_INACTIVE', account_id: accountId, blocking_requirements: blocking }
   }
-  if (stripe.card_payments_status !== 'active' || stripe.payouts_status !== 'active') {
+  // MEASURED against a real Accounts v2 account (2026-08-11): the merchant
+  // configuration exposes exactly ONE capability carrying a status — `card_payments`
+  // — and `configuration.recipient` comes back empty. There is no payouts capability
+  // to read at all. Requiring `payouts_status === 'active'` here, as this originally
+  // did, made US readiness UNSATISFIABLE: no US seller could ever have taken a
+  // payment, and no unit test would have noticed, because a fixture can assert a
+  // field the real API never returns.
+  //
+  // Payouts are also not the platform's gate in this model. The account holds a full
+  // dashboard and Stripe collects both fees and losses, so it manages its own
+  // payouts. What gates taking a DIRECT CHARGE is card payments plus the absence of
+  // blocking requirements.
+  if (stripe.card_payments_status !== 'active') {
     return { ready: false, reason: 'SELLER_STRIPE_CAPABILITY_INACTIVE', account_id: accountId, blocking_requirements: blocking }
+  }
+  // Three states, not two: an ABSENT payouts status is unknown and does not block,
+  // but one reported explicitly non-active is a real signal and does.
+  if (stripe.payouts_status != null && stripe.payouts_status !== 'active') {
+    return { ready: false, reason: 'SELLER_STRIPE_PAYOUTS_INACTIVE', account_id: accountId, blocking_requirements: blocking }
   }
   if (blocking.length > 0) {
     return { ready: false, reason: 'SELLER_STRIPE_REQUIREMENTS_DUE', account_id: accountId, blocking_requirements: blocking }
