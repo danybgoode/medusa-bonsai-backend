@@ -24,9 +24,28 @@
  * bug, not gated epic scope, so this branch closes it live on merge. The
  * `delivery_mode === 'arranged'` branch stays flag-gated, preserving S1.1's
  * "flag off ⇒ byte-identical to today" contract for the new capability.
+ *
+ * us-marketplace S4.2 (D16) — the catalog is now MARKET-SHAPED. The US has no
+ * carrier integration at all: Envía and Correos are Mexican, and S6 is stopped at
+ * its evidence gate. So a US listing must never be offered the `shipping` method,
+ * because that method promises a live rate at the quote seam and there is no US
+ * rate to quote. It gets `manual_carrier` instead: a real addressed, card-payable
+ * delivery whose shipping cost is ZERO and seller-funded, where the seller ships
+ * with their own carrier and enters their own tracking.
+ *
+ * "Nothing in the US flow claims a rate or a label that does not exist" is the
+ * acceptance criterion, and the honest way to meet it is to not offer the method
+ * that would make the claim.
  */
 
 export type DeliveryMode = 'carrier' | 'arranged'
+
+/**
+ * The market whose delivery vocabulary applies. Deliberately a narrow literal union
+ * rather than an import of the market registry: this module is pure and is unit
+ * tested without it, and the two values are the whole population.
+ */
+export type DeliveryMarket = 'mx' | 'us'
 
 export interface PickupSpot {
   id?: string
@@ -39,7 +58,7 @@ export interface PickupSpot {
 }
 
 export interface DeliveryMethod {
-  id: 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'coord'
+  id: 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'coord' | 'manual_carrier'
   label: string
   note: string
   requires_address?: boolean
@@ -57,6 +76,11 @@ export interface BuildDeliveryCatalogInput {
   localPickup: boolean
   pickupSpots: PickupSpot[]
   hasLiveShipping: boolean
+  /**
+   * The SELLER's operating market, never a caller-supplied one. Defaults to `mx` so
+   * every existing call site keeps today's behaviour byte-for-byte.
+   */
+  market?: DeliveryMarket
 }
 
 export interface DeliveryCatalogResult {
@@ -104,8 +128,52 @@ export function isCoordinatedListing(input: {
   return deliveryMode === 'arranged' && arrangedOnlyEnabled
 }
 
+/**
+ * Delivery copy per market. The backend returns these strings to the buyer, so they
+ * are presentation and must follow D9 — a US buyer never sees Spanish chrome. MX
+ * strings are copied verbatim from the pre-market catalog; changing one of them
+ * would be a `/mx` copy change, which this epic forbids.
+ */
+const DELIVERY_COPY = {
+  mx: {
+    local_pickup: 'Recolección en mano',
+    local_pickup_spots: 'Elige dónde recoger tu pedido.',
+    local_pickup_coord: 'Coordina el punto de entrega con la tienda.',
+    shipping: 'Envío a domicilio',
+    shipping_note: 'Cotiza y elige paquetería antes de pagar.',
+    digital: 'Entrega digital',
+    digital_note: 'Recibirás acceso o archivo después del pago.',
+    service: 'Servicio',
+    service_note: 'Coordina el horario con el vendedor.',
+    rental: 'Renta',
+    rental_note: 'Coordina las fechas con el vendedor.',
+    manual_carrier: 'Envío del vendedor',
+    manual_carrier_note: 'El vendedor envía con su propia paquetería y te comparte el número de guía.',
+  },
+  us: {
+    local_pickup: 'Local pickup',
+    local_pickup_spots: 'Choose where to collect your order.',
+    local_pickup_coord: 'Arrange the pickup point with the shop.',
+    shipping: 'Shipping',
+    shipping_note: 'Get a rate and choose a carrier before paying.',
+    digital: 'Digital delivery',
+    digital_note: "You'll get access or the file after payment.",
+    service: 'Service',
+    service_note: 'Arrange the schedule with the seller.',
+    rental: 'Rental',
+    rental_note: 'Arrange the dates with the seller.',
+    manual_carrier: "Seller's own shipping",
+    // Honest by construction: it names what the seller does and promises no rate,
+    // no label and no live tracking integration, because none exists for the US.
+    manual_carrier_note:
+      'The seller ships with their own carrier and sends you the tracking number. Shipping is included — you pay no extra.',
+  },
+} as const
+
 export function buildDeliveryCatalog(input: BuildDeliveryCatalogInput): DeliveryCatalogResult {
   const { listingType, isDigital, deliveryMode, arrangedOnlyEnabled, localPickup, pickupSpots, hasLiveShipping } = input
+  const market: DeliveryMarket = input.market ?? 'mx'
+  const copy = DELIVERY_COPY[market]
 
   // Drives the coord-method-push + carrier-shipping-suppression below — the
   // NEW `arranged` capability only, gated by the kill-switch (unchanged from
@@ -120,10 +188,8 @@ export function buildDeliveryCatalog(input: BuildDeliveryCatalogInput): Delivery
   if (localPickup) {
     deliveryMethods.push({
       id: 'local_pickup',
-      label: 'Recolección en mano',
-      note: pickupSpots.length
-        ? 'Elige dónde recoger tu pedido.'
-        : 'Coordina el punto de entrega con la tienda.',
+      label: copy.local_pickup,
+      note: pickupSpots.length ? copy.local_pickup_spots : copy.local_pickup_coord,
       requires_pickup_spot: pickupSpots.length > 0,
       pickup_spots: pickupSpots.map((s, i) => ({
         id: s.id ?? s.name ?? `spot-${i}`,
@@ -136,25 +202,39 @@ export function buildDeliveryCatalog(input: BuildDeliveryCatalogInput): Delivery
     })
   }
 
-  if (!effectiveArranged && !isDigital && listingType === 'product' && hasLiveShipping) {
-    deliveryMethods.push({
-      id: 'shipping',
-      label: 'Envío a domicilio',
-      note: 'Cotiza y elige paquetería antes de pagar.',
-      requires_address: true,
-    })
+  // A product that can be delivered to an address. WHICH method that is depends on
+  // whether the market has a carrier that can quote a rate.
+  if (!effectiveArranged && !isDigital && listingType === 'product') {
+    if (market === 'us') {
+      // No `hasLiveShipping` condition: manual carrier needs no origin address, no
+      // Envía/Correos opt-in and no provider account. That is the entire point of it
+      // — it is the zero-account, zero-funding US path.
+      deliveryMethods.push({
+        id: 'manual_carrier',
+        label: copy.manual_carrier,
+        note: copy.manual_carrier_note,
+        requires_address: true,
+      })
+    } else if (hasLiveShipping) {
+      deliveryMethods.push({
+        id: 'shipping',
+        label: copy.shipping,
+        note: copy.shipping_note,
+        requires_address: true,
+      })
+    }
   }
 
   if (isDigital) {
-    deliveryMethods.push({ id: 'digital', label: 'Entrega digital', note: 'Recibirás acceso o archivo después del pago.' })
+    deliveryMethods.push({ id: 'digital', label: copy.digital, note: copy.digital_note })
   }
 
   if (listingType === 'service') {
-    deliveryMethods.push({ id: 'service', label: 'Servicio', note: 'Coordina el horario con el vendedor.' })
+    deliveryMethods.push({ id: 'service', label: copy.service, note: copy.service_note })
   }
 
   if (listingType === 'rental') {
-    deliveryMethods.push({ id: 'rental', label: 'Renta', note: 'Coordina las fechas con el vendedor.' })
+    deliveryMethods.push({ id: 'rental', label: copy.rental, note: copy.rental_note })
   }
 
   if (effectiveArranged) {

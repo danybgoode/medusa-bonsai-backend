@@ -30,6 +30,7 @@ import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveSellerPaymentMethods } from '../../../_utils/payment-methods'
 import { buildDeliveryCatalog, type PickupSpot } from '../../../_utils/delivery-catalog'
+import { readSellerOperatingMarket } from '../../../../../lib/seller-market'
 import { isEnabled } from '../../../../../lib/flags'
 import { correosGate } from '../../../../../lib/correos-gate'
 
@@ -110,6 +111,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const arrangedOnlyEnabled = await isEnabled('shipping.arranged_only_enabled')
 
   // ── Delivery methods ────────────────────────────────────────────────────
+  // The market comes from the SELLER ROW, never from the request (D16 — delivery
+  // inputs are server-authoritative). The storefront does send a `market` query
+  // param, but it is used only to pick a publishable key on its side; letting it
+  // choose the delivery catalog would let any caller ask a Mexican shop for the US
+  // vocabulary, and with it a `manual_carrier` method that shop never offered.
+  //
+  // An UNREADABLE market falls back to `mx`, which is the fail-closed direction
+  // here: `mx` is the market with the existing, more restrictive rules, and every
+  // seller on the platform today is explicitly `mx`.
+  const marketRead = readSellerOperatingMarket(seller)
+  const sellerMarket = marketRead.market === 'us' ? 'us' as const : 'mx' as const
+
   const { deliveryMethods: delivery_methods, onlyCoordinated } = buildDeliveryCatalog({
     listingType,
     isDigital,
@@ -118,6 +131,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     localPickup,
     pickupSpots,
     hasLiveShipping,
+    market: sellerMarket,
   })
 
   // ── Payment methods (two buckets: online + one consolidated manual) ───────

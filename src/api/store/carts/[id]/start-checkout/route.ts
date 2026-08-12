@@ -34,6 +34,7 @@ import {
   planStripeMarketStrategy,
 } from '../../../../../lib/stripe-market-strategy'
 import { readSellerOperatingMarket } from '../../../../../lib/seller-market'
+import { admitUsDelivery } from '../../../_utils/us-delivery-admission'
 import { resolveRegionIdForMarket } from '../../../../../lib/market-medusa'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
@@ -41,6 +42,10 @@ import { resolveRegionIdForMarket } from '../../../../../lib/market-medusa'
 // items require shipping — even for pickup/coordinated/manual delivery.
 const OPTION_KEY_BY_METHOD: Record<string, 'shipping' | 'pickup' | 'digital' | 'coord'> = {
   shipping: 'shipping',
+  // Same seeded option as carrier shipping — it IS a shipment to an address. The
+  // amount stays 0 because `methodAmount` only carries `shippingCents` for the
+  // carrier method, which is exactly the seller-funded $0 rule (D16).
+  manual_carrier: 'shipping',
   local_pickup: 'pickup',
   digital: 'digital',
   service: 'coord',
@@ -61,7 +66,7 @@ const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 // Escrow: 3-day auto-confirm window (buyer must confirm delivery; else auto-captured)
 const ESCROW_AUTO_CAPTURE_DAYS = 3
 
-type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none' | 'coord' | 'none'
+type FulfillmentMethod = 'local_pickup' | 'shipping' | 'digital' | 'service' | 'rental' | 'none' | 'coord' | 'manual_carrier'
 type EscrowMode = 'off' | 'optional' | 'required'
 
 // ── Bundle discount helpers ───────────────────────────────────────────────────
@@ -485,6 +490,22 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const fulfillmentMethod = supportCheckout ? 'digital' : (body.fulfillment_method ?? 'none')
   if (fulfillmentMethod === 'shipping' && !shippingQuote) {
     return res.status(400).json({ message: 'Selecciona una tarifa de envío para continuar.' })
+  }
+
+  // ── US delivery admission (D16) ───────────────────────────────────────────
+  // Before the first authoritative write. The seller's own market decides, never a
+  // caller-supplied one, and an unreadable market falls back to `mx` — the market
+  // whose rules are already in force for every seller on the platform today.
+  const sellerMarketRead = readSellerOperatingMarket(seller)
+  const admission = admitUsDelivery({
+    market: sellerMarketRead.market === 'us' ? 'us' : 'mx',
+    fulfillmentMethod,
+    provider: body.provider,
+    hasClientShippingQuote: body.shipping_quote != null,
+    shippingAddress: (cart as any)?.shipping_address ?? null,
+  })
+  if (!admission.ok) {
+    return res.status(admission.status).json({ message: admission.message, code: admission.code })
   }
 
   // ── Bundle discount (tiered %) ────────────────────────────────────────────
