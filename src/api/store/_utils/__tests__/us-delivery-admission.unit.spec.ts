@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { admitUsDelivery, isDeliverableUsAddress, manualCarrierShipmentGap } from '../us-delivery-admission'
 import { buildDeliveryCatalog } from '../delivery-catalog'
 
@@ -152,6 +154,50 @@ describe('manualCarrierShipmentGap', () => {
     expect(manualCarrierShipmentGap({ fulfillmentMethod: 'coord', newStatus: 'shipped', carrier: null, trackingNumber: null }).missing).toEqual([])
     expect(manualCarrierShipmentGap({ fulfillmentMethod: 'shipping', newStatus: 'shipped', carrier: null, trackingNumber: null }).missing).toEqual([])
     expect(manualCarrierShipmentGap({ ...ship, newStatus: 'delivered', carrier: null, trackingNumber: null }).missing).toEqual([])
+  })
+})
+
+describe('start-checkout wiring — the admission precedes every money write', () => {
+  /**
+   * Assert the ORDERING, not just the refusal (LEARNINGS). A spec that only checks
+   * `admitUsDelivery` returns 422 stays green if the call is moved BELOW the cart
+   * writes — the refusal would still be a 422, and a partial cart would already
+   * exist behind it. The position in the file is the property that matters.
+   */
+  const source = readFileSync(
+    join(process.cwd(), 'src/api/store/carts/[id]/start-checkout/route.ts'),
+    'utf8',
+  )
+  const at = (needle: string) => {
+    const index = source.indexOf(needle)
+    expect({ needle, found: index >= 0 }).toEqual({ needle, found: true })
+    return index
+  }
+
+  it('runs before the total, the cart writes, and the Stripe session', () => {
+    const admission = at('const admission = admitUsDelivery({')
+    for (const write of [
+      'const checkoutTotalCents =',
+      'addShippingMethods(cartId',
+      'stripeClient.checkout.sessions.create({',
+    ]) {
+      expect({ write, afterAdmission: at(write) > admission }).toEqual({ write, afterAdmission: true })
+    }
+  })
+
+  it('refuses rather than continues — the guard has a returning negative branch', () => {
+    // A guard whose failure path falls through is decoration.
+    expect(source).toMatch(/if \(!admission\.ok\) \{\s*\n\s*return res\.status\(admission\.status\)/)
+  })
+
+  it('the seller-funded $0 cannot be undercut by a client quote', () => {
+    // `shippingCents` comes only from `body.shipping_quote`, which `admitUsDelivery`
+    // refuses outright for US — so the US total has no shipping component by
+    // construction, and the shipping METHOD amount is 0 for anything but carrier
+    // shipping, which the US never reaches.
+    expect(source).toMatch(/const shippingCents = shippingQuote\?\.amount_cents \?\? 0/)
+    expect(source).toMatch(/hasClientShippingQuote: body\.shipping_quote != null/)
+    expect(source).toMatch(/fulfillmentMethod === 'shipping' \? shippingCents : 0/)
   })
 })
 
