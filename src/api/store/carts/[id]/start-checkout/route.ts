@@ -28,6 +28,11 @@ import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/co
 import { isSupportProductMetadata, normalizeSupportCheckout, type NormalizedSupportCheckout } from '../../../_utils/support'
 import { resolveSellerForCheckout } from '../../../_utils/support-seller-resolution'
 import { resolveRentalCheckout, type RentalBooking } from '../../../../../lib/rental-checkout'
+import {
+  buildStripePaymentContext,
+  checkoutRefusalResponse,
+  planStripeMarketStrategy,
+} from '../../../../../lib/stripe-market-strategy'
 
 // Maps the buyer's chosen fulfillment method to a seeded Medusa shipping option.
 // Medusa's completeCart validation requires a shipping method on the cart when
@@ -728,15 +733,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
     const stripeClient = new Stripe(stripeKey, { apiVersion: '2025-09-30.clover' as any })
 
-    const stripeSettings = sellerSettings.stripe as Record<string, unknown> | undefined
-    const sellerStripeAccountId = stripeSettings?.account_id as string | undefined
-
-    if (stripeSettings?.enabled === false || !sellerStripeAccountId || !stripeSettings?.charges_enabled) {
-      return res.status(422).json({
-        message: 'Este vendedor aún no ha activado los pagos. Contacta al vendedor directamente.',
-        code: 'SELLER_NOT_CONNECTED',
-      })
+    // D15 — ONE strategy decision, taken from the SELLER's market before any Stripe
+    // call: MX keeps its destination charge in the platform context, US takes a direct
+    // charge in the connected-account context. There is no forked checkout below this
+    // line; the plan supplies both the payment_intent_data and the request options.
+    //
+    // `checkoutRefusalResponse` keeps MX's refusal wire contract byte-identical
+    // (422 / SELLER_NOT_CONNECTED / same Spanish copy) because the storefront's
+    // BuyButton and CheckoutPayButton branch on that literal code. See its comment.
+    const strategy = planStripeMarketStrategy({ seller, cart_currency: currency })
+    if (!strategy.ok) {
+      const refusal = checkoutRefusalResponse(strategy)
+      return res.status(refusal.status).json(refusal.body)
     }
+    const sellerStripeAccountId = strategy.account_id
 
     const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [{
       quantity: 1,
@@ -765,9 +775,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const session = await stripeClient.checkout.sessions.create({
       mode: 'payment',
       line_items: lineItems,
+      // MX: transfer_data + application_fee_amount (destination charge, platform context).
+      // US: empty — a direct charge carries no transfer and no application fee; the
+      // connected account is addressed through request options instead.
       payment_intent_data: {
-        transfer_data: { destination: sellerStripeAccountId },
-        application_fee_amount: 0,
+        ...strategy.payment_intent_data,
         // Escrow: hold funds until buyer confirms delivery or auto-confirm window elapses
         ...(useEscrow ? { capture_method: 'manual' } : {}),
       },
@@ -780,6 +792,11 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         seller_id: seller?.id ?? '',
         payment_method: 'stripe',
         fulfillment_method: fulfillmentMethod,
+        // Webhook routing context (D15). A direct-charge event must arrive with
+        // `event.account` equal to this account; a destination-charge event must
+        // carry none. `webhookMatchesPaymentContext` reads exactly these two keys.
+        stripe_strategy: strategy.strategy,
+        stripe_account_id: strategy.account_id,
         ...(supportMetadata ? {
           checkout_kind: 'support',
           channel: supportMetadata.channel,
@@ -806,10 +823,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
           rental_deposit_cents: String(rentalBooking.deposit_cents),
         } : {}),
       },
-    })
+    }, strategy.request_options)
 
     providerData = {
-      stripe_session_id: session.id,
+      // Durable payment context (D15): every later lifecycle call — capture, cancel,
+      // expire, refund, reconcile, webhook — rebuilds its Stripe request context from
+      // these keys rather than re-deriving the market from the seller, which may have
+      // changed. `stripe_seller_account` is retained as the legacy alias so sessions
+      // created before this change still read back correctly.
+      ...buildStripePaymentContext(strategy, { stripe_session_id: session.id }),
       stripe_seller_account: sellerStripeAccountId,
       redirect_url: session.url!,
       ...(supportMetadata ? {

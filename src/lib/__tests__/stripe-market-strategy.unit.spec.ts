@@ -1,5 +1,6 @@
 import {
   buildStripePaymentContext,
+  checkoutRefusalResponse,
   planStripeMarketStrategy,
   readStripePaymentContext,
   resolveStripeReadiness,
@@ -78,5 +79,52 @@ describe('Stripe market strategy — D14–D16', () => {
     expect(webhookMatchesPaymentContext({ account: 'acct_us' } as any, session)).toBe(true)
     expect(webhookMatchesPaymentContext({ account: 'acct_attacker' } as any, session)).toBe(false)
     expect(webhookMatchesPaymentContext({} as any, { metadata: { stripe_strategy: 'destination_charge', stripe_account_id: 'acct_mx' } } as any)).toBe(true)
+  })
+})
+
+describe('checkout refusal — the MX wire contract is frozen', () => {
+  // BuyButton.tsx and CheckoutPayButton.tsx both branch on the LITERAL string
+  // 'SELLER_NOT_CONNECTED'. If a richer per-reason code ever reaches an MX buyer,
+  // they lose the friendly copy and see a raw error instead. That is an MX
+  // regression, which this epic forbids outright.
+  const MX_MESSAGE = 'Este vendedor aún no ha activado los pagos. Contacta al vendedor directamente.'
+
+  it.each([
+    ['no stripe account', { metadata: { operating_market: 'mx', settings: { stripe: {} } } }],
+    ['charges disabled', { metadata: { operating_market: 'mx', settings: { stripe: { account_id: 'acct_mx', charges_enabled: false } } } }],
+    ['explicitly disabled', { metadata: { operating_market: 'mx', settings: { stripe: { account_id: 'acct_mx', enabled: false } } } }],
+  ])('MX refusal for %s keeps 422 + SELLER_NOT_CONNECTED + the Spanish copy', (_label, seller) => {
+    const plan = planStripeMarketStrategy({ seller, cart_currency: 'mxn' })
+    expect(plan.ok).toBe(false)
+    expect(checkoutRefusalResponse(plan as never)).toEqual({
+      status: 422,
+      body: { message: MX_MESSAGE, code: 'SELLER_NOT_CONNECTED' },
+    })
+  })
+
+  it('an MX currency mismatch also refuses on the frozen contract', () => {
+    const plan = planStripeMarketStrategy({ seller: mxSeller, cart_currency: 'usd' })
+    expect(checkoutRefusalResponse(plan as never).body.code).toBe('SELLER_NOT_CONNECTED')
+  })
+
+  it('an unreadable market falls back to the frozen MX refusal rather than asserting a market', () => {
+    const plan = planStripeMarketStrategy({ seller: { metadata: { operating_market: 'zz' } }, cart_currency: 'mxn' })
+    expect(plan).toMatchObject({ ok: false, market: null })
+    expect(checkoutRefusalResponse(plan as never).body.code).toBe('SELLER_NOT_CONNECTED')
+  })
+
+  it('US returns the SPECIFIC reason — new surface, no legacy consumer', () => {
+    const notReady = { metadata: { operating_market: 'us', settings: { stripe: {
+      account_id: 'acct_us', api_generation: 'v2', account_country: 'us',
+      merchant_configuration: 'active', card_payments_status: 'inactive', payouts_status: 'active',
+    } } } }
+    const plan = planStripeMarketStrategy({ seller: notReady, cart_currency: 'usd' })
+    const refusal = checkoutRefusalResponse(plan as never)
+    expect(refusal.body.code).toBe('SELLER_STRIPE_CAPABILITY_INACTIVE')
+    expect(refusal.body.message).not.toBe(MX_MESSAGE)
+  })
+
+  it('a ready US seller is not refused at all', () => {
+    expect(planStripeMarketStrategy({ seller: usSeller, cart_currency: 'usd' }).ok).toBe(true)
   })
 })

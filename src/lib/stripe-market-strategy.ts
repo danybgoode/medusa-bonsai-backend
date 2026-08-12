@@ -82,7 +82,7 @@ export type StripeStrategyPlan =
       request_options: Stripe.RequestOptions | undefined
       payment_intent_data: Stripe.Checkout.SessionCreateParams.PaymentIntentData
     }
-  | { ok: false; status: 422 | 503; code: string; message: string }
+  | { ok: false; status: 422 | 503; code: string; message: string; market: MarketCode | null }
 
 export function planStripeMarketStrategy(input: {
   seller: unknown
@@ -92,15 +92,15 @@ export function planStripeMarketStrategy(input: {
 }): StripeStrategyPlan {
   const marketRead = readSellerOperatingMarket(input.seller)
   if (!marketRead.market) {
-    return { ok: false, status: 422, code: 'SELLER_MARKET_INVALID', message: 'The seller has an invalid operating market.' }
+    return { ok: false, status: 422, code: 'SELLER_MARKET_INVALID', message: 'The seller has an invalid operating market.', market: null }
   }
   const expectedCurrency = MARKETS[marketRead.market].currency_code
   const currency = String(input.cart_currency ?? '').toLowerCase()
   if (currency !== expectedCurrency) {
-    return { ok: false, status: 422, code: 'CHECKOUT_CURRENCY_MISMATCH', message: `Expected ${expectedCurrency.toUpperCase()} for market ${marketRead.market.toUpperCase()}.` }
+    return { ok: false, status: 422, code: 'CHECKOUT_CURRENCY_MISMATCH', message: `Expected ${expectedCurrency.toUpperCase()} for market ${marketRead.market.toUpperCase()}.`, market: marketRead.market }
   }
   if (input.expected_region_id && input.cart_region_id !== input.expected_region_id) {
-    return { ok: false, status: 422, code: 'CHECKOUT_REGION_MISMATCH', message: 'The cart Region does not belong to the seller market.' }
+    return { ok: false, status: 422, code: 'CHECKOUT_REGION_MISMATCH', message: 'The cart Region does not belong to the seller market.', market: marketRead.market }
   }
   const readiness = resolveStripeReadiness(input.seller)
   if (!readiness.ready || !readiness.account_id) {
@@ -109,6 +109,7 @@ export function planStripeMarketStrategy(input: {
       status: readiness.reason === 'SELLER_STRIPE_ACCOUNT_MISSING' ? 422 : 503,
       code: readiness.reason ?? 'SELLER_STRIPE_NOT_READY',
       message: 'This seller is not ready to accept Stripe payments.',
+      market: marketRead.market,
     }
   }
   if (marketRead.market === 'us') {
@@ -134,6 +135,38 @@ export function planStripeMarketStrategy(input: {
       application_fee_amount: 0,
     },
   }
+}
+
+export interface CheckoutRefusal {
+  readonly status: number
+  readonly body: { readonly message: string; readonly code: string }
+}
+
+/**
+ * MX's refusal wire contract is FROZEN. `BuyButton.tsx` and `CheckoutPayButton.tsx`
+ * both branch on the literal string `SELLER_NOT_CONNECTED` to show the friendly
+ * "this seller hasn't enabled payments" copy; letting the richer per-reason codes
+ * introduced here reach an MX buyer would replace that with a raw error string.
+ * The epic forbids any change to MX behaviour, so MX keeps its exact status, code
+ * and Spanish message no matter which readiness check actually failed.
+ *
+ * An unresolvable market gets the same frozen MX refusal: it is the safe, already
+ * user-facing copy, and we must not assert a market we could not read.
+ *
+ * US is new surface with no legacy consumer, so it returns the specific reason —
+ * that is D13/D15's "honest reason" rather than a generic failure.
+ */
+const MX_FROZEN_REFUSAL: CheckoutRefusal = Object.freeze({
+  status: 422,
+  body: Object.freeze({
+    message: 'Este vendedor aún no ha activado los pagos. Contacta al vendedor directamente.',
+    code: 'SELLER_NOT_CONNECTED',
+  }),
+})
+
+export function checkoutRefusalResponse(plan: Extract<StripeStrategyPlan, { ok: false }>): CheckoutRefusal {
+  if (plan.market !== 'us') return MX_FROZEN_REFUSAL
+  return Object.freeze({ status: plan.status, body: Object.freeze({ message: plan.message, code: plan.code }) })
 }
 
 export function buildStripePaymentContext(
