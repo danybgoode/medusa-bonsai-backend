@@ -13,6 +13,7 @@
  */
 
 import { MedusaContainer } from '@medusajs/framework/types'
+import { manualCarrierShipmentGap } from '../api/store/_utils/us-delivery-admission'
 import { Modules } from '@medusajs/framework/utils'
 import {
   createOrderFulfillmentWorkflow,
@@ -64,6 +65,30 @@ export async function applyOrderStatusTransition(
   const eligibility = isOrderEligibleForBulkStatus(meta, newStatus)
   if (!eligibility.eligible) {
     return { ok: false, status: 422, message: eligibility.reason }
+  }
+
+  // us-marketplace S4.2 (D16) — a `manual_carrier` order may not be marked shipped
+  // without a real carrier and tracking number.
+  //
+  // The defaults below (`carrier: 'manual'`, `tracking_number: null`) are correct for
+  // an MX arranged delivery, where there may genuinely be nothing to track. They are
+  // wrong for manual carrier, whose whole promise to the buyer is "the seller sends
+  // you the tracking number" — shipping one without tracking makes the order page,
+  // the email and the chat ledger all state something untrue. Checked BEFORE any
+  // workflow runs or metadata is written, so a refusal leaves no partial shipment.
+  const gap = manualCarrierShipmentGap({
+    fulfillmentMethod: meta.fulfillment_method as string | undefined,
+    newStatus,
+    carrier: body.carrier ?? (meta.shipment as Record<string, unknown> | undefined)?.carrier as string | undefined,
+    trackingNumber:
+      body.tracking_number ?? (meta.shipment as Record<string, unknown> | undefined)?.tracking_number as string | undefined,
+  })
+  if (gap.missing.length > 0) {
+    return {
+      ok: false,
+      status: 422,
+      message: `Seller-shipped orders need a carrier and a tracking number before they can be marked shipped. Missing: ${gap.missing.join(', ')}.`,
+    }
   }
 
   const prevShipment = (meta.shipment ?? {}) as Record<string, any>
