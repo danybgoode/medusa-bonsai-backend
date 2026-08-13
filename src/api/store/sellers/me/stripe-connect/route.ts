@@ -36,6 +36,24 @@ const STRIPE_API = 'https://api.stripe.com'
 const STRIPE_VERSION = '2026-04-22.dahlia'
 const SITE_URL = process.env.SITE_URL ?? process.env.NEXT_PUBLIC_SITE_URL ?? 'https://miyagisanchez.com'
 
+/**
+ * Where Stripe sends the seller back after hosted onboarding.
+ *
+ * THIS PATH MUST EXIST. It was `/sell/pagos`, which is not a route — the seller
+ * portal's payment settings live under `/shop/manage/settings/`, and `/sell/*` is the
+ * listing wizard. A seller who completed Connect onboarding was handed straight to a
+ * 404, at the end of the flow that decides whether they can take money at all; the
+ * `refresh_url` case is worse still, because that is where Stripe sends someone whose
+ * link expired and who is therefore already retrying.
+ *
+ * Nothing failed loudly: the account was created, the link was valid, Stripe did
+ * exactly as asked. Only the destination was wrong, and no backend test can see that
+ * because the route lives in the other repo. `stripe-onboarding-return-url.unit.spec.ts`
+ * pins the literal against `apps/miyagisanchez`'s own route tree, which is the only
+ * place the two halves can be compared.
+ */
+const CONNECT_RETURN_PATH = '/shop/manage/settings/pagos'
+
 async function stripeV2(path: string, key: string, init?: { method?: string; body?: unknown }) {
   const res = await fetch(`${STRIPE_API}${path}`, {
     method: init?.method ?? 'GET',
@@ -149,8 +167,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         account_onboarding: {
           configurations: ['merchant'],
           // Server-owned, never caller-supplied — these are redirect targets.
-          refresh_url: `${SITE_URL}/sell/pagos`,
-          return_url: `${SITE_URL}/sell/pagos`,
+          refresh_url: `${SITE_URL}${CONNECT_RETURN_PATH}`,
+          return_url: `${SITE_URL}${CONNECT_RETURN_PATH}`,
         },
       },
     },
