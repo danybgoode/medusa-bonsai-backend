@@ -1,4 +1,4 @@
-import type { FlagDefinition, FlagDefinitionSyncEntry } from '@golden-beans/sdk'
+import type { FlagDefinition, FlagDefinitionSyncEntry } from '@golden-frijoles/sdk'
 import { BACKEND_FLAG_CATALOG, type BackendFlagCatalogEntry } from './flag-catalog'
 
 /**

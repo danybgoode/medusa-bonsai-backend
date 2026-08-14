@@ -13,7 +13,7 @@ const mockCreateFlagProvider = jest.fn(() => ({
 const mockScheduleDurableSnapshot = jest.fn()
 const mockTrackFlagEvaluation = jest.fn()
 
-jest.mock('@golden-beans/sdk', () => ({
+jest.mock('@golden-frijoles/sdk', () => ({
   createFlagProvider: mockCreateFlagProvider,
 }))
 

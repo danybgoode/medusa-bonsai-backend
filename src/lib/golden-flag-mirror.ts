@@ -4,7 +4,7 @@ import {
   parseFlagSnapshot,
   type FlagResolutionReason,
   type FlagSnapshot,
-} from '@golden-beans/sdk'
+} from '@golden-frijoles/sdk'
 import type { GoldenFlagEnvironment } from './flag-provider-mode'
 
 export type DurableGoldenBooleanEvaluation = {
