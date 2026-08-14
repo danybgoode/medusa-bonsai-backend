@@ -45,33 +45,58 @@ function pairKey(link: ChannelLink): string {
   return `${link.product_id}|${link.sales_channel_id}`
 }
 
+export type ParsedLedger = {
+  links: ChannelLink[]
+  /**
+   * Entries that could not be parsed into a replayable pair.
+   *
+   * COUNTED, not silently dropped. A malformed entry means the shop is owed a link
+   * we can no longer name — so a restore that meets one is INCOMPLETE, and reporting
+   * it complete would clear the only evidence that anything was lost. Duplicates do
+   * not count here: dropping a repeat loses nothing.
+   */
+  dropped: number
+}
+
 /**
- * Parse a ledger off `seller.metadata`, defensively.
+ * Parse a ledger off `seller.metadata`, defensively, and say what it could not read.
  *
- * A malformed entry is DROPPED rather than adopted: replaying a pair with a missing
- * or non-string id would either throw mid-restore or link something arbitrary, and a
- * partial restore that reports success is worse than a restore that names its gap.
- * Returns `[]` for an absent ledger, which is a legitimate state (a shop paused
- * while it owned nothing).
+ * A malformed entry cannot be replayed — a pair with a missing or non-string id would
+ * either throw mid-restore or link something arbitrary — so it is dropped from the
+ * replay set and counted in `dropped`. Returns empty for an absent ledger, which is a
+ * legitimate state (a shop paused while it owned nothing).
  */
-export function readPausedLinks(metadata: unknown): ChannelLink[] {
-  if (!metadata || typeof metadata !== 'object') return []
+export function parsePausedLinks(metadata: unknown): ParsedLedger {
+  if (!metadata || typeof metadata !== 'object') return { links: [], dropped: 0 }
   const raw = (metadata as Record<string, unknown>)[PAUSED_LINKS_KEY]
-  if (!Array.isArray(raw)) return []
+  if (raw === undefined || raw === null) return { links: [], dropped: 0 }
+  // A ledger that is not even an array is one unreadable thing, not nothing.
+  if (!Array.isArray(raw)) return { links: [], dropped: 1 }
   const links: ChannelLink[] = []
   const seen = new Set<string>()
+  let dropped = 0
   for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue
+    if (!entry || typeof entry !== 'object') { dropped += 1; continue }
     const { product_id, sales_channel_id } = entry as Record<string, unknown>
-    if (typeof product_id !== 'string' || product_id === '') continue
-    if (typeof sales_channel_id !== 'string' || sales_channel_id === '') continue
+    if (typeof product_id !== 'string' || product_id === '') { dropped += 1; continue }
+    if (typeof sales_channel_id !== 'string' || sales_channel_id === '') { dropped += 1; continue }
     const link = { product_id, sales_channel_id }
     const key = pairKey(link)
     if (seen.has(key)) continue
     seen.add(key)
     links.push(link)
   }
-  return links
+  return { links, dropped }
+}
+
+/** The replayable pairs only. Callers that must notice corruption use `parsePausedLinks`. */
+export function readPausedLinks(metadata: unknown): ChannelLink[] {
+  return parsePausedLinks(metadata).links
+}
+
+/** Union two ledgers, deduplicated — used to make a re-run of pause additive. */
+export function mergeLedgers(a: readonly ChannelLink[], b: readonly ChannelLink[]): ChannelLink[] {
+  return buildPausedLinks([...a, ...b])
 }
 
 /**

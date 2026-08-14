@@ -4,13 +4,23 @@
  * The seller lifecycle seam (tenant-lifecycle-admin · D1, D2).
  *
  * ── WHY ONE MODULE ────────────────────────────────────────────────────────────
- * "Is this shop open for business?" is asked from three unrelated places — the
+ * "Is this shop open for business?" will be asked from three unrelated places — the
  * catalog reads, the checkout admission boundary, and the seller portal's write
  * routes — and the previous epic's post-mortem is explicit that a suspend flag
  * honoured by *some* consumers is worse than no feature at all: a shop that looks
  * paused in the admin and still sells through the API is a lie the platform tells
  * its operator. So the rule lives here once and is imported, never restated. A
  * paraphrased contract drifts permissive.
+ *
+ * ── WHAT IS ACTUALLY WIRED TODAY (S1) ─────────────────────────────────────────
+ * Only the status route imports `sellerAdmits`. The catalog is made dark by the
+ * sales-channel unlink, NOT by a read-path status check, and **checkout does not
+ * consult this module at all yet** — a cart created before a pause can still
+ * complete. S2.2 imports it into `checkout-admission.ts` and S2.3 into the portal's
+ * write routes. Until then this is a primitive with one consumer, and describing it
+ * as an enforced boundary would be exactly the overclaim this codebase records as
+ * its most repeated documentation failure: a comment asserting a control that does
+ * not exist.
  *
  * ── THREE STATES, AND NEVER A COERCED FOURTH ──────────────────────────────────
  * `parseSellerStatus` REFUSES an unrecognised value rather than defaulting it to

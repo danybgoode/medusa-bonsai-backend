@@ -196,3 +196,62 @@ describe('refusals come back as plans, never as thrown exceptions', () => {
     expect(plan.reason).toBe('deleted_is_terminal')
   })
 })
+
+describe('a partly-failed pause is resumable, not destructive', () => {
+  it('re-pausing MERGES with the existing ledger instead of overwriting it', () => {
+    // The first attempt unlinked A and died before B. Re-running now sees only B as a
+    // live membership — so an overwrite would record [B] and lose A forever. Union
+    // keeps both, and the retry finishes the job.
+    const plan = planSellerStatusChange(input({
+      currentStatus: 'active',
+      targetStatus: 'paused',
+      metadata: { [PAUSED_LINKS_KEY]: [link('A', MARKETPLACE), link('B', MARKETPLACE)] },
+      actualLinks: [link('B', MARKETPLACE)],
+      existingProductIds: new Set(['A', 'B']),
+    }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.unlink).toEqual([link('B', MARKETPLACE)])
+    expect(plan.ledgerAfter).toEqual([link('A', MARKETPLACE), link('B', MARKETPLACE)])
+  })
+})
+
+describe('a corrupted ledger is never reported as a clean result', () => {
+  it('an unparseable entry makes an unpause INCOMPLETE', () => {
+    const plan = planSellerStatusChange(input({
+      currentStatus: 'paused',
+      targetStatus: 'active',
+      metadata: { [PAUSED_LINKS_KEY]: [link('p', MARKETPLACE), { product_id: 'orphan' }] },
+      existingProductIds: new Set(['p']),
+    }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.relink).toEqual([link('p', MARKETPLACE)])
+    expect(plan.unreadableLedgerEntries).toBe(1)
+    // The whole point: a dropped entry is a link the shop is owed that we can no
+    // longer name, so the ledger must NOT be cleared over it.
+    expect(plan.complete).toBe(false)
+    expect(plan.ledgerAfter).not.toBeNull()
+  })
+
+  it('a ledger that is not even an array counts as one unreadable thing', () => {
+    const plan = planSellerStatusChange(input({
+      currentStatus: 'paused',
+      targetStatus: 'active',
+      metadata: { [PAUSED_LINKS_KEY]: 'corrupted' },
+    }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.unreadableLedgerEntries).toBe(1)
+    expect(plan.complete).toBe(false)
+  })
+
+  it('a clean ledger reports zero unreadable entries', () => {
+    const plan = planSellerStatusChange(input({
+      currentStatus: 'paused',
+      targetStatus: 'active',
+      metadata: { [PAUSED_LINKS_KEY]: [link('p', MARKETPLACE)] },
+      existingProductIds: new Set(['p']),
+    }))
+    if (!plan.ok) throw new Error('expected a plan')
+    expect(plan.unreadableLedgerEntries).toBe(0)
+    expect(plan.complete).toBe(true)
+  })
+})
