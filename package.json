@@ -22,7 +22,7 @@
     "test:unit:coverage": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --coverage --coverageReporters=text-summary --silent --runInBand --forceExit"
   },
   "dependencies": {
-    "@golden-beans/sdk": "https://github.com/danybgoode/golden-beans/releases/download/sdk-v0.3.0/golden-beans-sdk-0.3.0.tgz",
+    "@golden-frijoles/sdk": "https://github.com/danybgoode/golden-beans/releases/download/sdk-v0.4.0/golden-frijoles-sdk-0.4.0.tgz",
     "@medusajs/admin-sdk": "^2.15.3",
     "@medusajs/admin-shared": "^2.15.3",
     "@medusajs/cache-redis": "^2.15.3",

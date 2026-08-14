@@ -3,7 +3,7 @@ const mockCreateGrowthEngineClient = jest.fn(() => ({
   trackFlagEvaluation: mockTrackFlagEvaluation,
 }))
 
-jest.mock('@golden-beans/sdk', () => ({
+jest.mock('@golden-frijoles/sdk', () => ({
   createGrowthEngineClient: mockCreateGrowthEngineClient,
 }))
 

@@ -1,4 +1,4 @@
-import type { FlagDefinitionSyncClient } from '@golden-beans/sdk'
+import type { FlagDefinitionSyncClient } from '@golden-frijoles/sdk'
 import {
   resolveFlagDefinitionSyncConfiguration,
   syncBackendFlagDefinitionCatalog,

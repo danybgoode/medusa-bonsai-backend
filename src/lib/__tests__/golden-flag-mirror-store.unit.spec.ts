@@ -1,4 +1,4 @@
-import type { FlagSnapshot } from '@golden-beans/sdk'
+import type { FlagSnapshot } from '@golden-frijoles/sdk'
 
 type RpcResult = {
   data: { accepted: boolean; current_snapshot_version: number }[] | null

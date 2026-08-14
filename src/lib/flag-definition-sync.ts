@@ -2,7 +2,7 @@ import {
   createFlagDefinitionSyncClient,
   type FlagDefinitionSyncClient,
   type FlagDefinitionSyncResult,
-} from '@golden-beans/sdk'
+} from '@golden-frijoles/sdk'
 import { BACKEND_FLAG_DEFINITION_CATALOG } from './flag-definition-catalog'
 
 export type FlagDefinitionSyncEnvironment = {

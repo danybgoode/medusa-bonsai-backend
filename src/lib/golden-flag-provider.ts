@@ -9,7 +9,7 @@ import {
   createFlagProvider,
   type FlagProvider,
   type FlagResolutionReason,
-} from '@golden-beans/sdk'
+} from '@golden-frijoles/sdk'
 import { parseGoldenFlagEnvironment } from './flag-provider-mode'
 import { createFlagProviderRequestRefreshGate } from './flag-provider-request-refresh'
 import { scheduleDurableGoldenSnapshot } from './golden-flag-mirror-store'

@@ -4,7 +4,7 @@
  * Direct writes remain prohibited: persistence calls the database's narrowly
  * granted monotonic RPC, while normal reads remain ordinary service-role reads.
  */
-import type { FlagSnapshot } from '@golden-beans/sdk'
+import type { FlagSnapshot } from '@golden-frijoles/sdk'
 import { parseGoldenFlagEnvironment, type GoldenFlagEnvironment } from './flag-provider-mode'
 import { parseDurableGoldenSnapshot } from './golden-flag-mirror'
 import { supabaseRead } from '../api/store/_utils/supabase-read'

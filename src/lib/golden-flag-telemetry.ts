@@ -1,7 +1,7 @@
 import {
   createGrowthEngineClient,
   type FlagEvaluationTelemetryInput,
-} from '@golden-beans/sdk'
+} from '@golden-frijoles/sdk'
 
 const TELEMETRY_TIMEOUT_MS = 5_000
 let cachedClient:

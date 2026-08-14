@@ -1,4 +1,4 @@
-import type { FlagSnapshot } from '@golden-beans/sdk'
+import type { FlagSnapshot } from '@golden-frijoles/sdk'
 
 const mockEvaluateGolden = jest.fn()
 const mockEvaluateDurable = jest.fn()
