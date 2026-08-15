@@ -106,3 +106,41 @@ describe('decidePortalGate', () => {
     }
   })
 })
+
+/**
+ * The link payload shape, pinned after a LIVE failure.
+ *
+ * The first revision invented `productService` / `salesChannelService` as module
+ * keys. Every unlink threw "Module to type productService and salesChannelService …
+ * was not found", the pure planner stayed correct, every unit test passed, and only a
+ * real run against production surfaced it. This asserts the route uses the same keys
+ * the rest of the codebase does.
+ */
+describe('the status route links through real module keys', () => {
+  it('uses Modules.PRODUCT / Modules.SALES_CHANNEL, never invented service names', () => {
+    const { readFileSync } = require('fs') as typeof import('fs')
+    const { join } = require('path') as typeof import('path')
+    const source = readFileSync(
+      join(process.cwd(), 'src/api/internal/sellers/[id]/status/route.ts'),
+      'utf8',
+    )
+    expect(source).toContain('[Modules.PRODUCT]')
+    expect(source).toContain('[Modules.SALES_CHANNEL]')
+    // The exact shape that failed live.
+    expect(source).not.toMatch(/productService:\s*\{/)
+    expect(source).not.toMatch(/salesChannelService:\s*\{/)
+  })
+
+  it('does not flip the status when every link operation failed', () => {
+    // A pause whose unlinks all failed did nothing, so claiming `paused` would be a
+    // shop reading paused while its products are still on sale.
+    const { readFileSync } = require('fs') as typeof import('fs')
+    const { join } = require('path') as typeof import('path')
+    const source = readFileSync(
+      join(process.cwd(), 'src/api/internal/sellers/[id]/status/route.ts'),
+      'utf8',
+    )
+    expect(source).toContain('allWorkFailed')
+    expect(source).toContain('if (!allWorkFailed)')
+  })
+})
