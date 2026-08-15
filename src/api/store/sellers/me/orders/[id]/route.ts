@@ -59,7 +59,6 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const productIds = await resolveSellerProductIds(
     req.scope,
     seller.sellerId,
-    { includeDeleted: true },
   )
   if (!sellerOwnsEveryOrderItem(productIds, order.items)) {
     return res.status(403).json({ message: 'Forbidden' })
@@ -105,7 +104,6 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const productIds = await resolveSellerProductIds(
     req.scope,
     seller.sellerId,
-    { includeDeleted: true },
   )
   if (!sellerOwnsEveryOrderItem(productIds, order.items)) {
     return res.status(403).json({ message: 'Forbidden' })

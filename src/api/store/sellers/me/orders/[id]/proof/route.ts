@@ -52,7 +52,6 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   const sellerProductIds = await resolveSellerProductIds(
     req.scope,
     sellerAuth.sellerId,
-    { includeDeleted: true },
   )
   // Require ownership of EVERY item, not just one — this write is ORDER-level,
   // so a seller who owns only some items must not be able to send/replace a

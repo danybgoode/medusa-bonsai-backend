@@ -54,7 +54,6 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const sellerProductIds = await resolveSellerProductIds(
     req.scope,
     seller.sellerId,
-    { includeDeleted: true },
   )
 
   const advanced: string[] = []
