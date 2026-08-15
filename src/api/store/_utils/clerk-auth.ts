@@ -169,14 +169,21 @@ export async function resolveOrCreateBuyerCustomer(
   }
 }
 
-/** Finds the Seller record for the authenticated Clerk user. Returns null if not found. */
+/**
+ * Finds the Seller record for the authenticated Clerk user. Returns null if not found.
+ *
+ * `sellerClerkUserId` is returned even though the caller supplied it: the whole
+ * point is that downstream consumers (`normalizeMedusaOrder`) need the seller's
+ * Clerk id to address a NOTIFICATION at them, and re-deriving it from the request
+ * at each of the ~45 call sites is how it ended up hardcoded `null` instead.
+ */
 export async function resolveSeller(
   req: MedusaRequest,
-): Promise<{ sellerId: string; sellerName: string } | null> {
+): Promise<{ sellerId: string; sellerName: string; sellerClerkUserId: string } | null> {
   const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) return null
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const [seller] = await sellerService.listSellers({ clerk_user_id: clerkUserId })
   if (!seller) return null
-  return { sellerId: seller.id, sellerName: seller.name }
+  return { sellerId: seller.id, sellerName: seller.name, sellerClerkUserId: clerkUserId }
 }

@@ -65,7 +65,9 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return res.status(403).json({ message: 'Forbidden' })
   }
 
-  return res.json({ order: normalizeMedusaOrder(order, seller.sellerId, seller.sellerName) })
+  return res.json({
+    order: normalizeMedusaOrder(order, seller.sellerId, seller.sellerName, seller.sellerClerkUserId),
+  })
 }
 
 // ── PATCH ─────────────────────────────────────────────────────────────────────
