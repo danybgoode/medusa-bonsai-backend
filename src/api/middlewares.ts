@@ -118,18 +118,19 @@ export async function gateSellerPortalWrites(
   const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) return next()
 
-  let seller: { status?: unknown } | null = null
+  let seller: { status?: unknown } | null | 'unavailable' = null
   try {
     const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
     const [row] = await sellerService.listSellers({ clerk_user_id: clerkUserId } as never, { take: 1 })
     seller = (row as { status?: unknown } | undefined) ?? null
   } catch (e) {
-    // A read failure here must not lock a healthy merchant out of their own portal.
-    // The catalog unlink and the checkout admission seam are the load-bearing halves
-    // of a pause (D2a, D2b); this one is the explanation, and an explanation that
-    // fires on a database blip is worse than one that occasionally misses.
+    // FAIL CLOSED. An earlier revision called next() here, reasoning that a gate
+    // firing on a database blip was worse than one that occasionally missed — wrong
+    // trade for a WRITE gate, because inducing a transient failure would then grant
+    // exactly the mutation this gate exists to prohibit. The caller gets a retryable
+    // 503 that says so, never a 423 claiming their account is paused.
     console.error('[portal-gate] seller read threw:', (e as Error).message)
-    return next()
+    seller = 'unavailable'
   }
 
   const refusal = decidePortalGate({ method: req.method, seller })
