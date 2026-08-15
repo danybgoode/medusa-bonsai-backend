@@ -40,7 +40,7 @@
  *
  * Pure: no container, no database, no request object. The middleware is the shell.
  */
-import { parseSellerStatus, sellerAdmits, type SellerStatus } from '../../../lib/seller-status'
+import { requireSellerStatus, sellerAdmits, type SellerStatus } from '../../../lib/seller-status'
 
 /** Methods that change something. Everything else is a read. */
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
@@ -115,7 +115,9 @@ export function decidePortalGate(input: {
   if (input.seller === 'unavailable') return PORTAL_STATUS_UNAVAILABLE
   if (!input.seller) return null
 
-  const status = parseSellerStatus(input.seller.status)
+  // STRICT (see `requireSellerStatus`): an absent column on a write gate means the
+  // lookup stopped selecting it, not that the seller is fine.
+  const status = requireSellerStatus(input.seller.status)
   if (sellerAdmits(status)) return null
   // An unparseable stored value is the same class of fact as a failed lookup: we do
   // not know the state, so we do not permit the write.

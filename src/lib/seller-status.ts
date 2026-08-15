@@ -57,6 +57,24 @@ export function parseSellerStatus(value: unknown): SellerStatus | null {
 }
 
 /**
+ * The ENFORCEMENT reader: like `parseSellerStatus`, but an ABSENT value is refused
+ * rather than defaulted.
+ *
+ * The difference matters only on the two seams that gate money and mutations, and it
+ * is the difference between a leniency and a hole. `parseSellerStatus` treats
+ * `undefined` as `active` because a projection that did not select the column must
+ * not black out an unrelated read — but on the checkout admission seam and the portal
+ * write gate, `undefined` can ONLY mean the query stopped selecting `seller.status`
+ * (the column is NOT NULL with a default, so a real row always has one). Defaulting
+ * there would silently re-open every paused shop the moment someone edited a field
+ * list. Caught by cross-family review; the previous revision defaulted, and the fail
+ * would have been invisible.
+ */
+export function requireSellerStatus(value: unknown): SellerStatus | null {
+  return isSellerStatus(value) ? value : null
+}
+
+/**
  * May this seller's catalog be shown and sold?
  *
  * Only `active` admits. `null` (unreadable) does NOT admit — see the header. This is

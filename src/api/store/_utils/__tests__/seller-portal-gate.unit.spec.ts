@@ -89,10 +89,14 @@ describe('decidePortalGate', () => {
     }
   })
 
-  it('a seller row WITHOUT the status column passes — it predates the migration', () => {
-    // parseSellerStatus treats an absent column as the default. A projection that did
-    // not select `status` must not lock a healthy merchant out.
-    expect(decidePortalGate({ method: 'POST', seller: {} })).toBeNull()
+  it('a seller row WITHOUT the status column REFUSES — it means the lookup stopped selecting it', () => {
+    // INVERTED after review round 2. The earlier version asserted this passes, on the
+    // reasoning that a row might predate the migration. It cannot: the column is NOT
+    // NULL with a default, so every real row has one. An absent value therefore means
+    // the query stopped selecting `status` — and defaulting that to active would
+    // silently re-open every paused shop the moment someone edited a field list.
+    const refusal = decidePortalGate({ method: 'POST', seller: {} })
+    expect(refusal?.status).toBe(503)
   })
 
   it('every refusal carries non-empty es-MX copy — this reaches a merchant screen', () => {

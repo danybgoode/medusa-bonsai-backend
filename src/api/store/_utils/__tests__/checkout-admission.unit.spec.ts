@@ -230,6 +230,9 @@ describe('decideCheckoutAdmission — the flag decides WHICH RULE, never whether
       { requested_product_id: 'prod_other' },
       { owner_status: 'paused' as const },
       { owner_status: 'deleted' as const },
+      // `null` is what the route passes when `seller.status` is absent or
+      // unparseable — including the case where the graph query stopped selecting the
+      // field. It must refuse, not default to active (review round 2).
       { owner_status: null },
     ]) {
       expect(decide({ owned_shop_only_enabled: true, ...overrides }).admitted).toBe(false)

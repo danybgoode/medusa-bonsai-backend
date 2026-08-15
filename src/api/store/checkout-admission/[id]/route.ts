@@ -70,7 +70,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { isEnabled } from '../../../../lib/flags'
 import { readSellerOperatingMarket } from '../../../../lib/seller-market'
-import { parseSellerStatus, type SellerStatus } from '../../../../lib/seller-status'
+import { requireSellerStatus, type SellerStatus } from '../../../../lib/seller-status'
 import type { MarketCode } from '../../../../lib/markets'
 import {
   ADMISSION_NOT_FOUND_MESSAGE,
@@ -131,7 +131,9 @@ async function ownerMarketFor(
     return {
       status: 'resolved',
       market: readSellerOperatingMarket(seller).market,
-      sellerStatus: parseSellerStatus((seller as { status?: unknown }).status),
+      // STRICT: an absent `status` here can only mean the field list above stopped
+      // selecting it, and defaulting that to active would re-open every paused shop.
+      sellerStatus: requireSellerStatus((seller as { status?: unknown }).status),
     }
   } catch (e) {
     // THREE STATES, NEVER TWO. This used to `return null`, which the decision below

@@ -129,7 +129,10 @@ export async function gateSellerPortalWrites(
     // trade for a WRITE gate, because inducing a transient failure would then grant
     // exactly the mutation this gate exists to prohibit. The caller gets a retryable
     // 503 that says so, never a 423 claiming their account is paused.
-    console.error('[portal-gate] seller read threw:', (e as Error).message)
+    // `(e as Error).message` throws on a null/undefined rejection, which would skip
+    // the fail-closed assignment below and 500 instead — a different bypass of the
+    // same gate.
+    console.error('[portal-gate] seller read threw:', e instanceof Error ? e.message : String(e))
     seller = 'unavailable'
   }
 

@@ -1,6 +1,7 @@
 import {
   DEFAULT_SELLER_STATUS,
   SELLER_STATUSES,
+  requireSellerStatus,
   decideStatusTransition,
   isSellerStatus,
   parseSellerStatus,
@@ -63,9 +64,31 @@ describe('sellerAdmits', () => {
     expect(sellerRowAdmits(undefined)).toBe(false)
   })
 
-  it('a row read WITHOUT the status column admits — it predates the migration, not a refusal', () => {
-    // A projection that did not select `status` must not black out the whole catalog.
+  it('a row read WITHOUT the status column admits HERE — the lenient reader is for display', () => {
+    // `sellerRowAdmits` rides on `parseSellerStatus`, which defaults an absent column
+    // so a projection that did not select it cannot black out an unrelated read.
+    // The two ENFORCEMENT seams deliberately do NOT use this — see
+    // `requireSellerStatus` and its spec below.
     expect(sellerRowAdmits({})).toBe(true)
+  })
+})
+
+describe('requireSellerStatus — the ENFORCEMENT reader', () => {
+  it('accepts each known status, exactly like the lenient reader', () => {
+    for (const status of SELLER_STATUSES) expect(requireSellerStatus(status)).toBe(status)
+  })
+
+  it('REFUSES an absent value, where parseSellerStatus defaults it', () => {
+    // This is the whole difference, and it is the difference between a leniency and a
+    // hole. On the checkout seam and the portal write gate, `undefined` can only mean
+    // the query stopped selecting the column — the column is NOT NULL with a default.
+    expect(parseSellerStatus(undefined)).toBe('active')
+    expect(requireSellerStatus(undefined)).toBeNull()
+    expect(requireSellerStatus(null)).toBeNull()
+  })
+
+  it('REFUSES an unrecognised value, like the lenient reader', () => {
+    expect(requireSellerStatus('suspended')).toBeNull()
   })
 })
 
