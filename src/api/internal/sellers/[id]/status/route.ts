@@ -199,6 +199,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const metadata = { ...((seller.metadata ?? {}) as Record<string, unknown>) }
   const failures: string[] = []
+  // paused → deleted keeps its ledger; see the planner. Written as an explicit value
+  // for the same merge reason as the clear below.
 
   // ── PAUSE: record first (merged), then remove. ──────────────────────────────
   if (plan.unlink.length > 0) {
@@ -226,13 +228,25 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     }
     // Clear ONLY when nothing is outstanding. A ledger cleared over an un-recreated
     // link is unrecoverable; keeping it makes the next run finish the job.
-    if (unrestored.length === 0 && plan.unreadableLedgerEntries === 0) delete metadata[PAUSED_LINKS_KEY]
-    else metadata[PAUSED_LINKS_KEY] = mergeLedgers(unrestored, [])
+    //
+    // NULL, not `delete`. Verified live: a complete restore left `paused_link_count: 2`
+    // because `updateSellers` MERGES the metadata blob rather than replacing it, so a
+    // locally-deleted key simply is not in the patch and the stored value survives.
+    // Writing an explicit null clears it under either semantic, and
+    // `parsePausedLinks` already reads null as an empty ledger.
+    //
+    // Why it matters: a stale ledger would RE-LINK, on some later unpause, pairs that
+    // were legitimately unlinked in between — publishing products nobody asked to
+    // publish, which is the exact failure D4 exists to prevent.
+    if (unrestored.length === 0 && plan.unreadableLedgerEntries === 0) {
+      metadata[PAUSED_LINKS_KEY] = null
+    } else {
+      metadata[PAUSED_LINKS_KEY] = mergeLedgers(unrestored, [])
+    }
     await sellerService.updateSellers({ id, metadata } as never)
   } else if (plan.unlink.length === 0) {
     // paused → deleted: no link work, but the ledger must persist as the planner said.
-    if (plan.ledgerAfter === null) delete metadata[PAUSED_LINKS_KEY]
-    else metadata[PAUSED_LINKS_KEY] = plan.ledgerAfter
+    metadata[PAUSED_LINKS_KEY] = plan.ledgerAfter
     await sellerService.updateSellers({ id, metadata } as never)
   }
 
