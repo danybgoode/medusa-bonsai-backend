@@ -15,7 +15,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { resolveSeller } from '../../../_utils/clerk-auth'
 import {
-  resolveSellerProductIds,
+  resolveSellerProductIdsWithSlots,
   sellerOwnsEveryOrderItem,
 } from '../../../_utils/seller-catalog-query'
 import { readRentalBooking, deriveRentalBookingState } from '../../../../../lib/rental-booking'
@@ -46,6 +46,8 @@ export type SellerOrderTrace = {
   order_query_error?: string
   orders_fetched?: number
   orders_after_ownership_filter?: number
+  /** Soft-deleted linked products — the known, measured ownership gap. */
+  unresolved_product_slots?: number
 }
 
 export type ListOrdersForSellerOptions = {
@@ -77,11 +79,16 @@ export async function listOrdersForSeller(
   // ── Get seller's product IDs ──────────────────────────────────────────────
   let sellerProductIds = new Set<string>()
   try {
-    sellerProductIds = await resolveSellerProductIds(
-      scope,
-      sellerId,
-      { includeDeleted: true },
-    )
+    const resolved = await resolveSellerProductIdsWithSlots(scope, sellerId)
+    sellerProductIds = resolved.ids
+    // Soft-deleted linked products. An order whose every item is one of these stays
+    // invisible to its seller — the residual gap left by removing `includeDeleted`,
+    // which never worked. Reported as a number so it can be watched, not assumed zero.
+    if (trace) trace.unresolved_product_slots = resolved.unresolvedSlots
+    if (resolved.unresolvedSlots > 0) {
+      console.warn('[seller/me/orders] seller', sellerId, 'has', resolved.unresolvedSlots,
+        'soft-deleted linked product(s); orders containing only those are not listed')
+    }
   } catch (e) {
     // Degrade, never die — but SAY SO. This catch was bare for months and turned
     // a hard failure into "this seller has no orders", which is a confident

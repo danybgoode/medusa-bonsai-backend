@@ -1,5 +1,6 @@
 import {
   resolveSellerProductIds,
+  resolveSellerProductIdsWithSlots,
   resolveSellerProductMetadataRecords,
   sellerOwnsEveryOrderItem,
 } from '../seller-catalog-query'
@@ -38,23 +39,51 @@ describe('resolveSellerProductIds', () => {
     expect(ids).toEqual(new Set())
   })
 
-  it('puts withDeleted on the nested products relation for order ownership', async () => {
-    const { scope, graph } = fakeScope([{ id: 'prod_live' }, { id: 'prod_deleted' }])
+  it('asks ONLY for the shape Medusa accepts — no context, no withDeleted', async () => {
+    // This test used to assert the OPPOSITE, against a fake `graph` that accepts any
+    // object: it pinned `context: { products: QueryContext({}) }` + `withDeleted: true`
+    // and passed for months while every real call threw
+    // `Trying to query by not existing property Product.context`. A spec that proves we
+    // BUILT the payload we meant to build says nothing about whether the API takes it.
+    const { scope, graph } = fakeScope([{ id: 'prod_live' }])
 
-    const ids = await resolveSellerProductIds(scope, 'seller_1', { includeDeleted: true })
+    await resolveSellerProductIds(scope, 'seller_1')
 
-    expect(ids).toEqual(new Set(['prod_live', 'prod_deleted']))
     expect(graph).toHaveBeenCalledWith({
       entity: 'seller',
       fields: ['id', 'products.id'],
       filters: { id: 'seller_1' },
-      context: {
-        products: {
-          __type: 'QueryContext',
-        },
-      },
-      withDeleted: true,
     })
+    const sent = (graph.mock.calls as unknown as Array<[Record<string, unknown>]>)[0][0]
+    expect(sent).not.toHaveProperty('context')
+    expect(sent).not.toHaveProperty('withDeleted')
+  })
+
+  it('the shape survives Medusa OWN translator — the check the old spec lacked', () => {
+    // Runs the query through the installed `toRemoteQuery`, so an invented argument
+    // shows up here instead of in production. The removed one emitted
+    // `seller.products.__args.context`, which is precisely what is asserted absent.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { toRemoteQuery } = require('@medusajs/modules-sdk/dist/remote-query/to-remote-query.js')
+
+    const built = toRemoteQuery(
+      { entity: 'seller', fields: ['id', 'products.id'], filters: { id: 'seller_1' } },
+      {},
+    )
+    expect(built.seller.products?.__args).toBeUndefined()
+
+    // The negation, so this guard cannot pass by never seeing the bad shape.
+    const broken = toRemoteQuery(
+      {
+        entity: 'seller',
+        fields: ['id', 'products.id'],
+        filters: { id: 'seller_1' },
+        context: { products: { __type: 'QueryContext' } },
+        withDeleted: true,
+      },
+      {},
+    )
+    expect(broken.seller.products.__args).toHaveProperty('context')
   })
 
   it('keeps live catalog reads on Medusa default soft-delete filtering', async () => {
@@ -114,5 +143,37 @@ describe('sellerOwnsEveryOrderItem', () => {
 
   it('fails closed when the seller-owned set is empty', () => {
     expect(sellerOwnsEveryOrderItem(new Set(), [{ product_id: 'prod_1' }])).toBe(false)
+  })
+})
+
+/**
+ * The residual gap, measured. Removing `includeDeleted` means a soft-deleted linked
+ * product is no longer in the seller's id set — so an order whose every item is one
+ * of those stays invisible. That is a real, narrower gap than the outage it replaces
+ * (every seller saw zero orders), and it must be a NUMBER, not an assumption.
+ */
+describe('resolveSellerProductIdsWithSlots', () => {
+  it('counts the sparse slots a soft-delete leaves behind', async () => {
+    const { scope } = fakeScope([{ id: 'prod_live' }, null, undefined, { id: 'prod_other' }])
+
+    const resolved = await resolveSellerProductIdsWithSlots(scope, 'seller_1')
+
+    expect(resolved.ids).toEqual(new Set(['prod_live', 'prod_other']))
+    expect(resolved.unresolvedSlots).toBe(2)
+  })
+
+  it('reports ZERO when nothing is missing — not merely a falsy value', async () => {
+    // `0` and "we did not look" must not read alike on the trace.
+    const { scope } = fakeScope([{ id: 'prod_live' }])
+    const resolved = await resolveSellerProductIdsWithSlots(scope, 'seller_1')
+    expect(resolved.unresolvedSlots).toBe(0)
+    expect(resolved.ids.size).toBe(1)
+  })
+
+  it('agrees with the plain resolver on the ids it returns', async () => {
+    const slots = [{ id: 'a' }, null, { id: 'b' }]
+    const plain = await resolveSellerProductIds(fakeScope(slots).scope, 'seller_1')
+    const withSlots = await resolveSellerProductIdsWithSlots(fakeScope(slots).scope, 'seller_1')
+    expect(withSlots.ids).toEqual(plain)
   })
 })

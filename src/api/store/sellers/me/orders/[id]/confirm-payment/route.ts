@@ -39,7 +39,6 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   const sellerProductIds = await resolveSellerProductIds(
     req.scope,
     sellerAuth.sellerId,
-    { includeDeleted: true },
   )
   // Require ownership of EVERY item, not just one — capturing payment is an
   // ORDER-level action, so a seller who owns only some items must not be

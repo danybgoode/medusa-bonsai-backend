@@ -43,10 +43,14 @@ const ORDER_OWNERSHIP_CALL_COUNTS: Record<string, number> = {
   'store/sellers/me/orders/bulk-status/route.ts': 1,
 }
 
-const DELETED_INCLUSIVE_CALL_COUNTS: Record<string, number> = {
-  ...ORDER_OWNERSHIP_CALL_COUNTS,
-  'internal/events-ticketing/redeem/route.ts': 1,
-}
+/**
+ * Files that used to pass `{ includeDeleted: true }`. Every one of them must now pass
+ * ZERO — see below for why the option is gone.
+ */
+const FORMERLY_DELETED_INCLUSIVE: string[] = [
+  ...Object.keys(ORDER_OWNERSHIP_CALL_COUNTS),
+  'internal/events-ticketing/redeem/route.ts',
+]
 
 function sourceFiles(root: string): string[] {
   return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
@@ -147,6 +151,10 @@ function typedResolverCallCount(file: string): number {
   const source = parse(file)
   const resolverNames = new Set([
     'resolveSellerProductIds',
+    // The slot-counting sibling is the SAME central boundary — it just also reports
+    // how many linked products were soft-deleted. Omitting it here would make the
+    // order list route read as an un-migrated direct query.
+    'resolveSellerProductIdsWithSlots',
     'resolveSellerProductIdsFromRemoteQuery',
     'resolveSellerProductMetadataRecords',
   ])
@@ -219,15 +227,29 @@ describe('seller→products null-slot inventory', () => {
     expect(actual).toEqual(EXPECTED_MIGRATED_CALL_COUNTS)
   })
 
-  it('keeps historical ownership reads deleted-inclusive without widening live catalog reads', () => {
-    const actual = Object.fromEntries(
-      Object.keys(DELETED_INCLUSIVE_CALL_COUNTS).map((file) => [
-        file,
-        includeDeletedResolverCallCount(path.join(API_ROOT, file)),
-      ]),
-    )
+  /**
+   * This assertion is INVERTED from what it was, and that is the point.
+   *
+   * It used to pin `{ includeDeleted: true }` onto these 12 files as a feature. That
+   * option built `context: { products: QueryContext({}) }`, which Medusa rejects with
+   * `Trying to query by not existing property Product.context` — so every one of these
+   * routes threw on every request. The seller order list swallowed it and reported "no
+   * orders"; the detail routes and ticket redeem had no catch and 500'd. This guard
+   * held the broken shape in place for months by asserting it was there.
+   *
+   * It now guards the opposite: the option is gone and must not return. Not scoped to
+   * the 12 known files — the WHOLE api tree, so a new route cannot reintroduce it.
+   */
+  it('the includeDeleted option is gone from every route, and cannot come back', () => {
+    const stillPassing = FORMERLY_DELETED_INCLUSIVE
+      .map((file) => [file, includeDeletedResolverCallCount(path.join(API_ROOT, file))] as const)
+      .filter(([, count]) => count > 0)
+    expect(stillPassing).toEqual([])
 
-    expect(actual).toEqual(DELETED_INCLUSIVE_CALL_COUNTS)
+    const anywhere = sourceFiles(API_ROOT)
+      .map((file) => [relative(file), includeDeletedResolverCallCount(file)] as const)
+      .filter(([, count]) => count > 0)
+    expect(anywhere).toEqual([])
   })
 
   it('keeps every order-level seam on the fail-closed all-item ownership predicate', () => {

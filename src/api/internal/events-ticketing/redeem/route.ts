@@ -29,7 +29,6 @@ export async function resolveRedeemSellerOwnership(
   const productIds = await resolveSellerProductIds(
     scope,
     sellerId,
-    { includeDeleted: true },
   )
   return productIds.has(productId)
 }

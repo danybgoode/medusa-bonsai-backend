@@ -9,7 +9,6 @@
  * Returns the full matching set, unpaginated — callers slice for a page
  * (GET route) or cap-and-use-directly for a bulk batch (bulk-stage route).
  */
-import { QueryContext } from '@medusajs/framework/utils'
 import { MERCADOLIBRE_MODULE } from '../../../modules/mercadolibre'
 import MercadolibreModuleService from '../../../modules/mercadolibre/service'
 import { toListingShape, type ListingShape } from './listing'
@@ -81,13 +80,41 @@ const isSobrePedido = (l: { manage_inventory: boolean; allow_backorder: boolean 
  * extraction here didn't introduce the bug, just gave it one call site to
  * fix instead of several.
  */
-export interface ResolveSellerProductIdsOptions {
+/**
+ * ⚠️ `includeDeleted` is GONE. It never worked, and it is why every seller's order
+ * surface was empty or 500ing.
+ *
+ * It built `context: { products: QueryContext({}) }` + `withDeleted: true`, aiming to
+ * make Medusa apply `withDeleted` to the nested relation (which it only does for a
+ * relation carrying a QueryContext). `toRemoteQuery` duly emits
+ * `seller.products.__args.context = {}` — and the Product module has no `context`
+ * argument, so every such call threw:
+ *
+ *     Error: Trying to query by not existing property Product.context
+ *
+ * All 13 call sites were seller-order routes, which is exactly the set of screens
+ * that was broken. The list route swallowed it with a bare `catch` and reported "no
+ * orders"; the detail routes had no catch at all. Diagnosed 2026-08-15 from the live
+ * trace this file's caller now emits, after a wrong first guess — the third time this
+ * codebase has shipped a plausible call shape the API does not accept. See
+ * `a-pure-planner-needs-the-real-call-shape`.
+ *
+ * There is no supported way to ask this relation for soft-deleted rows, so we no
+ * longer pretend to. What we CAN do is measure the gap: a soft-deleted linked product
+ * comes back as a sparse null SLOT (the pivot row outlives the product — see the note
+ * on `productRecords` above), so counting the slots we drop reports exactly how many
+ * product ids a caller is missing. `resolveSellerProductIdsWithSlots` returns that
+ * count instead of a silent omission.
+ */
+
+export interface SellerProductIdResolution {
+  ids: Set<string>
   /**
-   * Order ownership must survive a listing soft-delete. Medusa only applies
-   * top-level `withDeleted` to nested relations when that relation has a
-   * QueryContext, so both pieces below are load-bearing.
+   * Linked products that did not resolve — soft-deleted ones. An order containing
+   * only these is not visible to its seller. Reported, never hidden: this is the
+   * residual gap left by the removal above.
    */
-  includeDeleted?: boolean
+  unresolvedSlots: number
 }
 
 export interface SellerProductMetadataRecord {
@@ -126,54 +153,61 @@ function isResolvedSellerProduct(product: SellerProductSlot): product is SellerP
   return product != null && typeof product.id === 'string'
 }
 
-function productRecords(rows: unknown[] | undefined): SellerProductMetadataRecord[] {
-  const products = (
-    rows?.[0] as { products?: SellerProductSlot[] } | undefined
-  )?.products ?? []
-  return products.filter(isResolvedSellerProduct)
+function productSlots(rows: unknown[] | undefined): SellerProductSlot[] {
+  return (rows?.[0] as { products?: SellerProductSlot[] } | undefined)?.products ?? []
 }
 
-function sellerProductGraphQuery(
-  sellerId: string,
-  fields: string[],
-  options: ResolveSellerProductIdsOptions = {},
-) {
-  const query: Record<string, unknown> = {
+function productRecords(rows: unknown[] | undefined): SellerProductMetadataRecord[] {
+  return productSlots(rows).filter(isResolvedSellerProduct)
+}
+
+function sellerProductGraphQuery(sellerId: string, fields: string[]) {
+  return {
     entity: 'seller',
     fields: ['id', ...fields],
     filters: { id: sellerId },
   }
-
-  if (options.includeDeleted) {
-    query.context = {
-      products: QueryContext({}),
-    }
-    query.withDeleted = true
-  }
-
-  return query
 }
 
 async function graphSellerProductRecords(
   remoteQuery: GraphQueryLike,
   sellerId: string,
   fields: string[],
-  options: ResolveSellerProductIdsOptions = {},
 ): Promise<SellerProductMetadataRecord[]> {
-  const { data: rows } = await remoteQuery.graph({
-    ...sellerProductGraphQuery(sellerId, fields, options),
-  })
+  const { data: rows } = await remoteQuery.graph(sellerProductGraphQuery(sellerId, fields))
   return productRecords(rows)
 }
 
 export async function resolveSellerProductIds(
   scope: any,
   sellerId: string,
-  options: ResolveSellerProductIdsOptions = {},
 ): Promise<Set<string>> {
   const remoteQuery = scope.resolve('remoteQuery') as GraphQueryLike
-  const products = await graphSellerProductRecords(remoteQuery, sellerId, ['products.id'], options)
+  const products = await graphSellerProductRecords(remoteQuery, sellerId, ['products.id'])
   return new Set(products.map((product) => product.id))
+}
+
+/**
+ * Same query, but it also reports how many linked products did NOT resolve.
+ *
+ * That count is the soft-deleted ones (the pivot row outlives the product), and it is
+ * the exact size of the ownership gap left by removing the broken `includeDeleted` —
+ * an order whose every item is a soft-deleted product is invisible to its seller.
+ * Measured and reported rather than asserted or ignored: "how many are we missing" is
+ * a number, and a number can be watched.
+ */
+export async function resolveSellerProductIdsWithSlots(
+  scope: any,
+  sellerId: string,
+): Promise<SellerProductIdResolution> {
+  const remoteQuery = scope.resolve('remoteQuery') as GraphQueryLike
+  const { data: rows } = await remoteQuery.graph(sellerProductGraphQuery(sellerId, ['products.id']))
+  const slots = productSlots(rows)
+  const records = slots.filter(isResolvedSellerProduct)
+  return {
+    ids: new Set(records.map((product) => product.id)),
+    unresolvedSlots: slots.length - records.length,
+  }
 }
 
 /**

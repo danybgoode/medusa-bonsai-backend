@@ -42,7 +42,6 @@ async function resolveOrderForSeller(req: MedusaRequest, orderId: string) {
   const sellerProductIds = await resolveSellerProductIds(
     req.scope,
     sellerAuth.sellerId,
-    { includeDeleted: true },
   )
   if (!sellerOwnsEveryOrderItem(sellerProductIds, order.items)) {
     return { order: null, sellerId: null, code: 403 as const }
