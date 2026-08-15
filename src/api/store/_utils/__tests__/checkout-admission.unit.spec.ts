@@ -38,6 +38,7 @@ function decide(overrides: Partial<CheckoutAdmissionInput> = {}) {
     operating_channel_id: OPERATING,
     marketplace_channel_id: MARKETPLACE,
     owner_market: 'mx',
+    owner_status: 'active',
     market: 'mx',
     owned_shop_only_enabled: true,
     ...overrides,
@@ -227,8 +228,51 @@ describe('decideCheckoutAdmission — the flag decides WHICH RULE, never whether
       { owner_market: null },
       { product: product({ metadata: { is_support_product: true } }) },
       { requested_product_id: 'prod_other' },
+      { owner_status: 'paused' as const },
+      { owner_status: 'deleted' as const },
+      { owner_status: null },
     ]) {
       expect(decide({ owned_shop_only_enabled: true, ...overrides }).admitted).toBe(false)
     }
+  })
+})
+
+describe('the owning seller must be ACTIVE (tenant-lifecycle-admin · D2b)', () => {
+  it('admits a product whose owner is active', () => {
+    expect(decide({ owner_status: 'active' }).admitted).toBe(true)
+  })
+
+  it('REFUSES a paused owner, naming the rule internally', () => {
+    expect(decide({ owner_status: 'paused' }))
+      .toEqual({ admitted: false, refusal: 'owner_not_active' })
+  })
+
+  it('REFUSES a deleted owner', () => {
+    expect(decide({ owner_status: 'deleted' }))
+      .toEqual({ admitted: false, refusal: 'owner_not_active' })
+  })
+
+  it('REFUSES an UNREADABLE status rather than assuming active', () => {
+    // "I could not read the status" is not "the shop is open". The route passes null
+    // when parseSellerStatus refuses the stored value.
+    expect(decide({ owner_status: null }))
+      .toEqual({ admitted: false, refusal: 'owner_not_active' })
+  })
+
+  it('refuses a paused owner EVEN WHEN the product is still in both channels', () => {
+    // This is the whole point of the belt-and-braces design (D2). Pausing unlinks the
+    // products; if a link lingers — a partial unlink, or one recreated by another
+    // path — the money path must still refuse. A test that only paused a seller with
+    // no links would prove nothing about the guarantee.
+    const stillLinked = product({ sales_channels: [{ id: OPERATING }, { id: MARKETPLACE }] })
+    expect(decide({ product: stillLinked, owner_status: 'paused' }))
+      .toEqual({ admitted: false, refusal: 'owner_not_active' })
+  })
+
+  it('the status proof survives the flag being OFF', () => {
+    // The flag chooses WHICH channel rule runs; it must never gate the owner proofs.
+    const inBoth = product({ sales_channels: [{ id: OPERATING }, { id: MARKETPLACE }] })
+    expect(decide({ product: inBoth, owned_shop_only_enabled: false, owner_status: 'paused' }))
+      .toEqual({ admitted: false, refusal: 'owner_not_active' })
   })
 })
