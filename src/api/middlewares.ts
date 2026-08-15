@@ -43,6 +43,10 @@ import {
   recordVerifiedClerkIdentity,
   verifyClerkJwt,
 } from './store/_utils/clerk-verify'
+import { extractClerkUserId } from './store/_utils/clerk-auth'
+import { decidePortalGate } from './store/_utils/seller-portal-gate'
+import { SELLER_MODULE } from '../modules/seller'
+import type SellerModuleService from '../modules/seller/service'
 
 /**
  * Every Store API prefix whose routes read a caller's identity out of a Clerk JWT.
@@ -86,9 +90,69 @@ export async function verifyClerkIdentity(
   return next()
 }
 
+/**
+ * A paused or deleted shop may READ its own portal but may not WRITE through it
+ * (tenant-lifecycle-admin · D2c). The rule and the reasoning live in
+ * `store/_utils/seller-portal-gate.ts`; this is the shell.
+ *
+ * Registered on the `/store/sellers/me` SUBTREE for the same reason the verification
+ * matchers are prefixes: a subtree is a population, and a list of leaves is what goes
+ * stale when someone adds a sibling route. `resolveSeller` has 45 call sites — this
+ * covers every one of them that can mutate, including ones not written yet.
+ *
+ * Runs AFTER `verifyClerkIdentity` (order within the array is preserved), so the
+ * identity it reads is a verified one. An unresolvable seller passes through and the
+ * route answers with its own 401/404 — refusing here would turn "not a seller yet"
+ * into "your account is locked" and break onboarding.
+ */
+export async function gateSellerPortalWrites(
+  req: MedusaRequest,
+  res: MedusaResponse,
+  next: MedusaNextFunction,
+): Promise<void> {
+  // Cheapest check first: a read never needs the seller row at all.
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes((req.method ?? '').toUpperCase())) {
+    return next()
+  }
+
+  const clerkUserId = extractClerkUserId(req)
+  if (!clerkUserId) return next()
+
+  let seller: { status?: unknown } | null | 'unavailable' = null
+  try {
+    const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
+    const [row] = await sellerService.listSellers({ clerk_user_id: clerkUserId } as never, { take: 1 })
+    seller = (row as { status?: unknown } | undefined) ?? null
+  } catch (e) {
+    // FAIL CLOSED. An earlier revision called next() here, reasoning that a gate
+    // firing on a database blip was worse than one that occasionally missed — wrong
+    // trade for a WRITE gate, because inducing a transient failure would then grant
+    // exactly the mutation this gate exists to prohibit. The caller gets a retryable
+    // 503 that says so, never a 423 claiming their account is paused.
+    // `(e as Error).message` throws on a null/undefined rejection, which would skip
+    // the fail-closed assignment below and 500 instead — a different bypass of the
+    // same gate.
+    console.error('[portal-gate] seller read threw:', e instanceof Error ? e.message : String(e))
+    seller = 'unavailable'
+  }
+
+  const refusal = decidePortalGate({ method: req.method, seller })
+  if (refusal) {
+    res.status(refusal.status).json(refusal.body)
+    return
+  }
+  return next()
+}
+
 export default defineMiddlewares({
-  routes: CLERK_VERIFIED_MATCHERS.map((matcher) => ({
-    matcher,
-    middlewares: [verifyClerkIdentity],
-  })),
+  routes: [
+    ...CLERK_VERIFIED_MATCHERS.map((matcher) => ({
+      matcher,
+      middlewares: [verifyClerkIdentity],
+    })),
+    {
+      matcher: '/store/sellers/me',
+      middlewares: [gateSellerPortalWrites],
+    },
+  ],
 })

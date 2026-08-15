@@ -66,6 +66,7 @@ import {
   resolveRequestedMarket,
 } from './market-read'
 import { isHiddenCatalogProduct } from './support'
+import { sellerAdmits, type SellerStatus } from '../../../lib/seller-status'
 
 /**
  * The gate a checkout-admission read passes before it queries anything.
@@ -196,6 +197,7 @@ export type AdmissionRefusal =
   | 'not_in_marketplace_channel'
   | 'owner_unresolved'
   | 'owner_other_market'
+  | 'owner_not_active'
 
 export type CheckoutAdmissionDecision =
   | {
@@ -215,6 +217,20 @@ export interface CheckoutAdmissionInput {
   readonly marketplace_channel_id: string | null
   /** The OWNING seller's operating market; `null` when it could not be resolved. */
   readonly owner_market: MarketCode | null
+  /**
+   * The OWNING seller's lifecycle status (tenant-lifecycle-admin · D2b).
+   *
+   * `null` means the value could not be read — which REFUSES, exactly like an
+   * unresolvable owner market does. A shop whose status we cannot read is not a shop
+   * we may sell from.
+   *
+   * This is the money-path GUARANTEE, and it is deliberately redundant with the
+   * mechanism: pausing also unlinks the seller's products from every market channel,
+   * which removes them from the catalog by construction. If a channel link ever
+   * lingers — a partial unlink, a link recreated by another path — checkout still
+   * refuses here. Belt and braces on the one path where being wrong costs money.
+   */
+  readonly owner_status: SellerStatus | null
   readonly market: MarketCode
   /** `catalog.owned_shop_only_enabled` (D8). OFF ⇒ marketplace membership is still required. */
   readonly owned_shop_only_enabled: boolean
@@ -233,6 +249,7 @@ export function decideCheckoutAdmission(input: CheckoutAdmissionInput): Checkout
     operating_channel_id: operatingChannelId,
     marketplace_channel_id: marketplaceChannelId,
     owner_market: ownerMarket,
+    owner_status: ownerStatus,
     market,
     owned_shop_only_enabled: ownedShopOnly,
   } = input
@@ -268,6 +285,11 @@ export function decideCheckoutAdmission(input: CheckoutAdmissionInput): Checkout
   }
   if (ownerMarket !== market) {
     return { admitted: false, refusal: 'owner_other_market' }
+  }
+  // Sits with the other OWNER proofs, after the market check: both are facts about
+  // the owning seller rather than the product, and both fail closed.
+  if (!sellerAdmits(ownerStatus)) {
+    return { admitted: false, refusal: 'owner_not_active' }
   }
 
   const inOperating = productInMarketplaceChannel(product, operatingChannelId)

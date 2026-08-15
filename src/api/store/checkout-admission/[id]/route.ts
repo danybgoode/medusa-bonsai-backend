@@ -50,6 +50,13 @@
  * seller-private is read out: the owning seller's row is consulted ONLY for
  * `metadata.operating_market`, through `readSellerOperatingMarket`, and never echoed.
  *
+ * ── THE OWNING SELLER MUST BE ACTIVE (tenant-lifecycle-admin · D2b) ────────────
+ * A paused or deleted shop is refused here, per-object, against the owning seller's
+ * own row. This is the money-path GUARANTEE and it is deliberately redundant with
+ * the mechanism — pausing also unlinks the seller's products from every market
+ * channel, which removes them from the catalog by construction. If a link ever
+ * lingers, checkout still refuses. An unreadable status refuses too.
+ *
  * ── THE FLAG IS NOT THE AUTHORIZATION (AGENTS rule 5) ──────────────────────────
  * `catalog.owned_shop_only_enabled` decides WHICH RULE runs (operating-only, or
  * operating AND marketplace as today). Both rules are per-object authorization
@@ -63,6 +70,7 @@ import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
 import { isEnabled } from '../../../../lib/flags'
 import { readSellerOperatingMarket } from '../../../../lib/seller-market'
+import { requireSellerStatus, type SellerStatus } from '../../../../lib/seller-status'
 import type { MarketCode } from '../../../../lib/markets'
 import {
   ADMISSION_NOT_FOUND_MESSAGE,
@@ -95,7 +103,12 @@ import type { MarketUnavailableBody } from '../../_utils/market-read'
  * outage and must NOT be served as a refusal.
  */
 type OwnerMarketRead =
-  | { readonly status: 'resolved'; readonly market: MarketCode | null }
+  | {
+      readonly status: 'resolved'
+      readonly market: MarketCode | null
+      /** The owner's lifecycle status; `null` when unreadable, which REFUSES. */
+      readonly sellerStatus: SellerStatus | null
+    }
   | { readonly status: 'absent' }
   | { readonly status: 'unavailable'; readonly reason: string }
 
@@ -108,12 +121,20 @@ async function ownerMarketFor(
       entity: 'product',
       // `seller.metadata` is read ONLY by `readSellerOperatingMarket` below and is
       // never echoed — the bag also carries Stripe Connect ids and payout config.
-      fields: ['id', 'seller.id', 'seller.metadata'],
+      // `seller.status` rides along on the query that already runs — the owner row is
+      // being read anyway, so the money-path status proof costs nothing extra.
+      fields: ['id', 'seller.id', 'seller.metadata', 'seller.status'],
       filters: { id: productId },
     })
     const seller = (data?.[0] as { seller?: unknown } | undefined)?.seller
     if (!seller) return { status: 'absent' }
-    return { status: 'resolved', market: readSellerOperatingMarket(seller).market }
+    return {
+      status: 'resolved',
+      market: readSellerOperatingMarket(seller).market,
+      // STRICT: an absent `status` here can only mean the field list above stopped
+      // selecting it, and defaulting that to active would re-open every paused shop.
+      sellerStatus: requireSellerStatus((seller as { status?: unknown }).status),
+    }
   } catch (e) {
     // THREE STATES, NEVER TWO. This used to `return null`, which the decision below
     // reads as "no resolvable owner" ⇒ a uniform 404. That collapses an OUTAGE into
@@ -179,6 +200,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const ownerMarket = ownerRead.status === 'resolved' ? ownerRead.market : null
+  const ownerStatus = ownerRead.status === 'resolved' ? ownerRead.sellerStatus : null
 
   const decision = decideCheckoutAdmission({
     requested_product_id: id,
@@ -186,6 +208,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     operating_channel_id: gate.operating_channel_id,
     marketplace_channel_id: gate.marketplace_channel_id,
     owner_market: ownerMarket,
+    owner_status: ownerStatus,
     market: gate.market,
     owned_shop_only_enabled: ownedShopOnly,
   })

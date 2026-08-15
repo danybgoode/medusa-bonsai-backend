@@ -34,6 +34,7 @@ import {
   planStripeMarketStrategy,
 } from '../../../../../lib/stripe-market-strategy'
 import { readSellerOperatingMarket } from '../../../../../lib/seller-market'
+import { sellerRowEnforcement } from '../../../../../lib/seller-status'
 import { admitUsDelivery } from '../../../_utils/us-delivery-admission'
 import { resolveRegionIdForMarket } from '../../../../../lib/market-medusa'
 
@@ -435,6 +436,29 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     productMetadata,
     isSupportCheckout: !!supportCheckout,
   })
+
+  // ── The selling shop must be ACTIVE (tenant-lifecycle-admin · D2b) ──────────
+  //
+  // THE authoritative money gate for a pause. `/store/checkout-admission/:id` is an
+  // OFFER gate the storefront consults — it cannot bind a caller who skips it, and
+  // `POST /store/carts/:id/line-items` enforces no membership of any kind (a
+  // pre-existing gap this epic inherits, recorded as owed by the owned-shop epic).
+  // This route is different: it is where a cart becomes a payment session, so
+  // refusing here means a paused shop cannot be paid regardless of how the cart was
+  // assembled — through the storefront, the UCP/MCP surface, or a direct API call.
+  //
+  // Checked against the seller that would RECEIVE the money, which is the correct
+  // authorization subject for "may this shop transact".
+  // A seller that does not resolve is NOT treated as paused — that is a different
+  // problem with its own handling below, and reporting it as "this shop is paused"
+  // would misdescribe it.
+  const sellerGate = sellerRowEnforcement(seller)
+  if (sellerGate.present && !sellerGate.admits) {
+    return res.status(409).json({
+      code: 'seller_not_active',
+      message: 'Esta tienda no está disponible en este momento.',
+    })
+  }
 
   const currency = (cart.currency_code ?? 'mxn').toLowerCase()
   // A plain listCarts may not compute `total`; fall back to summing line items
