@@ -42,7 +42,7 @@
  * reading `paused` while its products are still on sale.
  */
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
-import { ContainerRegistrationKeys } from '@medusajs/framework/utils'
+import { ContainerRegistrationKeys, Modules } from '@medusajs/framework/utils'
 import { internalSecretOk } from '../../../../../lib/internal-auth'
 import { decideStatusTransition, parseSellerStatus } from '../../../../../lib/seller-status'
 import {
@@ -182,9 +182,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     dismiss: (input: unknown) => Promise<unknown>
     create: (input: unknown) => Promise<unknown>
   }
+  /**
+   * The link payload shape.
+   *
+   * `Modules.PRODUCT` / `Modules.SALES_CHANNEL`, NOT the invented `productService` /
+   * `salesChannelService` keys the first revision used. Those threw
+   * "Module to type productService and salesChannelService … was not found" on every
+   * single unlink — and only a LIVE run surfaced it, because the pure planner is
+   * correct and every unit test passes against it. The working idiom is in
+   * `internal/fix-fulfillment/route.ts`, which links the same way.
+   */
   const asLink = (entry: ChannelLink) => ({
-    productService: { product_id: entry.product_id },
-    salesChannelService: { sales_channel_id: entry.sales_channel_id },
+    [Modules.PRODUCT]: { product_id: entry.product_id },
+    [Modules.SALES_CHANNEL]: { sales_channel_id: entry.sales_channel_id },
   })
 
   const metadata = { ...((seller.metadata ?? {}) as Record<string, unknown>) }
@@ -226,13 +236,31 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     await sellerService.updateSellers({ id, metadata } as never)
   }
 
-  await sellerService.updateSellers({ id, status: plan.transition.to } as never)
+  // ── THE STATUS FLIPS ONLY IF THE WORK IT DESCRIBES ACTUALLY HAPPENED ────────
+  //
+  // A live run exposed this: every unlink failed on a bad module key, and the status
+  // flipped to `paused` anyway — a shop reading "paused" while its products were
+  // still in the catalog, which is precisely the lying-admin failure this epic exists
+  // to prevent. The header promised the opposite ordering guarantee and the code did
+  // not implement it.
+  //
+  // A pause whose unlinks ALL failed did nothing, so it must not claim the state. A
+  // PARTIAL failure still flips — the shop is partly dark, the ledger holds what was
+  // recorded, and re-running finishes the job — but it reports `complete: false`.
+  const attempted = plan.unlink.length + plan.relink.length
+  const allWorkFailed = attempted > 0 && failures.length === attempted
+  if (!allWorkFailed) {
+    await sellerService.updateSellers({ id, status: plan.transition.to } as never)
+  }
 
   const complete = plan.complete && failures.length === 0
   res.json({
     ok: true,
     from: plan.transition.from,
-    to: plan.transition.to,
+    // The status the seller ACTUALLY holds now — not the requested one. Reporting the
+    // target after a refused flip would be the same lie one field over.
+    to: allWorkFailed ? plan.transition.from : plan.transition.to,
+    status_changed: !allWorkFailed,
     reason,
     unlinked: plan.unlink.length - failures.filter((f) => f.startsWith('unlink')).length,
     restored: plan.relink.length - failures.filter((f) => f.startsWith('relink')).length,
