@@ -23,10 +23,40 @@ import { readRentalBooking, deriveRentalBookingState } from '../../../../../lib/
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerAuth = await resolveSeller(req)
   if (!sellerAuth) return res.status(401).json({ message: 'Unauthorized' })
-  const { sellerId, sellerName } = sellerAuth
+  const { sellerId, sellerName, sellerClerkUserId } = sellerAuth
 
-  const orders = await listOrdersForSeller(req.scope, sellerId, sellerName)
+  const orders = await listOrdersForSeller(req.scope, sellerId, sellerName, { sellerClerkUserId })
   return res.json({ orders, seller_id: sellerId })
+}
+
+/**
+ * Per-stage record of what `listOrdersForSeller` actually did.
+ *
+ * This exists because the function degrades to `[]` at four different points and
+ * used to do so SILENTLY — an empty seller order list read identically whether the
+ * seller genuinely had no orders, the product resolve threw, the SQL threw, or the
+ * ownership filter rejected everything. "No orders" and "I could not tell" are
+ * different facts and collapsing them cost a live diagnosis (2026-08-15: every
+ * seller's order page was empty and nothing anywhere said why).
+ */
+export type SellerOrderTrace = {
+  seller_product_ids?: number
+  seller_product_error?: string
+  matched_order_ids?: number
+  order_query_error?: string
+  orders_fetched?: number
+  orders_after_ownership_filter?: number
+}
+
+export type ListOrdersForSellerOptions = {
+  /**
+   * The seller's Clerk id, so the normalized order can address a notification at
+   * them. Absent ⇒ `null` on the wire, which is the honest answer for a caller
+   * that genuinely does not know it — not a default that looks like an answer.
+   */
+  sellerClerkUserId?: string | null
+  /** Optional collector; mutated in place. See `SellerOrderTrace`. */
+  trace?: SellerOrderTrace
 }
 
 /**
@@ -40,7 +70,10 @@ export async function listOrdersForSeller(
   scope: MedusaContainer,
   sellerId: string,
   sellerName: string,
+  options: ListOrdersForSellerOptions = {},
 ): Promise<ReturnType<typeof normalizeMedusaOrder>[]> {
+  const { sellerClerkUserId = null, trace } = options
+
   // ── Get seller's product IDs ──────────────────────────────────────────────
   let sellerProductIds = new Set<string>()
   try {
@@ -49,10 +82,16 @@ export async function listOrdersForSeller(
       sellerId,
       { includeDeleted: true },
     )
-  } catch {
+  } catch (e) {
+    // Degrade, never die — but SAY SO. This catch was bare for months and turned
+    // a hard failure into "this seller has no orders", which is a confident
+    // falsehood on the one screen a merchant uses to see they made a sale.
+    console.error('[seller/me/orders] seller product resolve error:', e)
+    if (trace) trace.seller_product_error = String(e)
     return []
   }
 
+  if (trace) trace.seller_product_ids = sellerProductIds.size
   if (!sellerProductIds.size) return []
   const productIds = [...sellerProductIds]
 
@@ -76,6 +115,7 @@ export async function listOrdersForSeller(
       .map((r) => r.order_id)
       .filter(Boolean) as string[]
 
+    if (trace) trace.matched_order_ids = orderIds.length
     if (!orderIds.length) return []
 
     // Step 2: fetch full order objects via the Remote Query (query.graph). Using
@@ -95,12 +135,17 @@ export async function listOrdersForSeller(
     orders = data ?? []
   } catch (e) {
     console.error('[seller/me/orders] order query error:', e)
+    if (trace) trace.order_query_error = String(e)
   }
 
+  if (trace) trace.orders_fetched = (orders as unknown[]).length
+
   // ── Normalize to legacy shape ─────────────────────────────────────────────
-  return (orders as any[])
+  const owned = (orders as any[])
     .filter((order) => sellerOwnsEveryOrderItem(sellerProductIds, order.items))
-    .map(o => normalizeMedusaOrder(o, sellerId, sellerName))
+  if (trace) trace.orders_after_ownership_filter = owned.length
+
+  return owned.map(o => normalizeMedusaOrder(o, sellerId, sellerName, sellerClerkUserId))
 }
 
 // ── Normalization helper ──────────────────────────────────────────────────────
@@ -109,6 +154,17 @@ export function normalizeMedusaOrder(
   order: Record<string, unknown>,
   sellerId: string,
   sellerName: string,
+  /**
+   * The owning seller's Clerk id. Load-bearing, not decoration: the storefront
+   * addresses every seller notification (email / push / Telegram) by Clerk id, and
+   * this field is the ONLY place a Medusa-backed order carries one. It was
+   * hardcoded `null` here, so `dispatchToSeller` never fired for any `order_` id —
+   * a buyer could report a payment and the seller was never told (2026-08-15).
+   *
+   * Defaults to `null` because a caller that does not know it must say so rather
+   * than send a plausible-looking wrong value; callers that DO know it must pass it.
+   */
+  sellerClerkUserId: string | null = null,
 ) {
   const item = (order.items as any[])?.[0]
   const sa = order.shipping_address as Record<string, string> | undefined
@@ -409,7 +465,7 @@ export function normalizeMedusaOrder(
       id: sellerId,
       name: sellerName,
       slug: '',
-      clerk_user_id: null,
+      clerk_user_id: sellerClerkUserId,
       metadata: null,
     },
     marketplace_shipments: (() => {

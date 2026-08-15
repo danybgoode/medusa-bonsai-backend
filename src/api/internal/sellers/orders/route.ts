@@ -15,7 +15,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../modules/seller'
 import SellerModuleService from '../../../../modules/seller/service'
-import { listOrdersForSeller } from '../../../store/sellers/me/orders/route'
+import { listOrdersForSeller, type SellerOrderTrace } from '../../../store/sellers/me/orders/route'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -33,6 +33,16 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const [seller] = await sellerService.listSellers({ slug } as never, { take: 1 })
   if (!seller) return res.status(404).json({ message: 'Seller not found' })
 
-  const orders = await listOrdersForSeller(req.scope, seller.id, seller.name)
-  res.json({ orders, seller_id: seller.id })
+  // `?trace=1` reports WHICH of the four degrade-to-empty points was taken, so an
+  // empty result can be told apart from a failure that produced an empty result.
+  // Read-only and derived from the same call — never a second query, which would
+  // diagnose a different thing than the one that ran.
+  const wantTrace = req.query.trace === '1' || req.query.trace === 'true'
+  const trace: SellerOrderTrace | undefined = wantTrace ? {} : undefined
+
+  const orders = await listOrdersForSeller(req.scope, seller.id, seller.name, {
+    sellerClerkUserId: seller.clerk_user_id ?? null,
+    trace,
+  })
+  res.json({ orders, seller_id: seller.id, ...(trace ? { trace } : {}) })
 }

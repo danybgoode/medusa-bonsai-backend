@@ -58,22 +58,33 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return res.status(404).json({ message: 'Order not found' })
   }
 
-  // ── Enrich the seller name from the first item's product → seller link ────
+  // ── Enrich the seller from the first item's product → seller link ─────────
+  //
+  // `seller.clerk_user_id` is read here, not just the name, because this route is
+  // what the storefront's `resolveSellerForOrder` calls before notifying a seller
+  // that their buyer reported a payment. Omitting it made that lookup return null
+  // and the seller was never told a sale had happened (2026-08-15).
   let sellerId = ''
   let sellerName = ''
+  let sellerClerkUserId: string | null = null
   const firstProductId = ((order.items as any[]) ?? [])[0]?.product_id as string | undefined
   if (firstProductId) {
     try {
       const { data } = await query.graph({
         entity: 'product',
-        fields: ['id', 'seller.id', 'seller.name'],
+        fields: ['id', 'seller.id', 'seller.name', 'seller.clerk_user_id'],
         filters: { id: firstProductId },
       })
       const seller = (data?.[0] as any)?.seller
       sellerId = seller?.id ?? ''
       sellerName = seller?.name ?? ''
+      // An unclaimed (supply-imported) shop genuinely has no Clerk owner. Keep that
+      // as null rather than '' — "nobody to notify" is a fact, not an empty string.
+      sellerClerkUserId = typeof seller?.clerk_user_id === 'string' && seller.clerk_user_id
+        ? seller.clerk_user_id
+        : null
     } catch { /* seller enrichment is best-effort */ }
   }
 
-  return res.json({ order: normalizeMedusaOrder(order, sellerId, sellerName) })
+  return res.json({ order: normalizeMedusaOrder(order, sellerId, sellerName, sellerClerkUserId) })
 }
