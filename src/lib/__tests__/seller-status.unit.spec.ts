@@ -2,6 +2,7 @@ import {
   DEFAULT_SELLER_STATUS,
   SELLER_STATUSES,
   requireSellerStatus,
+  sellerRowEnforcement,
   decideStatusTransition,
   isSellerStatus,
   parseSellerStatus,
@@ -156,5 +157,31 @@ describe('transition effects', () => {
     const transition = { from: 'paused', to: 'deleted' } as const
     expect(transitionUnlinks(transition)).toBe(false)
     expect(transitionRelinks(transition)).toBe(false)
+  })
+})
+
+describe('sellerRowEnforcement — the money/mutation form', () => {
+  it('admits an active row', () => {
+    expect(sellerRowEnforcement({ status: 'active' })).toEqual({ present: true, admits: true })
+  })
+
+  it('refuses paused and deleted', () => {
+    for (const status of ['paused', 'deleted']) {
+      expect(sellerRowEnforcement({ status })).toEqual({ present: true, admits: false })
+    }
+  })
+
+  it('refuses an ABSENT status, unlike the lenient sellerRowAdmits', () => {
+    // The difference that matters on a money path: an absent column means the query
+    // stopped selecting it, not that the shop is fine.
+    expect(sellerRowAdmits({})).toBe(true)
+    expect(sellerRowEnforcement({})).toEqual({ present: true, admits: false })
+  })
+
+  it('reports a MISSING ROW as absent rather than refused', () => {
+    // "There is nothing to judge" is not "this shop is paused". A checkout with no
+    // resolvable seller is a different problem, and the caller decides.
+    expect(sellerRowEnforcement(null)).toEqual({ present: false })
+    expect(sellerRowEnforcement(undefined)).toEqual({ present: false })
   })
 })

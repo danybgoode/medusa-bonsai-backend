@@ -90,6 +90,23 @@ export function sellerRowAdmits(row: { status?: unknown } | null | undefined): b
   return sellerAdmits(parseSellerStatus(row.status))
 }
 
+/**
+ * The ENFORCEMENT form of `sellerRowAdmits`, for money and mutation paths.
+ *
+ * Two differences, both deliberate:
+ *  · an ABSENT `status` refuses (see `requireSellerStatus`) rather than defaulting;
+ *  · a MISSING ROW returns `null` — "there is nothing to judge" — instead of `false`,
+ *    so the caller decides. A checkout with no resolvable seller is a different
+ *    problem with its own existing handling, and turning it into "this shop is
+ *    paused" would misreport it.
+ */
+export function sellerRowEnforcement(
+  row: { status?: unknown } | null | undefined,
+): { readonly present: false } | { readonly present: true; readonly admits: boolean } {
+  if (!row) return { present: false }
+  return { present: true, admits: sellerAdmits(requireSellerStatus(row.status)) }
+}
+
 export type SellerStatusTransition = {
   from: SellerStatus
   to: SellerStatus
