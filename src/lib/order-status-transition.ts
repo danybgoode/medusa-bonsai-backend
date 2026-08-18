@@ -30,6 +30,88 @@ export type OrderStatusTransitionBody = {
   tracking_number?: string
 }
 
+export type OrderStatusTransitionPlan = {
+  current_status: string
+  proposed_status: string
+  eligible: boolean
+  reason: string | null
+}
+
+/**
+ * The canonical seller-facing lifecycle status. `normalizeMedusaOrder` imports
+ * this function too, so preview cannot quietly describe a different current
+ * state from the order inbox.
+ */
+export function deriveOrderLifecycleStatus(order: Record<string, unknown>): string {
+  const meta = (order.metadata ?? {}) as Record<string, unknown>
+  const paymentMethod = (meta.payment_method as string) ?? null
+  const manual = ['manual', 'spei', 'cash', 'dimo'].includes(paymentMethod ?? '')
+  const paymentStatus = (order.payment_status as string) ?? ''
+  const captured = paymentStatus === 'captured' || paymentStatus === 'partially_captured'
+  const refundedOrCanceled =
+    order.status === 'canceled' ||
+    paymentStatus === 'refunded' ||
+    order.fulfillment_status === 'returned'
+
+  if (refundedOrCanceled) return 'refunded'
+  if (manual && !captured && meta.payment_received !== true) return 'pending_payment'
+  if (typeof meta.fulfillment_state === 'string') return meta.fulfillment_state
+  if (order.fulfillment_status === 'delivered') return 'delivered'
+  if (order.fulfillment_status === 'shipped' || order.fulfillment_status === 'fulfilled') return 'shipped'
+  if (order.fulfillment_status === 'partially_fulfilled') return 'processing'
+  return 'paid'
+}
+
+/**
+ * Pure transition ledger shared by preview and apply. `expectedStatus` is the
+ * state the seller actually reviewed; it never grants access, it only lets a
+ * later live read fail stale instead of applying a now-different row.
+ */
+export function planOrderStatusTransition(args: {
+  order: Record<string, unknown>
+  newStatus: string
+  body?: OrderStatusTransitionBody
+  expectedStatus?: string
+}): OrderStatusTransitionPlan {
+  const { order, newStatus, body = {}, expectedStatus } = args
+  const meta = (order.metadata ?? {}) as Record<string, unknown>
+  const currentStatus = deriveOrderLifecycleStatus(order)
+  const refuse = (reason: string): OrderStatusTransitionPlan => ({
+    current_status: currentStatus,
+    proposed_status: newStatus,
+    eligible: false,
+    reason,
+  })
+
+  if (expectedStatus !== undefined && expectedStatus !== currentStatus) {
+    return refuse(`El pedido cambió de ${expectedStatus} a ${currentStatus} después de la previsualización.`)
+  }
+  if (expectedStatus !== undefined && currentStatus === newStatus) {
+    return refuse('El pedido ya tiene este estado.')
+  }
+
+  const payment = isOrderEligibleForBulkStatus(meta, newStatus)
+  if (!payment.eligible) return refuse(payment.reason)
+
+  const shipment = (meta.shipment ?? {}) as Record<string, unknown>
+  const gap = manualCarrierShipmentGap({
+    fulfillmentMethod: meta.fulfillment_method as string | undefined,
+    newStatus,
+    carrier: body.carrier ?? shipment.carrier as string | undefined,
+    trackingNumber: body.tracking_number ?? shipment.tracking_number as string | undefined,
+  })
+  if (gap.missing.length > 0) {
+    return refuse(`Los pedidos con envío del vendedor necesitan una paquetería y un número de guía antes de marcarse como enviados. Falta: ${gap.missing.join(', ')}.`)
+  }
+
+  return {
+    current_status: currentStatus,
+    proposed_status: newStatus,
+    eligible: true,
+    reason: null,
+  }
+}
+
 /**
  * Pure — the manual-payment eligibility gate, extracted so the bulk-status
  * endpoint's "ineligible order reports why" acceptance is unit-testable
@@ -56,16 +138,15 @@ export async function applyOrderStatusTransition(
     order: Record<string, unknown>
     newStatus: string
     body?: OrderStatusTransitionBody
+    expectedStatus?: string
   },
 ): Promise<{ ok: true } | { ok: false; status: 422 | 500; message: string }> {
-  const { orderId, order, newStatus, body = {} } = args
+  const { orderId, order, newStatus, body = {}, expectedStatus } = args
   const orderService = (scope as any).resolve(Modules.ORDER) as any
   const meta = (order.metadata ?? {}) as Record<string, any>
 
-  const eligibility = isOrderEligibleForBulkStatus(meta, newStatus)
-  if (!eligibility.eligible) {
-    return { ok: false, status: 422, message: eligibility.reason }
-  }
+  const plan = planOrderStatusTransition({ order, newStatus, body, expectedStatus })
+  if (!plan.eligible) return { ok: false, status: 422, message: plan.reason ?? 'Transition not allowed' }
 
   // us-marketplace S4.2 (D16) — a `manual_carrier` order may not be marked shipped
   // without a real carrier and tracking number.
@@ -76,21 +157,6 @@ export async function applyOrderStatusTransition(
   // you the tracking number" — shipping one without tracking makes the order page,
   // the email and the chat ledger all state something untrue. Checked BEFORE any
   // workflow runs or metadata is written, so a refusal leaves no partial shipment.
-  const gap = manualCarrierShipmentGap({
-    fulfillmentMethod: meta.fulfillment_method as string | undefined,
-    newStatus,
-    carrier: body.carrier ?? (meta.shipment as Record<string, unknown> | undefined)?.carrier as string | undefined,
-    trackingNumber:
-      body.tracking_number ?? (meta.shipment as Record<string, unknown> | undefined)?.tracking_number as string | undefined,
-  })
-  if (gap.missing.length > 0) {
-    return {
-      ok: false,
-      status: 422,
-      message: `Seller-shipped orders need a carrier and a tracking number before they can be marked shipped. Missing: ${gap.missing.join(', ')}.`,
-    }
-  }
-
   const prevShipment = (meta.shipment ?? {}) as Record<string, any>
   const now = new Date().toISOString()
 

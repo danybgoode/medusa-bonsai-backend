@@ -19,6 +19,7 @@ import {
   sellerOwnsEveryOrderItem,
 } from '../../../_utils/seller-catalog-query'
 import { readRentalBooking, deriveRentalBookingState } from '../../../../../lib/rental-booking'
+import { deriveOrderLifecycleStatus } from '../../../../../lib/order-status-transition'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerAuth = await resolveSeller(req)
@@ -220,11 +221,6 @@ export function normalizeMedusaOrder(
   // Money that was given back (or never taken). Extracted so `status` below and
   // `payment_captured` further down cannot drift apart — they were duplicated conditions
   // once and disagreed for manual payments.
-  const isRefundedOrCanceled =
-    order.status === 'canceled' ||
-    (order.payment_status as string) === 'refunded' ||
-    (order.fulfillment_status as string) === 'returned'
-
   // `payment_captured` below: did the MONEY land, and has it been given back?
   //
   // Strictly a payment fact. An earlier revision gated this on `isRefundedOrCanceled`,
@@ -248,22 +244,7 @@ export function normalizeMedusaOrder(
     !isPaymentRefunded &&
     (isCaptured || isPartiallyRefunded || (isManualPay && manualConfirmed))
 
-  // Map to our status vocabulary. Refund/cancel wins; then manual-pending; then the
-  // explicit lifecycle state we persist (seller PATCH), then Medusa fulfillment.
-  let status = 'paid'
-  if (isRefundedOrCanceled) {
-    status = 'refunded'
-  } else if (isManualPay && !isCaptured && !manualConfirmed) {
-    status = 'pending_payment'
-  } else if (typeof metadata.fulfillment_state === 'string') {
-    status = metadata.fulfillment_state as string
-  } else if ((order.fulfillment_status as string) === 'delivered') {
-    status = 'delivered'
-  } else if (['shipped', 'fulfilled'].includes(order.fulfillment_status as string)) {
-    status = 'shipped'
-  } else if ((order.fulfillment_status as string) === 'partially_fulfilled') {
-    status = 'processing'
-  }
+  const status = deriveOrderLifecycleStatus(order)
 
   // Manual-payment state machine (mirrors the frontend lib/manual-payment-state.ts
   // vocabulary so the UCP/MCP order object an agent reads carries the same state).

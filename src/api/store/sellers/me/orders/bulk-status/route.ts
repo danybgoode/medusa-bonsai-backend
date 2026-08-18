@@ -26,26 +26,24 @@ import {
   sellerOwnsEveryOrderItem,
 } from '../../../../_utils/seller-catalog-query'
 import { applyOrderStatusTransition } from '../../../../../../lib/order-status-transition'
-
-const MAX_BULK_ORDERS = 50
-const BULK_ALLOWED_STATUSES = new Set(['processing', 'shipped', 'delivered'])
+import {
+  BULK_ALLOWED_STATUSES,
+  MAX_BULK_ORDERS,
+  parseBulkStatusRequest,
+} from '../_utils/bulk-status-contract'
 
 export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   const seller = await resolveSeller(req)
   if (!seller) return res.status(401).json({ message: 'Unauthorized' })
 
-  const body = req.body as { order_ids?: unknown; status?: string }
-  const orderIds = Array.isArray(body.order_ids)
-    ? body.order_ids.filter((id): id is string => typeof id === 'string')
-    : []
-  const newStatus = body.status
+  const { orderIds, newStatus, expectedStatuses } = parseBulkStatusRequest(req.body)
 
-  if (!orderIds.length) return res.status(400).json({ message: 'order_ids is required' })
+  if (!orderIds.length) return res.status(400).json({ message: 'Se requiere order_ids.' })
   if (orderIds.length > MAX_BULK_ORDERS) {
     return res.status(400).json({ message: `No se pueden actualizar más de ${MAX_BULK_ORDERS} pedidos a la vez.` })
   }
   if (!newStatus || !BULK_ALLOWED_STATUSES.has(newStatus)) {
-    return res.status(422).json({ message: `Unsupported bulk status: ${newStatus}` })
+    return res.status(422).json({ message: `Estado de lote no compatible: ${newStatus}` })
   }
 
   const orderService = req.scope.resolve(Modules.ORDER) as any
@@ -62,21 +60,26 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
   for (const orderId of orderIds) {
     try {
       const order = await orderService.retrieveOrder(orderId, {
-        select: ['id', 'metadata'],
+        select: ['id', 'status', 'payment_status', 'fulfillment_status', 'metadata'],
         relations: ['items', 'fulfillments'],
       }).catch(() => null)
 
       if (!order) {
-        skipped.push({ order_id: orderId, reason: 'Pedido no encontrado.' })
+        skipped.push({ order_id: orderId, reason: 'Pedido no encontrado o no disponible.' })
         continue
       }
 
       if (!sellerOwnsEveryOrderItem(sellerProductIds, order.items)) {
-        skipped.push({ order_id: orderId, reason: 'Este pedido no te pertenece.' })
+        skipped.push({ order_id: orderId, reason: 'Pedido no encontrado o no disponible.' })
         continue
       }
 
-      const result = await applyOrderStatusTransition(req.scope, { orderId, order, newStatus })
+      const result = await applyOrderStatusTransition(req.scope, {
+        orderId,
+        order,
+        newStatus,
+        expectedStatus: expectedStatuses[orderId],
+      })
       if (!result.ok) {
         skipped.push({ order_id: orderId, reason: result.message })
         continue
