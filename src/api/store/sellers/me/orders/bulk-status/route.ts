@@ -38,12 +38,12 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
 
   const { orderIds, newStatus, expectedStatuses } = parseBulkStatusRequest(req.body)
 
-  if (!orderIds.length) return res.status(400).json({ message: 'order_ids is required' })
+  if (!orderIds.length) return res.status(400).json({ message: 'Se requiere order_ids.' })
   if (orderIds.length > MAX_BULK_ORDERS) {
     return res.status(400).json({ message: `No se pueden actualizar más de ${MAX_BULK_ORDERS} pedidos a la vez.` })
   }
   if (!newStatus || !BULK_ALLOWED_STATUSES.has(newStatus)) {
-    return res.status(422).json({ message: `Unsupported bulk status: ${newStatus}` })
+    return res.status(422).json({ message: `Estado de lote no compatible: ${newStatus}` })
   }
 
   const orderService = req.scope.resolve(Modules.ORDER) as any

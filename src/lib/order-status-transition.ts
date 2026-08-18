@@ -101,7 +101,7 @@ export function planOrderStatusTransition(args: {
     trackingNumber: body.tracking_number ?? shipment.tracking_number as string | undefined,
   })
   if (gap.missing.length > 0) {
-    return refuse(`Seller-shipped orders need a carrier and a tracking number before they can be marked shipped. Missing: ${gap.missing.join(', ')}.`)
+    return refuse(`Los pedidos con envío del vendedor necesitan una paquetería y un número de guía antes de marcarse como enviados. Falta: ${gap.missing.join(', ')}.`)
   }
 
   return {

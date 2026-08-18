@@ -2,6 +2,8 @@ import { parseBulkStatusRequest } from '../bulk-status-contract'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+const TEST_DIR = __dirname
+
 describe('parseBulkStatusRequest', () => {
   it('deduplicates ids and keeps only string review baselines', () => {
     expect(parseBulkStatusRequest({
@@ -22,7 +24,7 @@ describe('parseBulkStatusRequest', () => {
 
 describe('bulk-status preview route source contract', () => {
   const source = readFileSync(
-    join(process.cwd(), 'src/api/store/sellers/me/orders/bulk-status/preview/route.ts'),
+    join(TEST_DIR, '../../bulk-status/preview/route.ts'),
     'utf8',
   )
 
@@ -40,7 +42,7 @@ describe('bulk-status preview route source contract', () => {
 
 describe('bulk-status apply route source contract', () => {
   const source = readFileSync(
-    join(process.cwd(), 'src/api/store/sellers/me/orders/bulk-status/route.ts'),
+    join(TEST_DIR, '../../bulk-status/route.ts'),
     'utf8',
   )
 
