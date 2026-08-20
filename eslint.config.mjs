@@ -92,6 +92,20 @@ export default tseslint.config(
       // repo's escalation rule exists to prevent, and deleting the rule would throw away a real
       // signal. Warn keeps it visible and tracked as follow-up.
       'require-atomic-updates': 'warn',
+
+      // Added 2026-08-19 to unblock the @eslint/js 10 bump (dependabot #139), which had been
+      // red for twelve days on this one rule. v10 promotes `no-useless-assignment` into
+      // `js.configs.recommended`; naming it here means the bump is a no-op instead of a
+      // surprise, and the rule is enforced on v9 today rather than the day someone merges v10.
+      //
+      // It found exactly three sites, all the same deliberate shape:
+      //   let x: T | null = null; try { x = await … } catch { return 5xx }
+      // The seed is genuinely dead — every path assigns or returns — and on two of the three
+      // (the portal write gate, the checkout admission read) `null` is the PERMISSIVE value.
+      // Dropping the seed hands the job to TypeScript's definite-assignment check, which fails
+      // a future branch that forgets to assign instead of quietly taking the lenient default.
+      // That is the rare lint rule that made a fail-closed path more fail-closed.
+      'no-useless-assignment': 'error',
     },
   },
 

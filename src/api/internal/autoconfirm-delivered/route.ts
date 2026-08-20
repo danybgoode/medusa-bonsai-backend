@@ -35,7 +35,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const orderService = req.scope.resolve(Modules.ORDER) as any
 
-  let orders: any[] = []
+  // No initializer: every path below either assigns or returns, so a seed value
+  // would be dead (no-useless-assignment). Leaving the annotation makes TypeScript
+  // the thing that catches a future path which forgets to assign.
+  let orders: any[]
   try {
     orders = await orderService.listOrders(
       {},
