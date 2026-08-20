@@ -143,7 +143,10 @@ export class MercadoPagoProviderService extends AbstractPaymentProvider<Options>
         body: JSON.stringify({ amount: input.amount ? Number(input.amount) / 100 : undefined }),
       })
     } catch (e) {
-      throw new Error(`MercadoPago refund failed: ${(e as Error).message}`)
+      // `cause` keeps the MercadoPago error object reachable. Flattening it to a
+      // message discarded the provider's own status/code — the only thing that says
+      // WHY a refund was refused — on a path where that is the whole diagnosis.
+      throw new Error(`MercadoPago refund failed: ${(e as Error).message}`, { cause: e })
     }
     return { data: { ...data, refunded: true } }
   }
