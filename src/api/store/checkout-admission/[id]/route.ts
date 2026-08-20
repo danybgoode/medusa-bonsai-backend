@@ -160,7 +160,10 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
-  let product: AdmissionProductRow | null = null
+  // No initializer: the try assigns and the catch returns 503, so the seed was dead.
+  // On a money path the annotation is the better guard — a future branch that skips
+  // the assignment fails to compile instead of admitting a null product.
+  let product: AdmissionProductRow | null
   try {
     const { data } = await query.graph({
       entity: 'product',

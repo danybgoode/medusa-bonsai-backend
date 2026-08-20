@@ -118,7 +118,12 @@ export async function gateSellerPortalWrites(
   const clerkUserId = extractClerkUserId(req)
   if (!clerkUserId) return next()
 
-  let seller: { status?: unknown } | null | 'unavailable' = null
+  // No initializer, and that STRENGTHENS the fail-closed contract below rather than
+  // weakening it: the `= null` seed was dead (both branches assign), and null is the
+  // permissive value here — decidePortalGate reads it as "no seller row, not our
+  // concern". Dropping it means a future branch that forgets to assign is a
+  // TypeScript error, not a silent grant of the write this gate exists to refuse.
+  let seller: { status?: unknown } | null | 'unavailable'
   try {
     const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
     const [row] = await sellerService.listSellers({ clerk_user_id: clerkUserId } as never, { take: 1 })
