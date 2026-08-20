@@ -1,6 +1,17 @@
 {
   "compilerOptions": {
     "target": "ES2021",
+    // ES2022 LIB, ES2021 TARGET, deliberately. `lib` describes what the runtime has;
+    // `target` describes what to emit. This runs on Node 22, which has had
+    // `new Error(msg, { cause })` since Node 16 — but with lib inferred from an ES2021
+    // target, TypeScript does not know `ErrorOptions` exists and rejects the second
+    // argument (TS2554). Raising only `lib` tells the type system the truth without
+    // changing a single byte of emitted output. Added 2026-08-19 with the
+    // `preserve-caught-error` rule, which is unsatisfiable otherwise.
+    // DOM/DOM.Iterable are listed explicitly because naming `lib` at all replaces the
+    // implicit default, which included them — the admin React routes under src/admin
+    // need them, and dropping them silently broke 40+ .tsx type-checks on the first try.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "esModuleInterop": true,
     "module": "Node16",
     "moduleResolution": "Node16",

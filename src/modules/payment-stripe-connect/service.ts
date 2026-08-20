@@ -134,7 +134,10 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
       try {
         await this.stripe_.paymentIntents.capture(pi, undefined, requestContextFor(data).options)
       } catch (e) {
-        throw new Error(`Stripe escrow capture failed: ${(e as Error).message}`)
+        // `cause` keeps the Stripe error reachable — its `code`, `decline_code` and
+        // `requestId` are what make a failed capture diagnosable, and the message
+        // string alone has none of them.
+        throw new Error(`Stripe escrow capture failed: ${(e as Error).message}`, { cause: e })
       }
     }
     return { data: { ...data, escrow_captured: true } }
@@ -202,7 +205,8 @@ export class StripeConnectProviderService extends AbstractPaymentProvider<Option
         options,
       )
     } catch (e) {
-      throw new Error(`Stripe refund failed: ${(e as Error).message}`)
+      // As above: the Stripe error carries the refund's own failure reason.
+      throw new Error(`Stripe refund failed: ${(e as Error).message}`, { cause: e })
     }
     return { data: { ...data, refunded: true } }
   }

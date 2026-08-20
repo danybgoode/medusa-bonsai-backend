@@ -106,6 +106,20 @@ export default tseslint.config(
       // a future branch that forgets to assign instead of quietly taking the lenient default.
       // That is the rare lint rule that made a fail-closed path more fail-closed.
       'no-useless-assignment': 'error',
+
+      // The second half of the @eslint/js 10 bump (dependabot #139), and the one worth
+      // having on its own merits. v10 promotes `preserve-caught-error` into recommended:
+      // rethrowing inside a `catch` must attach `{ cause }`.
+      //
+      // It found exactly three sites, and all three are money paths — the MercadoPago
+      // refund, the Stripe escrow capture, and the Stripe refund. Each flattened the
+      // provider's error into `${(e as Error).message}` and threw that, discarding the
+      // Stripe/MP error OBJECT: its `code`, `decline_code` and `requestId`. On a failed
+      // refund those fields are the entire diagnosis, and the string is what a human
+      // would have been left holding at 2am.
+      //
+      // Needs `lib: ES2022` in tsconfig for `ErrorOptions` — see the note there.
+      'preserve-caught-error': 'error',
     },
   },
 
