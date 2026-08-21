@@ -93,6 +93,7 @@ describe('createSellerProduct — first ordinary active-US workflow capture', ()
   it('creates one positive USD price row, publishes to both US channels, and leaks no MX id', async () => {
     const result = await createSellerProduct(fakeScope(), seller.id, {
       title: 'Hand-thrown mug',
+      handle: 'us-shop-hand-thrown-mug-item-1',
       description: 'Made in Brooklyn',
       listing_type: 'product',
       price_cents: 2599,
@@ -106,6 +107,7 @@ describe('createSellerProduct — first ordinary active-US workflow capture', ()
     const productInput = create?.input?.products?.[0]
     expect(productInput).toMatchObject({
       title: 'Hand-thrown mug',
+      handle: 'us-shop-hand-thrown-mug-item-1',
       status: 'draft',
       shipping_profile_id: 'sp_default',
       sales_channels: [{ id: US_OPERATING }, { id: US_MARKETPLACE }],
