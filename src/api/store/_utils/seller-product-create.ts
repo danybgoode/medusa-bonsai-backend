@@ -40,6 +40,9 @@ export function generateSku(): string {
 
 export interface CreateProductBody {
   title: string
+  /** Optional canonical product handle. The supply importer includes its
+   * immutable item id here because Medusa handles are global, not per seller. */
+  handle?: string
   description?: string | null
   price_cents?: number | null
   currency?: string
@@ -372,6 +375,7 @@ export async function createSellerProduct(
     input: {
       products: [{
         title: body.title.trim().slice(0, 100),
+        ...(body.handle ? { handle: body.handle.trim().slice(0, 100) } : {}),
         description: body.description?.trim() || null,
         status: 'draft',
         ...(weightGrams !== undefined ? { weight: weightGrams } : {}),
