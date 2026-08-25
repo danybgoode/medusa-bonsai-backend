@@ -47,12 +47,20 @@ describe('backend Dockerfile + lockfile — deploy-pipeline-tuning S1 self-check
     expect(dockerfile).not.toMatch(/RUN (?:--mount=\S+ )*npm install\b/)
   })
 
-  it('builder, runner, package engine, and CI stay on the Node 22 runtime floor', () => {
-    expect(dockerfile.match(/^FROM node:22-slim AS /gm)).toHaveLength(2)
-    expect(pkg.engines.node).toBe('>=22 <25')
+  // Node 24 is "Krypton", the ACTIVE LTS. The `<25` ceiling is deliberate and predates this bump:
+  // odd-numbered Node lines are never LTS, so it says "no Current-line Node in production" rather
+  // than naming a version. Moved 22 -> 24 on 2026-08-25; 22 ("Jod") is the PREVIOUS LTS and we were
+  // a full line behind. Node 26 is not LTS until 2026-10, which is why this stops at 24.
+  //
+  // All four move together or none do — a Dockerfile on one line, CI on another and `engines` on a
+  // third is the shape where a build passes and the deployed image is something else.
+  it('builder, runner, package engine, and CI stay on the Node 24 runtime floor', () => {
+    expect(dockerfile.match(/^FROM node:24-slim AS /gm)).toHaveLength(2)
+    expect(pkg.engines.node).toBe('>=24 <25')
+    expect(pkg.devDependencies['@types/node']).toMatch(/^\^24\./)   // types must describe the runtime we ship
 
     const workflow = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')
-    expect(workflow).toMatch(/node-version:\s*22/)
+    expect(workflow).toMatch(/node-version:\s*24/)
   })
 
   it('CI also installs via npm ci (with the lockfile-hash cache), not npm install', () => {
