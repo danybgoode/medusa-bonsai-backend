@@ -13,8 +13,30 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      # Collapse the routine churn into one PR; security updates still come separately.
+      # The Medusa framework is NOT routine churn and must never ride in the group below.
+      #
+      # Medusa versions the whole engine on 2.x, so a framework upgrade arrives as a "minor" — and on
+      # 2026-08-25 the minor-and-patch group quietly carried **68 @medusajs packages from 2.17.2 to
+      # 2.19.0**: the commerce engine, the admin bundler, auth, cache, payment and order modules, in a
+      # PR titled "bump the minor-and-patch group with 25 updates". Auto-merge had already queued it;
+      # the only thing that stopped it was an unrelated test failing, because 2.19.0 had removed an
+      # internal API. A green run would have deployed a two-minor engine upgrade to production
+      # unattended.
+      #
+      # Grouping them separately makes the upgrade legible and reviewable as one thing. The
+      # auto-merge workflow additionally refuses this group outright — a commerce engine carrying the
+      # money path gets a person, a changelog and a smoke, never a green check alone.
+      medusa-framework:
+        patterns:
+          - "@medusajs/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+      # Collapse the genuinely routine churn into one PR; security updates still come separately.
       minor-and-patch:
+        exclude-patterns:
+          - "@medusajs/*"
         update-types:
           - "minor"
           - "patch"
@@ -56,6 +78,27 @@ updates:
       - dependency-name: "@types/react-dom"
         update-types: ["version-update:semver-major"]
       - dependency-name: "react-router-dom"
+        update-types: ["version-update:semver-major"]
+
+      # vite is Medusa's, not ours: @medusajs/admin-bundler, admin-vite-plugin and types all depend on
+      # `^5.4.21`, and the root pin exists to sit alongside them. A root-only vite 8 puts two vites in
+      # the tree while Medusa's bundler keeps resolving 5.x — same shape as the React entries above.
+      # Un-ignore when @medusajs/admin-bundler itself moves. (PR #169.)
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
+
+      # @types/node must track the RUNTIME, and the runtime is Node 22 — `ci.yml` pins node-version 22
+      # for both jobs and the Dockerfile builds and runs on node:22-slim. Typing against Node 26's
+      # stdlib is the failure where tsc passes and production throws, because the types describe a Node
+      # we do not run. Lift this in the same change that moves the Dockerfile and CI. (PR #171.)
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+      # TypeScript 7 is the native-port rewrite. It fails the gate today, and the toolchain around it
+      # is pinned to the 5.x line (typescript-eslint ^8, Medusa's generated types). Worth doing
+      # deliberately as its own piece of work — migration notes read, typescript-eslint moved in the
+      # same change — never as an unattended weekly bump. 5.x minors/patches still flow. (PR #170.)
+      - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
 
   # Keep the CI/CD GitHub Actions (notify-telegram.yml) patched too.
