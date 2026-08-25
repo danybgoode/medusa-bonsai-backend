@@ -38,11 +38,20 @@ jobs:
 
       # Majors are the class this repo has actually been burned by: PR #140's react-dom 19 against
       # react 18 passed CI and would still have been a broken install. They stay human-reviewed.
+      # NO `gh pr review --approve` here. The first cut of this workflow approved before merging, and
+      # every run died on "GitHub Actions is not permitted to approve pull requests" — a repo/org
+      # setting that GITHUB_TOKEN cannot override. Because the step runs under `bash -e`, that failure
+      # aborted the step BEFORE the merge was queued, so auto-merge never armed once (observed on
+      # PR #168, run 32794755387).
+      #
+      # The approve was unnecessary anyway: `main`'s protection requires the "Type-check + build +
+      # unit" check and does NOT require reviews (verified via the branch-protection API — it has no
+      # `required_pull_request_reviews`). If review-requiring protection is ever added, this needs a
+      # PAT or a GitHub App, not GITHUB_TOKEN — do not reintroduce the approve step expecting it to
+      # work.
       - name: Queue the merge (patch/minor only)
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
-        run: |
-          gh pr review --approve "$PR_URL"
-          gh pr merge --auto --squash "$PR_URL"
+        run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
