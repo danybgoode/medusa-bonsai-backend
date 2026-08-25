@@ -31,6 +31,33 @@ updates:
       - dependency-name: "react-i18next"
         versions: [">=14.0.0"]
 
+      # The React runtime and router are pinned BY @medusajs/dashboard — the admin UI bundled into this
+      # backend's own build — not by us. Every Medusa admin package peer-requires react/react-dom
+      # `^18.3.1` (@medusajs/dashboard, @medusajs/draft-order, @medusajs/medusa, @medusajs/ui, checked
+      # 2026-08-24), so a root-only React major is not an upgrade, it is a broken install:
+      # PR #140 bumped react-dom to 19.2.8 while leaving react at 18.3.1, and react-dom@19 declares
+      # `peerDependencies: { react: "^19.2.8" }`. Its OWN lockfile resolved that violated pair — and CI
+      # went GREEN, because tsc + build never exercise the admin at runtime. That is the whole reason
+      # these are ignored rather than left to the gate: the gate cannot see this class of break.
+      #
+      # Same story for the router: the root pins react-router-dom to an EXACT 6.30.3 (no caret) to sit
+      # alongside the 6.30.4 @medusajs/dashboard and @medusajs/draft-order depend on. Bumping the root
+      # to 7.x leaves two routers in the tree with two separate contexts.
+      #
+      # Only MAJORS are ignored. A react 18.3.x patch — including a security fix — still comes through,
+      # which is the point: banning the whole dependency to avoid one bad bump would cost more than it
+      # saves. Un-ignore each of these once @medusajs/dashboard itself moves.
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-router-dom"
+        update-types: ["version-update:semver-major"]
+
   # Keep the CI/CD GitHub Actions (notify-telegram.yml) patched too.
   - package-ecosystem: "github-actions"
     directory: "/"

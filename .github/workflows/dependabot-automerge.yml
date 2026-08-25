@@ -1,0 +1,53 @@
+# Auto-merge dependabot's NON-MAJOR bumps once CI is green.
+#
+# Why this exists: on 2026-08-24 four dependabot PRs had been open 10–17 days, and the queue had gone
+# stale enough that nobody was reading it — which is worse than no queue, because a real security bump
+# would have sat in the same pile unnoticed. Routine patch/minor churn does not need a human; majors do,
+# and this workflow deliberately never touches them (see `.github/dependabot.yml`'s ignore block for the
+# React-family majors that are broken BY DESIGN in this repo).
+#
+# ⚠️ A merge to main builds the Medusa image and deploys it to Cloud Run (see cloudbuild.yaml). So this
+# workflow ships to production unattended. That is the accepted trade, made explicitly by the product
+# owner on 2026-08-24, and it is safe only because `main` requires the "Type-check + build + unit" check
+# — the one that actually catches a broken dependency tree. `--auto` QUEUES the merge; GitHub holds it
+# until that required check passes and drops it if the check fails. It never bypasses the gate.
+#
+# The `Lint` job is deliberately NOT part of the required set on main, so a lint-only failure will not
+# hold a bump. That is a pre-existing branch-protection choice, recorded here so it is a decision rather
+# than a surprise.
+name: Dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write        # queue the merge
+  pull-requests: write   # approve, so the queued merge is not blocked on review
+
+jobs:
+  automerge:
+    # pull_request_target runs with write creds against the BASE repo, so it must never run for a
+    # non-dependabot author — that is the documented privilege-escalation shape for this trigger.
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read the bump's metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Majors are the class this repo has actually been burned by: PR #140's react-dom 19 against
+      # react 18 passed CI and would still have been a broken install. They stay human-reviewed.
+      - name: Queue the merge (patch/minor only)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Say why a major was left alone
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: |
+          echo "::notice::${{ steps.meta.outputs.dependency-names }} is a MAJOR bump — left for human review, not auto-merged."
