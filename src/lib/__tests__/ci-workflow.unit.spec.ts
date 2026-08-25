@@ -28,8 +28,8 @@ describe('backend CI workflow (ci.yml) — self-check', () => {
     expect(workflow).toMatch(/cancel-in-progress:\s*true/)
   })
 
-  it('pins Node 22 to match package.json engines', () => {
-    expect(workflow).toMatch(/node-version:\s*22/)
+  it('pins Node 24 to match package.json engines', () => {
+    expect(workflow).toMatch(/node-version:\s*24/)
   })
 
   it('runs build, then type-check, then unit tests', () => {
