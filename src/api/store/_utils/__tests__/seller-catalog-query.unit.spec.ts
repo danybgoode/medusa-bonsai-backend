@@ -59,32 +59,29 @@ describe('resolveSellerProductIds', () => {
     expect(sent).not.toHaveProperty('withDeleted')
   })
 
-  it('the shape survives Medusa OWN translator — the check the old spec lacked', () => {
-    // Runs the query through the installed `toRemoteQuery`, so an invented argument
-    // shows up here instead of in production. The removed one emitted
-    // `seller.products.__args.context`, which is precisely what is asserted absent.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { toRemoteQuery } = require('@medusajs/modules-sdk/dist/remote-query/to-remote-query.js')
-
-    const built = toRemoteQuery(
-      { entity: 'seller', fields: ['id', 'products.id'], filters: { id: 'seller_1' } },
-      {},
-    )
-    expect(built.seller.products?.__args).toBeUndefined()
-
-    // The negation, so this guard cannot pass by never seeing the bad shape.
-    const broken = toRemoteQuery(
-      {
-        entity: 'seller',
-        fields: ['id', 'products.id'],
-        filters: { id: 'seller_1' },
-        context: { products: { __type: 'QueryContext' } },
-        withDeleted: true,
-      },
-      {},
-    )
-    expect(broken.seller.products.__args).toHaveProperty('context')
-  })
+  // ── REMOVED 2026-08-25, with the Medusa 2.17.2 -> 2.19.0 upgrade ───────────────────────────────
+  // There used to be a second test here — "the shape survives Medusa's OWN translator" — which ran
+  // this query config through `toRemoteQuery` and asserted the result carried no
+  // `seller.products.__args`. It was the more valuable of the two, because the test above proves only
+  // that we BUILT the payload we meant to build, while that one proved MEDUSA AGREES it is valid.
+  // That distinction is not academic: the original defect passed a spec that pinned
+  // `context` + `withDeleted` against a fake `graph`, for months, while every real call threw.
+  //
+  // It is gone because Medusa made the function private, not because it stopped mattering:
+  //   • 2.17.2 — `@medusajs/modules-sdk/dist/remote-query/to-remote-query.js` (a deep import into
+  //     another package's dist, which is why it broke: deep paths are not covered by semver)
+  //   • 2.19.0 — moved to `@medusajs/query`, whose `exports` map is `{ ".": "./dist/index.js" }`
+  //     with NO subpaths, and whose barrel does not re-export it. Node's exports enforcement blocks
+  //     the deep path outright. There is no public equivalent.
+  //
+  // Deliberately NOT replaced with a restatement of the expected output: a hand-written copy of what
+  // we think the translator does would be a second derivation of our own assumption, which is exactly
+  // the shape of the bug it was written to catch.
+  //
+  // The consumer-side proof it provided is owed to the money-path smoke (the backend has no
+  // integration gate today — `tsc` + `build` + unit specs never execute a query against a real DB).
+  // Until that exists, an invented argument is caught by the exact-match assertion above at OUR
+  // boundary, and by nothing at Medusa's.
 
   it('keeps live catalog reads on Medusa default soft-delete filtering', async () => {
     const { scope, graph } = fakeScope([{ id: 'prod_live' }])
