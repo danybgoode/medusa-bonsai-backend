@@ -14,11 +14,12 @@
   ],
   "scripts": {
     "build": "medusa build",
-    "start": "medusa start",
     "dev": "medusa develop",
     "flags:sync": "ts-node scripts/flags-sync.ts",
-    "test:unit": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --silent --runInBand --forceExit",
     "lint": "eslint src",
+    "start": "medusa start",
+    "test:integration:http": "TEST_TYPE=integration:http NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit --passWithNoTests=false",
+    "test:unit": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --silent --runInBand --forceExit",
     "test:unit:coverage": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --coverage --coverageReporters=text-summary --silent --runInBand --forceExit"
   },
   "dependencies": {
