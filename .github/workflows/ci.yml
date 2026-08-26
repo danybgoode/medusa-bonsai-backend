@@ -64,3 +64,96 @@ jobs:
       # arbitrary threshold gets bypassed. Pick one later, from data.
       - name: Unit tests
         run: npm run test:unit:coverage
+
+  money-path:
+    name: Money path (integration)
+    runs-on: ubuntu-latest
+    # The CONSUMER-SIDE gate, and the one that makes an engine upgrade defensible.
+    #
+    # Until 2026-08-25 this repo's whole gate was tsc + build + unit — no database, no HTTP, no cart.
+    # The Medusa 2.17.2 -> 2.19.0 upgrade (68 packages, the entire commerce engine) went green through
+    # it while nothing had ever created a cart, and the dependabot auto-merge had ALREADY QUEUED that
+    # upgrade for an unattended production deploy. Only an unrelated red test stopped it.
+    #
+    # A mock cannot refuse a payload the real engine refuses: the defect this area guards against
+    # passed for months against a fake `graph` while every real call threw. Hence real Postgres,
+    # real Redis, real HTTP.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: medusa-money-path
+        ports: ['5432:5432']
+        # Without a health check the job races the container and fails as a connection error, which
+        # reads like a broken test rather than a slow boot.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # `medusaIntegrationTestRunner` builds its connection from DISCRETE vars — DB_HOST,
+      # DB_PORT, DB_USERNAME, DB_PASSWORD — NOT from DATABASE_URL (confirmed in @medusajs/test-utils'
+      # own source). The first CI run set only DATABASE_URL and died on
+      # `SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string`, because the password
+      # arrived as undefined. It passed locally purely because a local Postgres is trust-auth and
+      # accepts no password at all — the classic "works on my machine" split.
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      # Still set: the app itself (medusa-config.ts) reads DATABASE_URL.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/medusa-money-path
+      # REDIS_URL is deliberately NOT set, so medusa-config.ts takes its documented in-memory
+      # branch for cache / event bus / workflow engine / locking.
+      #
+      # Not a shortcut — measured. With a real Redis the suite fails DETERMINISTICALLY (3/3 runs,
+      # same test) on an unhandled bullmq "Connection is closed": the test runner snapshots and
+      # RESTORES the database between every test, and the Redis-backed workflow engine's connections
+      # do not survive that cycle. It is a harness/infrastructure interaction, not a product defect —
+      # the identical suite is 4/4 green on the in-memory modules.
+      #
+      # 🚨 What this gate therefore does NOT cover: anything whose behaviour depends on Redis
+      # specifically — durable retryable workflows, the shared cache, and distributed locking that
+      # stops scheduled jobs double-firing across instances. Those are real production behaviours
+      # and they remain ungated. Stated here rather than left implicit, because a gate whose
+      # coverage is assumed to be wider than it is, is worse than a narrow one.
+      # The test runner creates and drops its own scratch databases per run.
+      DB_NAME: medusa-money-path
+      NODE_ENV: test
+      # Non-secret, test-only values. The suite never talks to Stripe or any third party — it
+      # exercises cart/pricing/sales-channel, which are local to the engine.
+      JWT_SECRET: test-jwt-secret
+      COOKIE_SECRET: test-cookie-secret
+      # The Stripe Connect payment module loads UNCONDITIONALLY at boot and throws
+      # "Stripe apiKey is required" without one, so the app cannot start without a value here.
+      # This is a syntactically-valid DUMMY and nothing more: the gate exercises cart, pricing and
+      # sales-channel resolution, and never creates a payment session, so no request ever reaches
+      # Stripe. A real key must never appear in this file — if this suite ever grows a step that
+      # actually charges, that step belongs behind a repository secret and a deliberate decision,
+      # not here.
+      #
+      # Enumerated from medusa-config.ts rather than discovered one CI round-trip at a time: every
+      # provider module whose loader throws on a missing credential needs a value here just to BOOT.
+      # Stripe was the first, MercadoPago the second, Clerk reads one too.
+      STRIPE_SECRET_KEY: sk_test_ci_money_path_dummy_not_a_real_key
+      STRIPE_WEBHOOK_SECRET: whsec_ci_money_path_dummy_not_a_real_secret
+      MP_ACCESS_TOKEN: TEST-ci-money-path-dummy-not-a-real-token
+      CLERK_SECRET_KEY: sk_test_ci_money_path_dummy_not_a_real_key
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Build
+        # The runner boots the real app, which needs .medusa/ built first.
+        run: npm run build
+      - name: Money-path integration tests
+        # `--passWithNoTests=false` is load-bearing: the PREVIOUS integration tier matched a
+        # directory that never existed and exited 0 for its whole life, reading as a green gate.
+        # An empty match here is a FAILURE.
+        run: npm run test:integration:http

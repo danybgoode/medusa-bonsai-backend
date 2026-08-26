@@ -50,7 +50,31 @@ describe('backend CI workflow (ci.yml) — self-check', () => {
     expect(workflow).not.toMatch(/playwright\s+install/i)
   })
 
-  it('does NOT spin up a DB/Redis service container (unit specs are DB-free)', () => {
-    expect(workflow).not.toMatch(/^\s*services:/m)
+  // The intent here is unchanged and still right — the UNIT job must stay DB-free and fast — but the
+  // assertion was written when no job in this file had services at all, so a bare "no `services:`
+  // anywhere" was a fine proxy. It stopped being one on 2026-08-25, when the money-path integration
+  // job arrived with real Postgres and Redis. Scoped to the job it is actually about, rather than
+  // deleted: a guard that fires on correct output gets bypassed, and one deleted for firing loses
+  // the invariant entirely.
+  it('the unit job stays DB-free — no service container on type-check-build', () => {
+    const unitJob = workflow.slice(
+      workflow.indexOf('  type-check-build:'),
+      workflow.indexOf('  money-path:'),
+    )
+    expect(unitJob.length).toBeGreaterThan(0)   // the slice must actually find the job
+    expect(unitJob).not.toMatch(/^\s*services:/m)
+  })
+
+  it('the money-path job DOES bring a real Postgres, and fails on an empty match', () => {
+    // The consumer-side gate. Its absence is what let a 68-package engine upgrade go green through
+    // a CI that had never created a cart. And `--passWithNoTests=false` is load-bearing: the
+    // PREVIOUS integration tier matched a directory that never existed and exited 0 for its whole
+    // life, reading as a green gate (see jest.config.js).
+    expect(workflow).toMatch(/^\s{2}money-path:/m)
+    expect(workflow).toContain('postgres:16-alpine')
+    expect(workflow).toContain('npm run test:integration:http')
+
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
+    expect(pkg.scripts['test:integration:http']).toContain('--passWithNoTests=false')
   })
 })
