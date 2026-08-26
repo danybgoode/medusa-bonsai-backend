@@ -134,8 +134,14 @@ jobs:
       # Stripe. A real key must never appear in this file — if this suite ever grows a step that
       # actually charges, that step belongs behind a repository secret and a deliberate decision,
       # not here.
+      #
+      # Enumerated from medusa-config.ts rather than discovered one CI round-trip at a time: every
+      # provider module whose loader throws on a missing credential needs a value here just to BOOT.
+      # Stripe was the first, MercadoPago the second, Clerk reads one too.
       STRIPE_SECRET_KEY: sk_test_ci_money_path_dummy_not_a_real_key
       STRIPE_WEBHOOK_SECRET: whsec_ci_money_path_dummy_not_a_real_secret
+      MP_ACCESS_TOKEN: TEST-ci-money-path-dummy-not-a-real-token
+      CLERK_SECRET_KEY: sk_test_ci_money_path_dummy_not_a_real_key
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
