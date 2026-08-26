@@ -94,6 +94,17 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      # `medusaIntegrationTestRunner` builds its connection from DISCRETE vars — DB_HOST,
+      # DB_PORT, DB_USERNAME, DB_PASSWORD — NOT from DATABASE_URL (confirmed in @medusajs/test-utils'
+      # own source). The first CI run set only DATABASE_URL and died on
+      # `SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string`, because the password
+      # arrived as undefined. It passed locally purely because a local Postgres is trust-auth and
+      # accepts no password at all — the classic "works on my machine" split.
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      # Still set: the app itself (medusa-config.ts) reads DATABASE_URL.
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/medusa-money-path
       # REDIS_URL is deliberately NOT set, so medusa-config.ts takes its documented in-memory
       # branch for cache / event bus / workflow engine / locking.
