@@ -78,6 +78,14 @@ jobs:
       - name: Queue the merge (everything except majors)
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: gh pr merge --auto --squash "$PR_URL"
+        # Both are REQUIRED and were lost once already: removing the `gh pr review --approve` line
+        # collapsed a two-command `run: |` block into a one-liner and took this `env:` with it. The
+        # result was `gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN
+        # environment variable` — exit 4, and no merge ever queued. Same silent shape as the approve
+        # bug it replaced: the workflow "ran", and nothing merged.
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Say why a major was left alone
         if: steps.meta.outputs.update-type == 'version-update:semver-major'
