@@ -49,30 +49,35 @@ jobs:
       # `required_pull_request_reviews`). If review-requiring protection is ever added, this needs a
       # PAT or a GitHub App, not GITHUB_TOKEN — do not reintroduce the approve step expecting it to
       # work.
-      # Two exclusions, not one. Majors are the obvious case; the MEDUSA FRAMEWORK is the one that
-      # actually nearly got through. Medusa versions the whole commerce engine on 2.x, so a
-      # framework upgrade arrives labelled "minor" — on 2026-08-25 a single "minor-and-patch" PR
-      # carried 68 @medusajs packages from 2.17.2 to 2.19.0, and this workflow had already queued
-      # it. Only an unrelated red test stopped a two-minor engine upgrade from deploying to
-      # production unattended (a merge to main builds and deploys to Cloud Run).
+      # ── What may merge itself, and why ───────────────────────────────────────────────────────
+      # MAJORS never auto-merge. Semver majors are where an upgrade needs a person reading a
+      # changelog, and this repo has the scars: react-dom 19 against react 18 passed CI green and
+      # was still a broken install.
       #
-      # `dependabot.yml` now groups @medusajs/* separately so the upgrade is legible; this refuses
-      # it regardless of how it is grouped, because the money path runs through that engine and a
-      # green type-check is not a substitute for a changelog and a smoke.
-      - name: Queue the merge (patch/minor, and never the commerce engine)
-        if: |
-          steps.meta.outputs.update-type != 'version-update:semver-major'
-          && !contains(steps.meta.outputs.dependency-names, '@medusajs/')
-          && steps.meta.outputs.dependency-group != 'medusa-framework'
+      # The MEDUSA ENGINE now MAY, and that is a deliberate reversal of the position taken on
+      # 2026-08-25 in #175. The reasoning then was sound and is worth preserving: Medusa versions
+      # the whole commerce engine on 2.x, so a two-minor engine upgrade arrives labelled "minor" —
+      # a single "minor-and-patch" PR once carried 68 @medusajs packages from 2.17.2 to 2.19.0, and
+      # this workflow had already queued it for an unattended production deploy. What stopped it was
+      # an UNRELATED red test. An accident, not a control.
+      #
+      # What changed is not the risk appetite, it is the evidence. `ci.yml`'s money-path job now
+      # boots the real app against a real Postgres and drives real HTTP: a publishable key resolving
+      # to exactly one sales channel, a cart created on it, a real variant priced, totals adding up,
+      # the catalog served, and a keyless request refused. It is a REQUIRED check on `main`, so
+      # `--auto` cannot merge past it — GitHub holds the merge until it passes and drops it if it
+      # fails. The engine upgrade that could not be verified at all in August is now the exact thing
+      # this gate proves on every PR.
+      #
+      # 🚨 The honest limit, so nobody assumes wider coverage than exists: that gate runs on the
+      # in-memory cache/event-bus/workflow modules, because the Redis-backed ones do not survive the
+      # test runner's snapshot/restore cycle (measured: deterministic failure, 3/3 runs). So
+      # Redis-SPECIFIC behaviour — durable retryable workflows, the shared cache, distributed
+      # locking that stops scheduled jobs double-firing — is still ungated. If a future incident
+      # traces to one of those, this exclusion is the first thing to reconsider.
+      - name: Queue the merge (everything except majors)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: gh pr merge --auto --squash "$PR_URL"
-
-      - name: Say why the commerce engine was left alone
-        if: contains(steps.meta.outputs.dependency-names, '@medusajs/') || steps.meta.outputs.dependency-group == 'medusa-framework'
-        run: |
-          echo "::notice::This bump touches the Medusa commerce engine — left for human review with a changelog and a money-path smoke, never auto-merged."
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Say why a major was left alone
         if: steps.meta.outputs.update-type == 'version-update:semver-major'

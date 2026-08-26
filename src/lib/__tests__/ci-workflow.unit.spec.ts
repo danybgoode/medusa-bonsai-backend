@@ -65,6 +65,31 @@ describe('backend CI workflow (ci.yml) — self-check', () => {
     expect(unitJob).not.toMatch(/^\s*services:/m)
   })
 
+  // Engine bumps auto-merge from 2026-08-26, and the ONLY thing making that safe is that the
+  // money-path job is a REQUIRED check on main — `--auto` holds the merge until a required check
+  // passes and drops it if the check fails. A non-required job would let dependabot merge on the
+  // build check alone while the money-path result was merely advisory, which is the pre-gate world
+  // with extra steps.
+  //
+  // Branch protection is server-side config this repo cannot read from a unit test, so this asserts
+  // the two halves that ARE in the tree and must not drift apart: the job exists under the exact
+  // name registered as required, and the workflow no longer excludes @medusajs from auto-merge.
+  // The check name is the coupling — renaming the job silently un-requires it.
+  it('the auto-merge policy and the money-path job agree — the name is the coupling', () => {
+    const REQUIRED_CHECK_NAME = 'Money path (integration)'
+    expect(workflow).toContain(`name: ${REQUIRED_CHECK_NAME}`)
+
+    const automerge = readFileSync(
+      join(process.cwd(), '.github/workflows/dependabot-automerge.yml'),
+      'utf8',
+    )
+    // Majors stay human-reviewed...
+    expect(automerge).toContain("steps.meta.outputs.update-type != 'version-update:semver-major'")
+    // ...and the engine exclusion is gone, deliberately, now that the gate exists.
+    expect(automerge).not.toMatch(/!\s*contains\(steps\.meta\.outputs\.dependency-names, '@medusajs\/'\)/)
+    expect(automerge).not.toMatch(/dependency-group != 'medusa-framework'/)
+  })
+
   it('the money-path job DOES bring a real Postgres, and fails on an empty match', () => {
     // The consumer-side gate. Its absence is what let a 68-package engine upgrade go green through
     // a CI that had never created a cart. And `--passWithNoTests=false` is load-bearing: the
