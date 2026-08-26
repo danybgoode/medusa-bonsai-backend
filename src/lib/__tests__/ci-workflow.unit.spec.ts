@@ -75,6 +75,40 @@ describe('backend CI workflow (ci.yml) — self-check', () => {
   // the two halves that ARE in the tree and must not drift apart: the job exists under the exact
   // name registered as required, and the workflow no longer excludes @medusajs from auto-merge.
   // The check name is the coupling — renaming the job silently un-requires it.
+  // This workflow has now broken SILENTLY twice, both times in the same shape: it ran, reported a
+  // step, and merged nothing.
+  //   1. `gh pr review --approve` always failed ("GitHub Actions is not permitted to approve pull
+  //      requests"), and under `bash -e` that aborted the step BEFORE the merge was queued.
+  //   2. Removing that line collapsed the two-command `run: |` into a one-liner and took the `env:`
+  //      block with it, so GH_TOKEN was unset — `gh` exited 4 and, again, nothing merged.
+  // A workflow that fails loudly is fine. One that runs and quietly does nothing is how a
+  // dependency queue silently goes stale, which is the whole failure this automation exists to fix.
+  it('every gh command in the auto-merge workflow carries GH_TOKEN', () => {
+    const automerge = readFileSync(
+      join(process.cwd(), '.github/workflows/dependabot-automerge.yml'),
+      'utf8',
+    )
+    // Each `run:` invoking gh must be followed by an env block providing GH_TOKEN before the next
+    // step begins. Asserted per-command rather than "the file contains GH_TOKEN somewhere", which
+    // would pass with the token attached to the wrong step.
+    const steps = automerge.split(/^      - name: /m).slice(1)
+    const ghSteps = steps.filter((step) => /^\s*run:.*\bgh /m.test(step))
+    expect(ghSteps.length).toBeGreaterThan(0)   // never pass by finding no gh commands at all
+    for (const step of ghSteps) {
+      expect(step).toMatch(/GH_TOKEN:/)
+    }
+
+    // And the approve that cannot work must not come back — it is not a permission we can grant.
+    // Matched against EXECUTABLE lines only: the comments deliberately name the command to explain
+    // why it is banned, and a guard that fires on its own documentation is a guard people delete.
+    // (Caught by this assertion failing on its own explanation, which is the check working.)
+    const executable = automerge
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n')
+    expect(executable).not.toContain('gh pr review --approve')
+  })
+
   it('the auto-merge policy and the money-path job agree — the name is the coupling', () => {
     const REQUIRED_CHECK_NAME = 'Money path (integration)'
     expect(workflow).toContain(`name: ${REQUIRED_CHECK_NAME}`)
