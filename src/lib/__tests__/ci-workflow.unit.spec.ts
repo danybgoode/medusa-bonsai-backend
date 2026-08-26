@@ -91,7 +91,7 @@ describe('backend CI workflow (ci.yml) — self-check', () => {
     // Each `run:` invoking gh must be followed by an env block providing GH_TOKEN before the next
     // step begins. Asserted per-command rather than "the file contains GH_TOKEN somewhere", which
     // would pass with the token attached to the wrong step.
-    const steps = automerge.split(/^      - name: /m).slice(1)
+    const steps = automerge.split(/^ {6}- name: /m).slice(1)
     const ghSteps = steps.filter((step) => /^\s*run:.*\bgh /m.test(step))
     expect(ghSteps.length).toBeGreaterThan(0)   // never pass by finding no gh commands at all
     for (const step of ghSteps) {
