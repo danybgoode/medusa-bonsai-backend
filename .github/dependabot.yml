@@ -23,9 +23,15 @@ updates:
       # internal API. A green run would have deployed a two-minor engine upgrade to production
       # unattended.
       #
-      # Grouping them separately makes the upgrade legible and reviewable as one thing. The
-      # auto-merge workflow additionally refuses this group outright — a commerce engine carrying the
-      # money path gets a person, a changelog and a smoke, never a green check alone.
+      # Grouping them separately keeps the upgrade LEGIBLE — one PR about one thing, instead of an
+      # engine rewrite hidden inside "25 assorted updates". That value is unchanged.
+      #
+      # UPDATED 2026-08-26: the auto-merge workflow no longer refuses this group. It did, and the
+      # reason was that a green check meant `tsc` + `build` + unit — a gate that had never created a
+      # cart. `ci.yml` now runs a money-path integration job against a real Postgres (real cart, real
+      # pricing, real sales-channel resolution, plus the keyless-request negation) and it is a
+      # REQUIRED check on `main`, so an engine bump must prove the money path before it can merge.
+      # The group stays because legibility is worth having on its own.
       medusa-framework:
         patterns:
           - "@medusajs/*"
