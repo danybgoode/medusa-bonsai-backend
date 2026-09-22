@@ -10,7 +10,7 @@ import {
   type FlagProvider,
   type FlagResolutionReason,
 } from '@golden-frijoles/sdk'
-import { parseGoldenFlagEnvironment } from './flag-provider-mode'
+import { parseGoldenFlagEnvironment } from './golden-flag-environment'
 import { createFlagProviderRequestRefreshGate } from './flag-provider-request-refresh'
 import { scheduleDurableGoldenSnapshot } from './golden-flag-mirror-store'
 import { trackGoldenFlagEvaluation } from './golden-flag-telemetry'

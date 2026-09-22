@@ -1,62 +1,40 @@
 /**
  * src/lib/flags.ts
  *
- * Backend (Medusa) half of the platform feature-flag / kill-switch layer, now backed
- * by an OWNED Supabase table (`platform_flags`), the in-house flag store (epic 09 ·
- * feature-flags-inhouse). Reads the SAME rows the frontend reads, so a single flip
- * governs BOTH apps. See the scope: Roadmap/09-platform-infra/feature-flags-inhouse/.
+ * Backend (Medusa) half of the platform feature-flag / kill-switch seam — the ENFORCEMENT half: the
+ * frontend hides a killed rail in the UI, but agents/UCP and stale in-flight checkout pages hit the
+ * backend directly, so the real kill must live here (checkout-options catalog + start-checkout
+ * guard).
  *
- * This is the ENFORCEMENT half: the frontend hides a killed rail in the UI, but
- * agents/UCP and stale in-flight checkout pages hit the backend directly — so the
- * real kill must live here (checkout-options catalog + start-checkout guard).
+ * ONE authority: Golden Frijoles, project `miyagisanchez` — the same project and console as the
+ * frontend, so a single change in Golden governs BOTH apps (flag-provider-mandate). The
+ * `local`/`shadow` modes, the `GOLDEN_BEANS_FLAG_CUTOVER` manifest and the `platform_flags` read
+ * are deleted: the manifest parser resolved any malformed OR unset value to `local`, so one env-var
+ * typo silently moved every commerce decision back onto a second store. `platform_flags` is parked,
+ * unread, for one wave as the rollback.
  *
- * Design rules (non-negotiable — carried over from the original kill-switch spike):
- *  1. FAIL-OPEN. Every read falls back to DEFAULT_FLAGS. Supabase being unreachable,
- *     slow, or the table empty/missing must NEVER break checkout. A kill-switch
- *     defaults to ENABLED (the feature stays on if the read fails).
- *  2. IN-PROCESS CACHE, fast fail. All rows are cached module-side for 60 s
- *     (FLAG_CACHE_TTL_MS) → ~0 ms/request when fresh; a stale cache triggers ONE
- *     bounded refresh (≤2 s, no retries) so a hung read can't stall a checkout.
- *
- * Reads via the existing read-only `supabaseRead` (SUPABASE_URL + SERVICE_ROLE_KEY,
- * already in the Cloud Run env). Absent creds → the client's stub returns "no rows"
- * → isEnabled() runs on DEFAULT_FLAGS (never throws).
+ * The chain: live snapshot → durable mirror (the OUTAGE fallback) → compile default. `isEnabled()`
+ * never throws.
  */
-import { supabaseRead } from '../api/store/_utils/supabase-read'
 import {
-  resolveFlag,
-  isCacheStale,
-  FLAG_CACHE_TTL_MS,
-  FLAG_FETCH_TIMEOUT_MS,
-  type FlagRow,
-} from './flags-cache'
-import {
-  FLAG_CUTOVER_CONTRACT_VERSION,
-  parseFlagCutoverManifest,
-  parseGoldenFlagEnvironment,
-  type FlagCutoverManifest,
-  type FlagProviderMode,
-} from './flag-provider-mode'
-import {
-  BACKEND_FLAG_CATALOG,
   BACKEND_FLAG_DEFAULTS,
-  BACKEND_FLAG_KEYS,
   type FlagKey,
 } from './flag-catalog'
 import { evaluateGoldenBooleanFlag } from './golden-flag-provider'
 import { evaluateDurableGoldenBooleanFlag } from './golden-flag-mirror'
 import { getDurableGoldenSnapshot } from './golden-flag-mirror-store'
 import {
-  createFlagAuthorityObserver,
-  createFlagShadowObserver,
-  type FlagAuthority,
-} from './flag-shadow-observation'
+  createFlagDecisionObserver,
+  type FlagDecisionSource,
+} from './flag-decision-observation'
 
 export type { FlagKey } from './flag-catalog'
 
 /**
- * Fail-open defaults. Three polarities live here — all fail SAFE, to the value
- * that can't cause harm on a read outage (Supabase unreachable / table empty):
+/**
+ * The compile-time defaults — the LAST rung, used only when neither the live Golden snapshot nor
+ * the durable mirror can answer. Three polarities live here — all fail SAFE, to the value that
+ * can't cause harm on an outage:
  *  - KILL-SWITCH (`checkout.stripe_enabled`): default `true`. The feature keeps
  *    working if the read is down (disabling is the deliberate action).
  *  - ENABLEMENT (`shipping.envia_enabled`): default `false`. The Envia.com
@@ -155,353 +133,66 @@ export type { FlagKey } from './flag-catalog'
  */
 const DEFAULT_FLAGS = BACKEND_FLAG_DEFAULTS
 
-const TABLE = 'platform_flags'
-
-// Module-level in-process cache. Single-threaded module evaluation → no init race.
-// `rows: null` → resolveFlag() falls open to DEFAULT_FLAGS. `fetchedAt` gates the 60 s
-// staleness; `inflight` de-dupes concurrent refreshes to ONE read on a cold instance.
-let cache: { rows: FlagRow[] | null; fetchedAt: number | null } = { rows: null, fetchedAt: null }
-let inflight: Promise<void> | null = null
-
-// One control-plane-only record per flag/snapshot in each process. Shadow mode
-// is parity evidence, never request telemetry: it includes no customer data.
-const recordShadowObservation = createFlagShadowObserver((observation) => {
+// One PII-free record per flag/snapshot/source per process. A `source` other than `golden` in
+// production means Golden is NOT deciding — from ~2026-08-27 to 2026-09-22 the read key had expired
+// (401) and every decision came from the mirror while the console looked healthy. Sentry's
+// production build strips console debug logging, so this writes to stdout directly.
+const recordDecision = createFlagDecisionObserver((observation) => {
   try {
-    // Sentry's production build removes console-level debug logging. Write the
-    // deliberately PII-free control-plane record directly so Cloud Run keeps
-    // the migration evidence without making a flag read able to throw.
-    const line = `[golden-beans:flag-shadow] ${JSON.stringify(observation)}`
+    const line = `[golden-beans:flag-decision] ${JSON.stringify(observation)}`
     if (typeof process !== 'undefined' && typeof process.stdout?.write === 'function') {
       process.stdout.write(`${line}\n`)
       return
     }
     console.info(line)
   } catch {
-    // Shadow evidence must never affect a feature decision.
+    // Decision evidence must never affect a feature decision.
   }
 })
 
-const recordAuthorityObservation = createFlagAuthorityObserver((observation) => {
+function report(
+  flag: FlagKey,
+  source: FlagDecisionSource,
+  evaluation?: { snapshotVersion: number; flagVersion?: number; reason: string },
+): void {
   try {
-    const line = `[golden-beans:flag-authority] ${JSON.stringify(observation)}`
-    if (typeof process !== 'undefined' && typeof process.stdout?.write === 'function') {
-      process.stdout.write(`${line}\n`)
-      return
-    }
-    console.info(line)
+    recordDecision({
+      flagKey: flag,
+      source,
+      snapshotVersion: evaluation?.snapshotVersion,
+      flagVersion: evaluation?.flagVersion,
+      reason: evaluation?.reason,
+    })
   } catch {
-    // Authority evidence must never affect a feature decision.
-  }
-})
-
-/**
- * Read every flag row from Supabase, bounded to ~2 s (no retries) so a hung read can't
- * stall checkout. Returns null on timeout / error (an EMPTY table returns [] →
- * resolveFlag then falls open per-flag) — either way the caller fails open. Uses
- * Promise.race (not .abortSignal) so the missing-config stub — which has no abortSignal
- * — is handled uniformly. Note: Promise.race bounds CALLER latency, not the underlying
- * request; a hung read is abandoned (GC'd when it settles), and the 60 s inflight
- * de-dup caps abandoned reads to ~1/min.
- */
-async function fetchRows(): Promise<FlagRow[] | null> {
-  try {
-    const query = supabaseRead.from(TABLE).select('key, enabled')
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('platform_flags fetch timeout')), FLAG_FETCH_TIMEOUT_MS),
-    )
-    const { data, error } = (await Promise.race([query, timeout])) as {
-      data: Array<{ key: unknown; enabled: unknown }> | null
-      error: unknown
-    }
-    if (error || !data) return null
-    // Preserve the raw `enabled` — do NOT Boolean()-coerce. resolveFlag's
-    // `typeof === 'boolean'` guard is the SINGLE validation point, so a malformed row
-    // (e.g. the string 'false', which Boolean() would flip to true) fails OPEN to
-    // DEFAULT_FLAGS instead of coercing to a wrong definite state — critical here,
-    // where a wrong value silently enables/disables a commerce rail. `enabled` is
-    // `boolean NOT NULL` in Postgres, so this is defense-in-depth, not an expected path.
-    return data.map((r) => ({ key: String(r.key), enabled: r.enabled as boolean }))
-  } catch {
-    return null
+    // Operational reporting is never part of the decision.
   }
 }
 
 /**
- * Refresh the cache if stale. Never throws. On a successful read the rows + timestamp
- * are replaced; on failure the rows are cleared to null (fail open to DEFAULT_FLAGS)
- * and the timestamp is still bumped so an outage doesn't hammer the DB every request.
- */
-async function refreshIfStale(): Promise<void> {
-  if (!isCacheStale(cache.fetchedAt, Date.now(), FLAG_CACHE_TTL_MS)) return
-  if (inflight) return inflight
-  inflight = fetchRows()
-    .then((rows) => {
-      cache = { rows, fetchedAt: Date.now() }
-    })
-    .finally(() => {
-      inflight = null
-    })
-  return inflight
-}
-
-/**
- * Is a feature enabled? Never throws — returns the fail-open DEFAULT_FLAGS value on any
- * error, timeout, or when the table is unreadable/empty. A fresh cache resolves with no
- * DB hit; a stale cache awaits one bounded (≤2 s) refresh first.
+ * Is a feature enabled? Never throws. Live Golden snapshot first; on a miss (outage, expired key,
+ * cold instance) the durable mirror; the compile-time default only when both are empty.
  */
 export async function isEnabled(flag: FlagKey): Promise<boolean> {
+  const defaultValue = DEFAULT_FLAGS[flag]
   try {
-    const decision = await resolveFlagDecision(flag, getConfiguredFlagCutoverManifest())
-    maybeRecordAuthority(decision)
-    return decision.resolvedValue
+    const golden = evaluateGoldenBooleanFlag(flag, defaultValue)
+    if (golden) {
+      report(flag, 'golden', golden)
+      return golden.value
+    }
   } catch {
-    return DEFAULT_FLAGS[flag]
+    // The provider adapter must never break a request; fall to the mirror.
   }
-}
-
-type FlagDecision = {
-  flagKey: FlagKey
-  configuredMode: FlagProviderMode
-  manifest: FlagCutoverManifest<FlagKey>
-  authority: FlagAuthority
-  defaultValue: boolean
-  localValue: boolean
-  resolvedValue: boolean
-  goldenValue?: boolean
-  snapshotVersion?: number
-  flagVersion?: number
-  reason?: string
-}
-
-export type BackendFlagAuthorityReportEntry = Omit<
-  (typeof BACKEND_FLAG_CATALOG)[number],
-  'owners'
-> & {
-  owners: readonly string[]
-  configuredMode: FlagProviderMode
-  authority: FlagAuthority
-  localValue: boolean
-  resolvedValue: boolean
-  goldenValue?: boolean
-  snapshotVersion?: number
-  flagVersion?: number
-  reason?: string
-  matchesLocal?: boolean
-}
-
-export type BackendFlagAuthorityReport = {
-  contractVersion: typeof FLAG_CUTOVER_CONTRACT_VERSION
-  service: 'medusa-backend'
-  environment?: 'development' | 'preview' | 'production'
-  manifest: {
-    source: FlagCutoverManifest<FlagKey>['source']
-    valid: boolean
-    baseline: FlagProviderMode
-    errors: readonly string[]
-  }
-  snapshotVersions: readonly number[]
-  snapshotCoverage: {
-    required: number
-    observed: number
-    complete: boolean
-  }
-  consistentSnapshot: boolean
-  parityMismatches: readonly FlagKey[]
-  flags: readonly BackendFlagAuthorityReportEntry[]
-}
-
-/**
- * Returns only the resolved, serializable status. The raw env string is never
- * exposed because it is operational configuration rather than report data.
- */
-export function getConfiguredFlagCutoverManifest(): FlagCutoverManifest<FlagKey> {
-  return parseFlagCutoverManifest(
-    process.env.GOLDEN_BEANS_FLAG_CUTOVER,
-    BACKEND_FLAG_KEYS,
-    process.env.GOLDEN_BEANS_FLAG_PROVIDER_MODE,
-  )
-}
-
-async function resolveFlagDecision(
-  flag: FlagKey,
-  manifest: FlagCutoverManifest<FlagKey>,
-): Promise<FlagDecision> {
   try {
-    await refreshIfStale()
-  } catch {
-    // Defensive: refreshIfStale already swallows errors, but never let a flag read throw.
-  }
-  const localValue = resolveFlag(cache.rows, flag, DEFAULT_FLAGS)
-  const configuredMode = manifest.modes[flag] ?? 'local'
-  const base = {
-    flagKey: flag,
-    configuredMode,
-    manifest,
-    defaultValue: DEFAULT_FLAGS[flag],
-    localValue,
-  }
-
-  if (configuredMode === 'local') {
-    return {
-      ...base,
-      authority: 'local',
-      resolvedValue: localValue,
-    }
-  }
-
-  // A missing Golden definition must preserve the durable local value, even
-  // when an operator has deliberately overridden the compile-time default.
-  const golden = evaluateGoldenBooleanFlag(flag, localValue)
-  if (!golden) {
-    if (configuredMode !== 'golden') {
-      return {
-        ...base,
-        authority: 'local',
-        resolvedValue: localValue,
-      }
-    }
     const durableSnapshot = await getDurableGoldenSnapshot()
-    if (!durableSnapshot) {
-      return {
-        ...base,
-        authority: 'local',
-        resolvedValue: localValue,
-      }
+    if (durableSnapshot) {
+      const durable = evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, defaultValue)
+      report(flag, 'durable', durable)
+      return durable.value
     }
-    const durable = evaluateDurableGoldenBooleanFlag(durableSnapshot, flag, localValue)
-    return {
-      ...base,
-      authority: 'golden_durable',
-      resolvedValue: durable.value,
-      goldenValue: durable.value,
-      snapshotVersion: durable.snapshotVersion,
-      flagVersion: durable.flagVersion,
-      reason: durable.reason,
-    }
+  } catch {
+    // A mirror failure falls to the compile default.
   }
-
-  if (configuredMode === 'shadow') {
-    recordShadowObservation({
-      flagKey: flag,
-      defaultValue: DEFAULT_FLAGS[flag],
-      localValue,
-      goldenValue: golden.value,
-      snapshotVersion: golden.snapshotVersion,
-      flagVersion: golden.flagVersion,
-      reason: golden.reason,
-    })
-    return {
-      ...base,
-      authority: 'local',
-      resolvedValue: localValue,
-      goldenValue: golden.value,
-      snapshotVersion: golden.snapshotVersion,
-      flagVersion: golden.flagVersion,
-      reason: golden.reason,
-    }
-  }
-
-  return {
-    ...base,
-    authority: 'golden_live',
-    resolvedValue: golden.value,
-    goldenValue: golden.value,
-    snapshotVersion: golden.snapshotVersion,
-    flagVersion: golden.flagVersion,
-    reason: golden.reason,
-  }
-}
-
-function maybeRecordAuthority(decision: FlagDecision): void {
-  // A default legacy-local process is intentionally quiet. Once an explicit
-  // staged manifest exists (including an invalid one), every exercised flag
-  // emits one bounded, PII-free proof of its actual authority.
-  if (
-    decision.manifest.source === 'legacy' &&
-    decision.manifest.valid &&
-    decision.configuredMode === 'local'
-  )
-    return
-
-  recordAuthorityObservation({
-    flagKey: decision.flagKey,
-    configuredMode: decision.configuredMode,
-    manifestSource: decision.manifest.source,
-    manifestValid: decision.manifest.valid,
-    authority: decision.authority,
-    defaultValue: decision.defaultValue,
-    localValue: decision.localValue,
-    resolvedValue: decision.resolvedValue,
-    goldenValue: decision.goldenValue,
-    snapshotVersion: decision.snapshotVersion,
-    flagVersion: decision.flagVersion,
-    reason: decision.reason,
-  })
-}
-
-/**
- * Produces the backend half of the cross-repo cutover report. The closed result
- * contains catalog/config/snapshot facts only: no request context, actor,
- * subject, endpoint or credential can enter this shape.
- */
-export async function getFlagAuthorityReport(): Promise<BackendFlagAuthorityReport> {
-  const manifest = getConfiguredFlagCutoverManifest()
-  const flags: BackendFlagAuthorityReportEntry[] = []
-  for (const catalog of BACKEND_FLAG_CATALOG) {
-    const decision = await resolveFlagDecision(catalog.key, manifest)
-    flags.push({
-      ...catalog,
-      configuredMode: decision.configuredMode,
-      authority: decision.authority,
-      localValue: decision.localValue,
-      resolvedValue: decision.resolvedValue,
-      goldenValue: decision.goldenValue,
-      snapshotVersion: decision.snapshotVersion,
-      flagVersion: decision.flagVersion,
-      reason: decision.reason,
-      matchesLocal:
-        decision.goldenValue === undefined
-          ? undefined
-          : decision.goldenValue === decision.localValue,
-    })
-  }
-
-  const snapshotVersions = [
-    ...new Set(
-      flags.flatMap((flag) =>
-        flag.snapshotVersion === undefined ? [] : [flag.snapshotVersion],
-      ),
-    ),
-  ].sort((left, right) => left - right)
-  const snapshotRequired = flags.filter(
-    (flag) => flag.configuredMode !== 'local',
-  )
-  const snapshotObserved = snapshotRequired.filter(
-    (flag) => flag.snapshotVersion !== undefined,
-  )
-  const snapshotComplete = snapshotObserved.length === snapshotRequired.length
-  const parityMismatches = flags
-    .filter((flag) => flag.matchesLocal === false)
-    .map((flag) => flag.key)
-
-  return {
-    contractVersion: FLAG_CUTOVER_CONTRACT_VERSION,
-    service: 'medusa-backend',
-    environment: parseGoldenFlagEnvironment(process.env.GOLDEN_BEANS_FLAG_ENVIRONMENT),
-    manifest: {
-      source: manifest.source,
-      valid: manifest.valid,
-      baseline: manifest.baseline,
-      errors: manifest.errors,
-    },
-    snapshotVersions,
-    snapshotCoverage: {
-      required: snapshotRequired.length,
-      observed: snapshotObserved.length,
-      complete: snapshotComplete,
-    },
-    consistentSnapshot: snapshotComplete && snapshotVersions.length <= 1,
-    parityMismatches,
-    flags,
-  }
+  report(flag, 'default')
+  return defaultValue
 }

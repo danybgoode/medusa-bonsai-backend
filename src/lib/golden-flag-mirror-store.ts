@@ -5,11 +5,22 @@
  * granted monotonic RPC, while normal reads remain ordinary service-role reads.
  */
 import type { FlagSnapshot } from '@golden-frijoles/sdk'
-import { parseGoldenFlagEnvironment, type GoldenFlagEnvironment } from './flag-provider-mode'
+import { parseGoldenFlagEnvironment, type GoldenFlagEnvironment } from './golden-flag-environment'
 import { parseDurableGoldenSnapshot } from './golden-flag-mirror'
 import { supabaseRead } from '../api/store/_utils/supabase-read'
 
-const TABLE = 'golden_flag_snapshot_mirror'
+/**
+ * The ONE durable lane: the `miyagisanchez` Golden project's snapshots — the same lane the frontend
+ * writes (both services read the same project, so they persist identical snapshots).
+ *
+ * Snapshot versions are PROJECT-relative and the stored version only moves forward in SQL. The old
+ * `golden_flag_snapshot_mirror` table holds the retired legacy catalog at v47, which the
+ * `miyagisanchez` project (v44 at cutover) could never overwrite — so it is parked and unread
+ * (flag-provider-mandate). `provider_scope` is free-form, so this needed no migration.
+ */
+const TABLE = 'golden_flag_scoped_snapshot_mirror'
+const PERSIST_RPC = 'persist_scoped_golden_flag_snapshot'
+export const GOLDEN_FLAG_MIRROR_SCOPE = 'miyagisanchez'
 const MIRROR_CACHE_TTL_MS = 60_000
 const MIRROR_FETCH_TIMEOUT_MS = 2_000
 
@@ -83,7 +94,8 @@ export function scheduleDurableGoldenSnapshot(snapshot: FlagSnapshot): void {
 
   try {
     const token = Symbol('golden-snapshot-persistence')
-    const request = Promise.resolve(supabaseRead.rpc('persist_golden_flag_snapshot', {
+    const request = Promise.resolve(supabaseRead.rpc(PERSIST_RPC, {
+        p_provider_scope: GOLDEN_FLAG_MIRROR_SCOPE,
         p_environment: snapshot.environment,
         p_snapshot_version: snapshot.snapshotVersion,
         p_snapshot: snapshot,
@@ -122,6 +134,7 @@ async function fetchDurableGoldenSnapshot(
     const query = supabaseRead
       .from(TABLE)
       .select('snapshot, snapshot_version')
+      .eq('provider_scope', GOLDEN_FLAG_MIRROR_SCOPE)
       .eq('environment', environment)
       .maybeSingle()
     const timeout = new Promise<never>((_, reject) => {
