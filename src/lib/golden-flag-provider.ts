@@ -25,6 +25,9 @@ export type GoldenBooleanEvaluation = {
 
 let provider: FlagProvider | undefined
 let started = false
+// The SDK's already-started, bounded (refreshTimeoutMs) initial fetch. A cold instance awaits it ONCE
+// (shared by concurrent callers) before a flag may fall to its compile default — see recoverGolden.
+let initialization: Promise<void> | undefined
 const requestRefreshGate = createFlagProviderRequestRefreshGate()
 let configuration:
   | {
@@ -50,6 +53,7 @@ function getProvider(): FlagProvider | undefined {
     }
     provider = undefined
     started = false
+    initialization = undefined
     requestRefreshGate.reset()
     configuration = undefined
     return undefined
@@ -68,6 +72,7 @@ function getProvider(): FlagProvider | undefined {
     }
     provider = undefined
     started = false
+    initialization = undefined
     requestRefreshGate.reset()
   }
 
@@ -89,7 +94,11 @@ function getProvider(): FlagProvider | undefined {
     // SDK initialize starts its bounded periodic refresh before its initial
     // attempt. Preserve `started` after failure to avoid request-path retry
     // storms; the provider performs the next retry on that timer.
-    void provider.initialize().catch(() => undefined)
+    try {
+      initialization = provider.initialize().then(() => undefined).catch(() => undefined)
+    } catch {
+      initialization = Promise.resolve()
+    }
   } else if (requestRefreshGate.takeIfDue()) {
     // Cloud Run can throttle the SDK's periodic timer between requests. Kick
     // the same deduplicated refresh from live traffic, but never await it: this
@@ -100,16 +109,12 @@ function getProvider(): FlagProvider | undefined {
   return provider
 }
 
-/** Resolves only from a fresh snapshot; no remote request happens per flag check. */
-export function evaluateGoldenBooleanFlag(
+function evaluateFromProvider(
+  currentProvider: FlagProvider,
   flagKey: string,
   defaultValue: boolean,
 ): GoldenBooleanEvaluation | undefined {
-  try {
-    const currentProvider = getProvider()
-    if (!currentProvider) return undefined
-
-    const snapshot = currentProvider.getSnapshot()
+  const snapshot = currentProvider.getSnapshot()
     if (!snapshot) return undefined
     scheduleDurableGoldenSnapshot(snapshot)
 
@@ -134,8 +139,40 @@ export function evaluateGoldenBooleanFlag(
       variant: details.variant,
       reason: details.reason,
     }
+}
+
+/** Resolves only from a fresh snapshot; no remote request happens per flag check. */
+export function evaluateGoldenBooleanFlag(
+  flagKey: string,
+  defaultValue: boolean,
+): GoldenBooleanEvaluation | undefined {
+  try {
+    const currentProvider = getProvider()
+    if (!currentProvider) return undefined
+    return evaluateFromProvider(currentProvider, flagKey, defaultValue)
   } catch {
-    // The caller keeps its local result on every unexpected provider failure.
+    // The caller keeps its fallback on every unexpected provider failure.
+    return undefined
+  }
+}
+
+/**
+ * A cold instance can meet an EMPTY durable lane (a fresh deploy, or the first run after the mirror
+ * moved to the `miyagisanchez` scope). Without this, its first requests would resolve enforcement
+ * flags to their compile defaults — `ml.orders_enabled` and `catalog.inventory_channels_enabled`
+ * default OFF while production serves them ON. Await only the SDK's already-started initial fetch,
+ * bounded by `refreshTimeoutMs`; concurrent callers share the one promise and nothing retries.
+ */
+export async function recoverGoldenBooleanFlag(
+  flagKey: string,
+  defaultValue: boolean,
+): Promise<GoldenBooleanEvaluation | undefined> {
+  try {
+    const currentProvider = getProvider()
+    if (!currentProvider) return undefined
+    await initialization
+    return evaluateFromProvider(currentProvider, flagKey, defaultValue)
+  } catch {
     return undefined
   }
 }

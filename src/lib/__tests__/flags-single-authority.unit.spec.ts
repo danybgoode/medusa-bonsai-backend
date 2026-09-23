@@ -9,11 +9,13 @@ import { join, relative } from 'node:path'
  */
 
 const mockEvaluateGolden = jest.fn()
+const mockRecoverGolden = jest.fn()
 const mockGetDurable = jest.fn()
 const mockFrom = jest.fn()
 
 jest.mock('../golden-flag-provider', () => ({
   evaluateGoldenBooleanFlag: mockEvaluateGolden,
+  recoverGoldenBooleanFlag: mockRecoverGolden,
 }))
 
 jest.mock('../golden-flag-mirror-store', () => ({
@@ -67,6 +69,7 @@ describe('backend isEnabled — one authority', () => {
   beforeEach(() => {
     process.env = { ...originalEnv, GOLDEN_BEANS_FLAG_ENVIRONMENT: 'production' }
     jest.clearAllMocks()
+    mockRecoverGolden.mockResolvedValue(undefined)
     stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true)
   })
 
@@ -106,6 +109,20 @@ describe('backend isEnabled — one authority', () => {
 
     await expect(isEnabled('checkout.stripe_enabled')).resolves.toBe(false)
     expect(decisions(stdout).map((d) => [d.source, d.snapshotVersion])).toEqual([['durable', 44]])
+    expect(mockRecoverGolden).not.toHaveBeenCalled()
+  })
+
+  it('a COLD instance with an empty mirror lane waits for the initial fetch before any compile default', async () => {
+    // The deploy-time hazard: `ml.orders_enabled` defaults OFF while production serves it ON. An
+    // empty `miyagisanchez` lane must not turn a cold instance's first requests into OFF.
+    mockEvaluateGolden.mockReturnValue(undefined)
+    mockGetDurable.mockResolvedValue(undefined)
+    mockRecoverGolden.mockResolvedValue({ value: true, snapshotVersion: 44, flagVersion: 2, reason: 'STATIC' })
+    const { isEnabled } = loadFlags()
+
+    await expect(isEnabled('ml.orders_enabled')).resolves.toBe(true)
+    expect(mockRecoverGolden).toHaveBeenCalledWith('ml.orders_enabled', false)
+    expect(decisions(stdout).map((d) => d.source)).toEqual(['golden'])
   })
 
   it('with nothing to read, both polarities resolve to their fail-safe default and never throw', async () => {
@@ -113,6 +130,7 @@ describe('backend isEnabled — one authority', () => {
       throw new Error('provider exploded')
     })
     mockGetDurable.mockRejectedValue(new Error('mirror exploded'))
+    mockRecoverGolden.mockRejectedValue(new Error('recovery exploded'))
     const { isEnabled } = loadFlags()
 
     await expect(isEnabled('checkout.stripe_enabled')).resolves.toBe(true)

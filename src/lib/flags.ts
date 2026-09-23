@@ -13,14 +13,17 @@
  * typo silently moved every commerce decision back onto a second store. `platform_flags` is parked,
  * unread, for one wave as the rollback.
  *
- * The chain: live snapshot → durable mirror (the OUTAGE fallback) → compile default. `isEnabled()`
- * never throws.
+ * The chain: live snapshot → durable mirror (the OUTAGE fallback) → one bounded wait for the
+ * provider's initial fetch (a cold instance) → compile default. `isEnabled()` never throws.
  */
 import {
   BACKEND_FLAG_DEFAULTS,
   type FlagKey,
 } from './flag-catalog'
-import { evaluateGoldenBooleanFlag } from './golden-flag-provider'
+import {
+  evaluateGoldenBooleanFlag,
+  recoverGoldenBooleanFlag,
+} from './golden-flag-provider'
 import { evaluateDurableGoldenBooleanFlag } from './golden-flag-mirror'
 import { getDurableGoldenSnapshot } from './golden-flag-mirror-store'
 import {
@@ -170,7 +173,8 @@ function report(
 
 /**
  * Is a feature enabled? Never throws. Live Golden snapshot first; on a miss (outage, expired key,
- * cold instance) the durable mirror; the compile-time default only when both are empty.
+ * cold instance) the durable mirror, then one bounded wait for the initial fetch; the compile-time
+ * default only when all three are empty.
  */
 export async function isEnabled(flag: FlagKey): Promise<boolean> {
   const defaultValue = DEFAULT_FLAGS[flag]
@@ -191,7 +195,16 @@ export async function isEnabled(flag: FlagKey): Promise<boolean> {
       return durable.value
     }
   } catch {
-    // A mirror failure falls to the compile default.
+    // A mirror failure falls to the bounded recovery, then the compile default.
+  }
+  try {
+    const recovered = await recoverGoldenBooleanFlag(flag, defaultValue)
+    if (recovered) {
+      report(flag, 'golden', recovered)
+      return recovered.value
+    }
+  } catch {
+    // Recovery is bounded and optional.
   }
   report(flag, 'default')
   return defaultValue
