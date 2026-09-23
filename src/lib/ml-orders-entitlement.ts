@@ -10,7 +10,7 @@
  * `deriveDomainEntitlement`/`deriveMlSyncEntitlement` (same grant shape, same
  * precedence) — no cross-app shared package exists in this architecture, so this
  * mirrors the already-established "keep two copies in lockstep" precedent
- * (`flags-cache.ts` duplicated the same way across both apps).
+ * (the same two-copies-in-lockstep shape the retired `flags-cache.ts` had).
  *
  * The composer resolves everything the frontend seam does, but entirely
  * server-side: `clerk_user_id` via the backend's own `Seller` module (no round-trip

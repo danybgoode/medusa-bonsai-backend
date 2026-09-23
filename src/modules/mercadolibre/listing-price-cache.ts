@@ -1,6 +1,6 @@
 /**
  * listing-price-cache — the PURE half of the fee-estimate cache (Sprint 2 ·
- * US-4, profit-analyzer). Mirrors the shape of `src/lib/flags-cache.ts` (key
+ * US-4, profit-analyzer). Mirrors the shape of the retired `src/lib/flags-cache.ts` (key
  * resolution + staleness are pure, unit-testable functions; the stateful
  * Map + the actual ML fetch live in `service.ts`) — but keyed, since a fee
  * rate is per site/category/listing-type rather than one global value.

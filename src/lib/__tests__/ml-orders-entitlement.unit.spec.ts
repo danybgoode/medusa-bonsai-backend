@@ -5,7 +5,7 @@ import { deriveMlOrdersEntitlement, readMlSyncGrant, type MlSyncGrant } from '..
  * no network. Mirrors the frontend's own `ml-sync-monetization.spec.ts` matrix
  * (same precedence, same SKU) — this is the deliberate backend-native port
  * (`deriveMlOrdersEntitlement`), not a shared import (no cross-app package in
- * this architecture; see `flags-cache.ts`'s own "keep two copies in lockstep").
+ * this architecture; the retired `flags-cache.ts` kept two copies in lockstep the same way).
  */
 
 function grantOf(type: MlSyncGrant['type'], overrides: Partial<MlSyncGrant> = {}): MlSyncGrant {

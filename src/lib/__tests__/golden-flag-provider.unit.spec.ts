@@ -138,4 +138,35 @@ describe('Golden flag provider telemetry', () => {
 
     now.mockRestore()
   })
+
+  it('recoverGoldenBooleanFlag waits for the one in-flight initial fetch, then resolves from it', async () => {
+    // The snapshot exists ONLY once the initial fetch has completed — so a recovery that does not
+    // actually wait for it would read `undefined` and fail this spec.
+    let fetched = false
+    let finish!: () => void
+    mockInitialize.mockReturnValue(
+      new Promise((resolve) => {
+        finish = () => {
+          fetched = true
+          resolve({ ok: true })
+        }
+      }),
+    )
+    const snapshot = { contractVersion: 1, environment: 'production', snapshotVersion: 41, flags: [] }
+    mockGetSnapshot.mockImplementation(() => (fetched ? snapshot : undefined))
+    const { evaluateGoldenBooleanFlag, recoverGoldenBooleanFlag } = require('../golden-flag-provider')
+
+    // Cold: the live read misses and starts the initial fetch exactly once.
+    expect(evaluateGoldenBooleanFlag('ml.orders_enabled', false)).toBeUndefined()
+    const recovered = recoverGoldenBooleanFlag('ml.orders_enabled', false)
+    setTimeout(finish, 5)
+    await expect(recovered).resolves.toMatchObject({ value: true, snapshotVersion: 41 })
+    expect(mockInitialize).toHaveBeenCalledTimes(1)
+  })
+
+  it('recoverGoldenBooleanFlag is undefined (never a throw) when the provider is unconfigured', async () => {
+    delete process.env.GOLDEN_BEANS_FLAG_READ_KEY
+    const { recoverGoldenBooleanFlag } = require('../golden-flag-provider')
+    await expect(recoverGoldenBooleanFlag('ml.orders_enabled', false)).resolves.toBeUndefined()
+  })
 })

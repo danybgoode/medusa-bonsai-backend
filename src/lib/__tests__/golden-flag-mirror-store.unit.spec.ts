@@ -105,6 +105,27 @@ describe('Golden flag durable mirror store monotonicity', () => {
     process.env = originalEnv
   })
 
+  it('persists into the miyagisanchez lane of the scoped mirror, never the parked legacy table', async () => {
+    // flag-provider-mandate: the legacy table holds the retired catalog at v47 and the monotonic RPC
+    // would refuse every miyagisanchez snapshot (v44 at cutover) — writing there is a silent no-op.
+    const store = loadStore()
+    store.scheduleDurableGoldenSnapshot(snapshot(44))
+    await flushPersistence()
+    expect(mockRpc).toHaveBeenCalledWith(
+      'persist_scoped_golden_flag_snapshot',
+      expect.objectContaining({ p_provider_scope: 'miyagisanchez', p_snapshot_version: 44 }),
+    )
+  })
+
+  it('reads only the miyagisanchez lane', async () => {
+    mockMaybeSingle.mockResolvedValueOnce({ data: null, error: null })
+    const store = loadStore()
+    await store.getDurableGoldenSnapshot()
+    expect(mockFrom).toHaveBeenCalledWith('golden_flag_scoped_snapshot_mirror')
+    expect(mockQuery.eq).toHaveBeenCalledWith('provider_scope', 'miyagisanchez')
+    expect(mockQuery.eq).toHaveBeenCalledWith('environment', 'production')
+  })
+
   it('never lets an older provider snapshot replace a newer in-memory snapshot', async () => {
     const store = loadStore()
     mockRpc.mockResolvedValue(accepted(12))
