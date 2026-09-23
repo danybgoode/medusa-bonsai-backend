@@ -89,6 +89,14 @@ describe('backend isEnabled — one authority', () => {
     ])
   })
 
+  it('a snapshot that does not define the flag is reported as default, not golden', async () => {
+    mockEvaluateGolden.mockReturnValue({ value: false, snapshotVersion: 44, reason: 'DEFAULT' })
+    const { isEnabled } = loadFlags()
+
+    await expect(isEnabled('shipping.envia_enabled')).resolves.toBe(false)
+    expect(decisions(stdout).map((d) => d.source)).toEqual(['default'])
+  })
+
   it('passes the COMPILE default to Golden — there is no local store left to consult', async () => {
     mockEvaluateGolden.mockReturnValue(undefined)
     mockGetDurable.mockResolvedValue(undefined)

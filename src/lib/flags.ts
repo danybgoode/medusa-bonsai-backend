@@ -34,7 +34,6 @@ import {
 export type { FlagKey } from './flag-catalog'
 
 /**
-/**
  * The compile-time defaults — the LAST rung, used only when neither the live Golden snapshot nor
  * the durable mirror can answer. Three polarities live here — all fail SAFE, to the value that
  * can't cause harm on an outage:
@@ -161,7 +160,9 @@ function report(
   try {
     recordDecision({
       flagKey: flag,
-      source,
+      // A snapshot that does not DEFINE the flag answers with the default we passed (reason
+      // 'DEFAULT'): the value is right, but Golden did not decide it — say so.
+      source: evaluation?.reason === 'DEFAULT' ? 'default' : source,
       snapshotVersion: evaluation?.snapshotVersion,
       flagVersion: evaluation?.flagVersion,
       reason: evaluation?.reason,

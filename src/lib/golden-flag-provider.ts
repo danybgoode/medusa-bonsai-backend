@@ -115,30 +115,30 @@ function evaluateFromProvider(
   defaultValue: boolean,
 ): GoldenBooleanEvaluation | undefined {
   const snapshot = currentProvider.getSnapshot()
-    if (!snapshot) return undefined
-    scheduleDurableGoldenSnapshot(snapshot)
+  if (!snapshot) return undefined
+  scheduleDurableGoldenSnapshot(snapshot)
 
-    const details = currentProvider.resolveBooleanEvaluation(
+  const details = currentProvider.resolveBooleanEvaluation(
+    flagKey,
+    defaultValue,
+  )
+  if (details.flagVersion !== undefined && details.variant) {
+    void trackGoldenFlagEvaluation({
       flagKey,
-      defaultValue,
-    )
-    if (details.flagVersion !== undefined && details.variant) {
-      void trackGoldenFlagEvaluation({
-        flagKey,
-        flagVersion: details.flagVersion,
-        variant: details.variant,
-        reason: details.reason,
-        snapshotVersion: snapshot.snapshotVersion,
-        environment: snapshot.environment,
-      })
-    }
-    return {
-      value: details.value,
-      snapshotVersion: snapshot.snapshotVersion,
       flagVersion: details.flagVersion,
       variant: details.variant,
       reason: details.reason,
-    }
+      snapshotVersion: snapshot.snapshotVersion,
+      environment: snapshot.environment,
+    })
+  }
+  return {
+    value: details.value,
+    snapshotVersion: snapshot.snapshotVersion,
+    flagVersion: details.flagVersion,
+    variant: details.variant,
+    reason: details.reason,
+  }
 }
 
 /** Resolves only from a fresh snapshot; no remote request happens per flag check. */
