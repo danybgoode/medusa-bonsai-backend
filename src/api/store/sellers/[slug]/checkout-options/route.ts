@@ -33,6 +33,7 @@ import { buildDeliveryCatalog, type PickupSpot } from '../../../_utils/delivery-
 import { readSellerOperatingMarket } from '../../../../../lib/seller-market'
 import { isEnabled } from '../../../../../lib/flags'
 import { correosGate } from '../../../../../lib/correos-gate'
+import { sellerRowEnforcement } from '../../../../../lib/seller-status'
 
 function processingLabel(value: unknown): string | null {
   const labels: Record<string, string> = {
@@ -76,7 +77,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     const [byId] = await sellerService.listSellers({ id: slug } as any, { take: 1 })
     seller = byId
   }
-  if (!seller) {
+  const visibility = sellerRowEnforcement(seller)
+  if (!seller || !visibility.present || !visibility.admits) {
     return res.status(404).json({ message: `Seller '${slug}' not found` })
   }
 

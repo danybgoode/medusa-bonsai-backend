@@ -16,6 +16,7 @@ import { IPromotionModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
+import { sellerRowEnforcement } from '../../../../../lib/seller-status'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
@@ -26,7 +27,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     const [byId] = await sellerService.listSellers({ id: slug } as never, { take: 1 })
     seller = byId
   }
-  if (!seller) {
+  const visibility = sellerRowEnforcement(seller)
+  if (!seller || !visibility.present || !visibility.admits) {
     return res.status(404).json({ valid: false, message: `Seller '${slug}' not found` })
   }
 

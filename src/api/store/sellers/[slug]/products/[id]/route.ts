@@ -5,6 +5,7 @@ import { requireSellerOperatingMarket } from '../../../../../../lib/seller-marke
 import { isHiddenCatalogProduct } from '../../../../_utils/support'
 import { resolveSellerProductIds } from '../../../../_utils/seller-catalog-query'
 import { toListingShape, toSellerShape } from '../../../../_utils/listing'
+import { sellerRowEnforcement } from '../../../../../../lib/seller-status'
 
 /**
  * Owned-shop PDP. Ownership + publish state are the visibility boundary; marketplace
@@ -14,7 +15,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const { slug, id } = req.params
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const [seller] = await sellerService.listSellers({ slug })
-  if (!seller) return res.status(404).json({ message: 'Listing not found' })
+  const visibility = sellerRowEnforcement(seller)
+  if (!seller || !visibility.present || !visibility.admits) return res.status(404).json({ message: 'Listing not found' })
 
   let market
   try {

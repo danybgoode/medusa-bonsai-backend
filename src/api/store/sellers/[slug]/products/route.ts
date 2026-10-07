@@ -5,6 +5,7 @@ import { isHiddenCatalogProduct } from '../../../_utils/support'
 import { stripPrivateVariantMetadata, toSellerShape } from '../../../_utils/listing'
 import { requireSellerOperatingMarket } from '../../../../../lib/seller-market'
 import { resolveSellerProductIds } from '../../../_utils/seller-catalog-query'
+import { sellerRowEnforcement } from '../../../../../lib/seller-status'
 
 // GET /store/sellers/:slug/products — all active products for a seller storefront
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -12,7 +13,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const { slug } = req.params
 
   const [seller] = await sellerService.listSellers({ slug })
-  if (!seller) {
+  const visibility = sellerRowEnforcement(seller)
+  if (!seller || !visibility.present || !visibility.admits) {
     return res.status(404).json({ message: `Seller '${slug}' not found` })
   }
   let market
