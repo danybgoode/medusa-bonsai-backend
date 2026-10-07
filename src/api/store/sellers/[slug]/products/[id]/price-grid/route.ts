@@ -6,6 +6,7 @@ import { requireSellerOperatingMarket } from '../../../../../../../lib/seller-ma
 import { buildPriceGrid } from '../../../../../_utils/price-grid'
 import { isHiddenCatalogProduct } from '../../../../../_utils/support'
 import { resolveSellerProductIds } from '../../../../../_utils/seller-catalog-query'
+import { sellerRowEnforcement } from '../../../../../../../lib/seller-status'
 
 /**
  * Owned-shop price ladder. It mirrors the owned PDP's authorization and derives its
@@ -15,7 +16,8 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const { slug, id } = req.params
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const [seller] = await sellerService.listSellers({ slug })
-  if (!seller) return res.status(404).json({ message: 'Listing not found' })
+  const visibility = sellerRowEnforcement(seller)
+  if (!seller || !visibility.present || !visibility.admits) return res.status(404).json({ message: 'Listing not found' })
 
   let market
   try {

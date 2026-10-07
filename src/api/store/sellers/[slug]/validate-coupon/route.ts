@@ -16,13 +16,15 @@ import { IPromotionModuleService } from '@medusajs/framework/types'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
 import { resolveCouponForCheckout, couponErrorMessage } from '../../../_utils/coupons'
+import { sellerRowEnforcement } from '../../../../../lib/seller-status'
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const sellerService: SellerModuleService = req.scope.resolve(SELLER_MODULE)
   const { slug } = req.params
 
   let [seller] = await sellerService.listSellers({ slug } as never, { take: 1 })
-  if (!seller) {
+  const visibility = sellerRowEnforcement(seller)
+  if (!seller || !visibility.present || !visibility.admits) {
     const [byId] = await sellerService.listSellers({ id: slug } as never, { take: 1 })
     seller = byId
   }

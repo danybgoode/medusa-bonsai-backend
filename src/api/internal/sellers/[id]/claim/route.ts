@@ -17,6 +17,7 @@
 import { MedusaRequest, MedusaResponse } from '@medusajs/framework/http'
 import { SELLER_MODULE } from '../../../../../modules/seller'
 import SellerModuleService from '../../../../../modules/seller/service'
+import { sellerRowEnforcement } from '../../../../../lib/seller-status'
 
 function unauthorized(req: MedusaRequest): boolean {
   const expected = process.env.MEDUSA_INTERNAL_SECRET
@@ -41,10 +42,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   if (seller.clerk_user_id === clerkUserId) {
     // Already claimed by this user — idempotent retry.
-    return res.json({ seller, claimed: true })
+    // The caller sends a merchant confirmation only for a NEW transfer. The
+    // original `claimed: true` describes both this retry and the first write,
+    // so it cannot safely drive that one-time side effect.
+    return res.json({ seller, claimed: true, newly_claimed: false })
   }
   if (seller.clerk_user_id) {
     return res.status(409).json({ message: 'Seller already claimed by another user' })
+  }
+  const visibility = sellerRowEnforcement(seller)
+  if (!visibility.present || !visibility.admits) {
+    return res.status(409).json({ message: 'Seller is not active' })
   }
 
   // clerk_user_id is unique across sellers — a user with an existing shop
@@ -62,5 +70,5 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     source: 'claimed',
   })
 
-  res.json({ seller: updated, claimed: true })
+  res.json({ seller: updated, claimed: true, newly_claimed: true })
 }

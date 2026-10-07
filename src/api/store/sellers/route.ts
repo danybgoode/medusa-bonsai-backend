@@ -11,7 +11,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const offset = parseInt(req.query.offset as string ?? '0')
 
   const [sellers, count] = await sellerService.listAndCountSellers(
-    { verified: true },
+    { verified: true, status: 'active' },
     { take: limit, skip: offset, order: { created_at: 'DESC' } }
   )
 
