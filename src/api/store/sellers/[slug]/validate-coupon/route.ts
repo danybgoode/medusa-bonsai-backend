@@ -28,7 +28,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     seller = byId
   }
   const visibility = sellerRowEnforcement(seller)
-  if (!visibility.present || !visibility.admits) {
+  if (!seller || !visibility.present || !visibility.admits) {
     return res.status(404).json({ valid: false, message: `Seller '${slug}' not found` })
   }
 
