@@ -1,5 +1,7 @@
 import { GET as getDirectory } from '../route'
 import { GET as getProfile } from '../[slug]/route'
+import { GET as getCheckoutOptions } from '../[slug]/checkout-options/route'
+import { GET as getValidateCoupon } from '../[slug]/validate-coupon/route'
 
 function capture() {
   const out: { status: number; body: any } = { status: 200, body: null }
@@ -44,5 +46,22 @@ describe('public seller visibility after a removal pause', () => {
     await getDirectory(req, res)
     expect(filters).toEqual({ verified: true, status: 'active' })
     expect(out.body.sellers).toHaveLength(1)
+  })
+
+  it('hides paused and deleted sellers resolved by id from checkout previews', async () => {
+    for (const status of ['paused', 'deleted', undefined]) {
+      const sellerById = { ...seller, status }
+      const req: any = {
+        params: { slug: seller.id }, query: { code: 'SALE', items_cents: '1000' },
+        scope: { resolve: () => ({
+          listSellers: async (filter: Record<string, string>) => filter.id ? [sellerById] : [],
+        }) },
+      }
+      for (const route of [getCheckoutOptions, getValidateCoupon]) {
+        const { out, res } = capture()
+        await route(req, res)
+        expect(out.status).toBe(404)
+      }
+    }
   })
 })

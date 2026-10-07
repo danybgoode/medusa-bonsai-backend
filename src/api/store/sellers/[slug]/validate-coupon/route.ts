@@ -23,12 +23,12 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const { slug } = req.params
 
   let [seller] = await sellerService.listSellers({ slug } as never, { take: 1 })
-  const visibility = sellerRowEnforcement(seller)
-  if (!seller || !visibility.present || !visibility.admits) {
+  if (!seller) {
     const [byId] = await sellerService.listSellers({ id: slug } as never, { take: 1 })
     seller = byId
   }
-  if (!seller) {
+  const visibility = sellerRowEnforcement(seller)
+  if (!visibility.present || !visibility.admits) {
     return res.status(404).json({ valid: false, message: `Seller '${slug}' not found` })
   }
 

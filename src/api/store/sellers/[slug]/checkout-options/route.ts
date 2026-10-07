@@ -73,12 +73,12 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
   // Resolve by slug, then fall back to id (the frontend may pass either).
   let [seller] = await sellerService.listSellers({ slug } as any, { take: 1 })
-  const visibility = sellerRowEnforcement(seller)
-  if (!seller || !visibility.present || !visibility.admits) {
+  if (!seller) {
     const [byId] = await sellerService.listSellers({ id: slug } as any, { take: 1 })
     seller = byId
   }
-  if (!seller) {
+  const visibility = sellerRowEnforcement(seller)
+  if (!visibility.present || !visibility.admits) {
     return res.status(404).json({ message: `Seller '${slug}' not found` })
   }
 
